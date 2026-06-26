@@ -94,6 +94,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
+| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds the FFmpeg command that preserves delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
 | Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, and posts progress, partial results, and final results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
@@ -277,7 +278,7 @@ flowchart TD
     DynamicImport --> Env["Configure Transformers env\nremote models allowed\nbrowser cache enabled"]
     Env --> FfmpegLoad["Load FFmpeg core and wasm URLs"]
     FfmpegLoad --> WriteInput["Write video into FFmpeg in-memory filesystem"]
-    WriteInput --> FfmpegExec["Run FFmpeg\nextract mono 16 kHz PCM WAV"]
+    WriteInput --> FfmpegExec["Run FFmpeg\npad delayed audio start and extract mono 16 kHz PCM WAV"]
     FfmpegExec --> ReadWav["Read audio.wav"]
     ReadWav --> Decode["Decode RIFF WAV to Float32Array"]
     Decode --> Silence{"RMS >= 0.0008?"}
@@ -442,6 +443,7 @@ Then it configures the Transformers.js environment:
 ```text
 -i input-<timestamp>
 -vn
+-af aresample=async=1:first_pts=0
 -ac 1
 -ar 16000
 -acodec pcm_s16le
@@ -449,7 +451,9 @@ Then it configures the Transformers.js environment:
 audio.wav
 ```
 
-The output is mono, 16 kHz, signed 16-bit PCM WAV. This shape is chosen because Whisper expects audio that can be converted into consistent speech features, and Transformers.js can consume the resulting numeric samples.
+The output is mono, 16 kHz, signed 16-bit PCM WAV. Before encoding it, `aresample=async=1:first_pts=0` reconciles samples with the input audio timestamps and pads the beginning with silence when the audio stream starts after media time zero. This matters because WAV carries sample order rather than the source container's delayed stream start; without padding, speech beginning halfway through a video can become WAV time zero and shift every generated subtitle early.
+
+This behavior follows the official [FFmpeg audio resampler documentation](https://www.ffmpeg.org/ffmpeg-resampler.html), where `async` enables timestamp compensation and `first_pts=0` is specifically documented as padding the beginning with silence when audio starts after video. The bundled FFmpeg.wasm core includes the `aresample` filter.
 
 The worker then:
 
@@ -1187,7 +1191,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/subtitle-utils.test.ts` and `src/tests/transcription-timestamps.test.ts`.
+Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/subtitle-utils.test.ts`, and `src/tests/transcription-timestamps.test.ts`.
 
 They cover:
 
@@ -1222,8 +1226,9 @@ They cover:
 29. Onset-based single-core ownership for boundary-crossing chunks.
 30. Rejection of long left-overlap chunks that would place subtitles into earlier silence.
 31. Suppression of guessed window timing when a model returns text without usable timestamp chunks.
+32. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
 
-The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The tests focus on deterministic audio-extraction arguments, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
 ## Keyboard Shortcuts
 
@@ -1277,7 +1282,7 @@ Other natural extension points:
 flowchart TD
     A["User selects video"] --> B["Browser validates file and creates object URL"]
     B --> C["User starts local transcription"]
-    C --> D["Worker extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
+    C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
     D --> E["Worker loads Whisper through Transformers.js"]
     E --> F["Worker splits decoded audio into overlapped windows"]
     F --> G["Whisper returns text and timestamps"]

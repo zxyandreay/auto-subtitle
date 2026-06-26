@@ -94,7 +94,7 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 1. The user selects a local video file.
 2. The app creates a temporary object URL for preview.
 3. A Web Worker loads FFmpeg.wasm and Transformers.js.
-4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio.
+4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
 5. Transformers.js loads the selected Whisper model.
 6. The ASR pipeline requests timestamped output.
 7. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.

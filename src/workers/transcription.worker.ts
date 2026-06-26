@@ -3,6 +3,7 @@ import { fetchFile } from '@ffmpeg/util'
 import coreUrl from '@ffmpeg/core?url'
 import wasmUrl from '@ffmpeg/core/wasm?url'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
+import { buildAudioExtractionArgs } from '../transcription/audioExtraction'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
 import type { TranscriptionSettings, TranscriptionStage, WorkerEvent, WorkerRequest } from '../transcription/types'
 
@@ -322,20 +323,7 @@ async function extractAudio(file: File): Promise<{ samples: Float32Array; sample
     await ffmpeg.writeFile(inputName, await fetchFile(file))
 
     assertNotCancelled()
-    const exitCode = await ffmpeg.exec([
-      '-i',
-      inputName,
-      '-vn',
-      '-ac',
-      '1',
-      '-ar',
-      '16000',
-      '-acodec',
-      'pcm_s16le',
-      '-f',
-      'wav',
-      outputName,
-    ])
+    const exitCode = await ffmpeg.exec(buildAudioExtractionArgs(inputName, outputName))
 
     if (exitCode !== 0) {
       throw new Error(`FFmpeg exited with code ${exitCode}.`)
