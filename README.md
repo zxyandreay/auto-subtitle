@@ -65,7 +65,7 @@ The launcher:
 - starts Vite on `http://127.0.0.1:5173`
 - opens the app in the default browser
 - shows local transcription progress and generated caption text in the terminal
-- stops the local server when you press Enter or close the launcher terminal
+- stops the Vite process tree when you press Enter, lose console input, or close the launcher terminal
 - keeps the terminal open if an error occurs
 
 ## Manual Commands
@@ -97,7 +97,7 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio.
 5. Transformers.js loads the selected Whisper model.
 6. The ASR pipeline requests timestamped output.
-7. Raw model chunks are normalized onto the video timeline without clipping boundary-crossing speech or recreating left-overlap text at a later timestamp.
+7. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.
 8. After each completed audio window, partial generated subtitles are formatted and shown immediately in the subtitle editor.
 9. The user can preview, seek, and edit those live subtitles while transcription continues.
 10. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, smooths abrupt cuts, chains short safe gaps, splits long captions, and applies two-line wrapping.

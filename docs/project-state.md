@@ -288,7 +288,7 @@ flowchart TD
     Loop -->|Yes| Asr["Run Whisper ASR on window"]
     Asr --> TimestampFallback{"Word timestamps supported?"}
     TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
-    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core without clipping timestamps"]
+    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core from speech onset"]
     SegmentRetry --> Normalize
     Normalize --> PartialPreview["Post cumulative partial result to app"]
     PartialPreview --> CaptionLog["Post terminal caption events in dev"]
@@ -566,8 +566,10 @@ flowchart TD
     Samples --> Model["Run Whisper on slice"]
     Model --> Chunks["Timestamp chunks relative to slice"]
     Chunks --> Offset["Add sliceStartTime"]
-    Offset --> Clip["Clip to coreStartTime and coreEndTime"]
-    Clip --> Round["Round to milliseconds"]
+    Offset --> Owner{"Chunk start belongs to this core?"}
+    Owner -->|No| Discard["Discard neighboring overlap chunk"]
+    Owner -->|Yes| Preserve["Preserve absolute ASR timestamps"]
+    Preserve --> Round["Round to milliseconds"]
     Round --> Segment["RawTranscriptionSegment"]
 ```
 
@@ -577,12 +579,12 @@ Windowing details:
 2. The configured overlap is bounded to no more than one quarter of the core window.
 3. Each window has a core region and optional surrounding overlap.
 4. The ASR result is converted back to the full-video timeline by adding `sliceStartTime`.
-5. A chunk's timestamp midpoint assigns it to exactly one core region, preventing adjacent windows from owning the same boundary chunk.
-6. Owned chunks retain their full absolute ASR start and end times, including a start just before the core boundary.
-7. Valid chunks that belong only to a neighboring core are discarded without recreating the window's fallback text at the current core start.
+5. A chunk's absolute start time assigns it to the core where the recognized speech begins, preventing a later window from pulling a long overlap chunk into earlier silence.
+6. Owned chunks retain their full absolute ASR start and end times, so speech crossing the right boundary is not delayed to the next core start.
+7. Valid chunks that begin in a neighboring core are discarded without recreating the window's fallback text.
 8. Times are rounded to three decimal places.
 
-This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper context near boundaries, while single-core ownership limits duplicates without moving a phrase's start forward to the boundary.
+This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper recognition context, while onset-based ownership prevents both late boundary clipping and early captions inherited from the left overlap.
 
 ## Timestamp Modes And Fallback
 
@@ -612,9 +614,9 @@ The worker receives an unknown result shape from the pipeline and normalizes def
    - `text` as a string
 5. Invalid chunks are dropped.
 6. Valid chunks are offset onto the full-video timeline.
-7. Boundary-crossing chunks are assigned to one core by timestamp midpoint, but their original absolute in/out times are preserved.
-8. If the model returned no timestamp chunks, fallback text is assigned to the core interval.
-9. If valid chunks existed but all belong to an adjacent overlap, no fallback caption is created. This prevents earlier overlap speech from reappearing late at the current core start.
+7. Boundary-crossing chunks are assigned to the core containing their absolute start time, and their original absolute in/out times are preserved.
+8. If the model returned text without usable timestamp chunks for a window, the text remains available in the plain transcript but no guessed subtitle interval is created.
+9. If valid chunks begin in an adjacent overlap, no fallback caption is created. This prevents neighboring speech from appearing early or being recreated late.
 
 When many chunks look word-level, the worker combines them into a single segment with a `words` array. Later formatting can split those words into readable subtitle entries if word timestamps are enabled.
 
@@ -810,8 +812,9 @@ flowchart TD
     OpenBrowser --> Ps1["Run scripts/local-launch.ps1"]
     Ps1 --> Vite["Start Vite through node"]
     Vite --> Watchdog["Start hidden watchdog process"]
-    Watchdog --> Wait{"Enter pressed or Vite exits?"}
+    Watchdog --> Wait{"Enter pressed, terminal host exits, or Vite exits?"}
     Wait -->|Enter| StopTree["Stop Vite process tree"]
+    Wait -->|Terminal host exits| StopTree
     Wait -->|Vite exits| ExitCode["Return Vite exit code"]
     StopTree --> Done([Done])
     ExitCode --> Done
@@ -830,12 +833,13 @@ flowchart TD
 
 `scripts/local-launch.ps1` starts Vite directly through Node and the local Vite CLI. It uses a watchdog mode:
 
-1. The main PowerShell process starts the Vite process.
-2. It starts a hidden watchdog PowerShell process with the main process id and Vite process id.
-3. If the terminal session closes and the main launcher process disappears, the watchdog stops the Vite process tree.
-4. If the user presses Enter, the main launcher stops the Vite process tree.
+1. The main PowerShell process identifies its terminal-host parent and starts the Vite process.
+2. It starts a hidden watchdog with the terminal-host, main launcher, and Vite process ids.
+3. The foreground loop stops Vite when Enter is pressed, console input closes, the terminal-host process exits, or Vite exits itself.
+4. Independently, the watchdog stops the Vite process tree when either the terminal host or main launcher disappears.
+5. If the terminal host disappeared while the main launcher survived without a console, the watchdog also terminates that stranded launcher process.
 
-This prevents orphaned local dev server sessions when the terminal is closed.
+This prevents orphaned local dev server and launcher sessions when the terminal is closed. The lifecycle is manually verified by starting `local-launch.bat`, confirming port `5173` is listening, terminating the hosting `cmd.exe`, and confirming the listener and launcher helpers both disappear.
 
 ## Browser Capability Detection
 
@@ -1214,9 +1218,10 @@ They cover:
 25. Valid project JSON round trip.
 26. Malformed project rejection.
 27. Suppression of late fallback captions for left-overlap-only ASR chunks.
-28. Preservation of absolute timestamps for boundary-crossing ASR chunks.
-29. Single-core ownership for boundary-crossing chunks.
-30. Core-timed fallback behavior when a model returns no timestamp chunks.
+28. Preservation of absolute timestamps when speech begins before a core's right boundary.
+29. Onset-based single-core ownership for boundary-crossing chunks.
+30. Rejection of long left-overlap chunks that would place subtitles into earlier silence.
+31. Suppression of guessed window timing when a model returns text without usable timestamp chunks.
 
 The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1240,7 +1245,7 @@ The tests focus on deterministic subtitle utilities and generated-caption post-p
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
 7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker uses overlap context, core clipping, and deterministic duplicate cleanup to reduce repeated captions, but manual review is still expected.
+8. Chunk-boundary quality can vary. The worker uses overlap context, onset-based core ownership, and deterministic duplicate cleanup to reduce mistimed or repeated captions, but manual review is still expected.
 9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
