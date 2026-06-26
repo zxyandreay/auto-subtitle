@@ -3,8 +3,6 @@ import { fetchFile } from '@ffmpeg/util'
 import coreUrl from '@ffmpeg/core?url'
 import wasmUrl from '@ffmpeg/core/wasm?url'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
-import { buildAudioExtractionArgs } from '../transcription/audioExtraction'
-import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
 import type { TranscriptionSettings, TranscriptionStage, WorkerEvent, WorkerRequest } from '../transcription/types'
 
 let cancelled = false
@@ -36,6 +34,11 @@ type TranscriptionWindow = {
   sliceStartTime: number
   coreStartTime: number
   coreEndTime: number
+}
+
+type NormalizedAsrResult = {
+  segments: RawTranscriptionSegment[]
+  text: string
 }
 
 type TimestampAttempt = {
@@ -323,7 +326,20 @@ async function extractAudio(file: File): Promise<{ samples: Float32Array; sample
     await ffmpeg.writeFile(inputName, await fetchFile(file))
 
     assertNotCancelled()
-    const exitCode = await ffmpeg.exec(buildAudioExtractionArgs(inputName, outputName))
+    const exitCode = await ffmpeg.exec([
+      '-i',
+      inputName,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-acodec',
+      'pcm_s16le',
+      '-f',
+      'wav',
+      outputName,
+    ])
 
     if (exitCode !== 0) {
       throw new Error(`FFmpeg exited with code ${exitCode}.`)
@@ -392,6 +408,138 @@ function decodePcmWav(bytes: Uint8Array): { samples: Float32Array; sampleRate: n
   }
 
   return { samples, sampleRate }
+}
+
+function normalizeAsrResult(
+  result: unknown,
+  options: {
+    offsetSeconds: number
+    coreStartTime: number
+    coreEndTime: number
+  },
+): NormalizedAsrResult {
+  const normalizedResult = Array.isArray(result) ? result[0] : result
+  const chunks = isRecord(normalizedResult) ? normalizedResult.chunks : undefined
+  const text = isRecord(normalizedResult) && typeof normalizedResult.text === 'string' ? normalizedResult.text.trim() : ''
+
+  return {
+    segments: normalizeAsrChunks(chunks, text, options),
+    text,
+  }
+}
+
+function normalizeAsrChunks(
+  chunks: unknown,
+  fallbackText: string,
+  options?: {
+    offsetSeconds?: number
+    coreStartTime?: number
+    coreEndTime?: number
+  },
+): RawTranscriptionSegment[] {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return fallbackText.trim()
+      ? [
+          {
+            startTime: options?.coreStartTime ?? 0,
+            endTime: options?.coreEndTime ?? Math.max(1, fallbackText.length / 14),
+            text: fallbackText,
+          },
+        ]
+      : []
+  }
+
+  const normalized = chunks
+    .map((chunk) => normalizeChunk(chunk))
+    .filter((chunk): chunk is RawTranscriptionSegment => chunk !== null)
+    .map((chunk) => placeChunkOnTimeline(chunk, options))
+    .filter((chunk): chunk is RawTranscriptionSegment => chunk !== null)
+
+  if (normalized.length === 0 && fallbackText.trim()) {
+    return [
+      {
+        startTime: options?.coreStartTime ?? 0,
+        endTime: options?.coreEndTime ?? Math.max(1, fallbackText.length / 14),
+        text: fallbackText,
+      },
+    ]
+  }
+
+  const looksWordLevel = normalized.length > 3 && normalized.every((chunk) => chunk.text.split(/\s+/).length <= 2)
+  if (!looksWordLevel) {
+    return normalized
+  }
+
+  return [
+    {
+      startTime: normalized[0].startTime,
+      endTime: normalized.at(-1)!.endTime,
+      text: normalized.map((chunk) => chunk.text).join(' '),
+      words: normalized.map((chunk) => ({
+        text: chunk.text.trim(),
+        startTime: chunk.startTime,
+        endTime: chunk.endTime,
+      })),
+    },
+  ]
+}
+
+function placeChunkOnTimeline(
+  chunk: RawTranscriptionSegment,
+  options?: {
+    offsetSeconds?: number
+    coreStartTime?: number
+    coreEndTime?: number
+  },
+): RawTranscriptionSegment | null {
+  const offset = options?.offsetSeconds ?? 0
+  const absoluteStart = chunk.startTime + offset
+  const absoluteEnd = chunk.endTime + offset
+  const coreStart = options?.coreStartTime
+  const coreEnd = options?.coreEndTime
+
+  if (coreStart !== undefined && absoluteEnd <= coreStart + 0.02) {
+    return null
+  }
+
+  if (coreEnd !== undefined && absoluteStart >= coreEnd - 0.02) {
+    return null
+  }
+
+  const startTime = roundSeconds(coreStart === undefined ? absoluteStart : Math.max(coreStart, absoluteStart))
+  const endTime = roundSeconds(coreEnd === undefined ? absoluteEnd : Math.min(coreEnd, absoluteEnd))
+  if (endTime <= startTime) {
+    return null
+  }
+
+  return {
+    ...chunk,
+    startTime,
+    endTime,
+  }
+}
+
+function normalizeChunk(chunk: unknown): RawTranscriptionSegment | null {
+  if (typeof chunk !== 'object' || chunk === null) {
+    return null
+  }
+
+  const record = chunk as { timestamp?: unknown; text?: unknown }
+  if (!Array.isArray(record.timestamp) || typeof record.text !== 'string') {
+    return null
+  }
+
+  const start = Number(record.timestamp[0])
+  const end = Number(record.timestamp[1])
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return null
+  }
+
+  return {
+    startTime: start,
+    endTime: end,
+    text: record.text.trim(),
+  }
 }
 
 function getDownloadProgress(data: unknown): { message: string; progress?: number } | null {
@@ -558,6 +706,14 @@ function clampProgress(value: number): number {
   }
 
   return Math.max(0, Math.min(1, value))
+}
+
+function roundSeconds(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 function createJobId(): string {

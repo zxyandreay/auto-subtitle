@@ -94,9 +94,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
-| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds the FFmpeg command that preserves delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
-| Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
-| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, and posts progress, partial results, and final results. |
+| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, normalizes timestamps, posts progress, partial results, and final results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
 | Project storage | `src/project/storage.ts` | Stores and restores project autosave records in IndexedDB. |
 | Vite dev server | `vite.config.ts` | Serves the app, applies cross-origin isolation headers, excludes heavy WASM dependencies from optimization, exposes terminal progress middleware in dev. |
@@ -278,7 +276,7 @@ flowchart TD
     DynamicImport --> Env["Configure Transformers env\nremote models allowed\nbrowser cache enabled"]
     Env --> FfmpegLoad["Load FFmpeg core and wasm URLs"]
     FfmpegLoad --> WriteInput["Write video into FFmpeg in-memory filesystem"]
-    WriteInput --> FfmpegExec["Run FFmpeg\npad delayed audio start and extract mono 16 kHz PCM WAV"]
+    WriteInput --> FfmpegExec["Run FFmpeg\nextract mono 16 kHz PCM WAV"]
     FfmpegExec --> ReadWav["Read audio.wav"]
     ReadWav --> Decode["Decode RIFF WAV to Float32Array"]
     Decode --> Silence{"RMS >= 0.0008?"}
@@ -289,7 +287,7 @@ flowchart TD
     Loop -->|Yes| Asr["Run Whisper ASR on window"]
     Asr --> TimestampFallback{"Word timestamps supported?"}
     TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
-    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core from speech onset"]
+    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline"]
     SegmentRetry --> Normalize
     Normalize --> PartialPreview["Post cumulative partial result to app"]
     PartialPreview --> CaptionLog["Post terminal caption events in dev"]
@@ -443,7 +441,6 @@ Then it configures the Transformers.js environment:
 ```text
 -i input-<timestamp>
 -vn
--af aresample=async=1:first_pts=0
 -ac 1
 -ar 16000
 -acodec pcm_s16le
@@ -451,9 +448,7 @@ Then it configures the Transformers.js environment:
 audio.wav
 ```
 
-The output is mono, 16 kHz, signed 16-bit PCM WAV. Before encoding it, `aresample=async=1:first_pts=0` reconciles samples with the input audio timestamps and pads the beginning with silence when the audio stream starts after media time zero. This matters because WAV carries sample order rather than the source container's delayed stream start; without padding, speech beginning halfway through a video can become WAV time zero and shift every generated subtitle early.
-
-This behavior follows the official [FFmpeg audio resampler documentation](https://www.ffmpeg.org/ffmpeg-resampler.html), where `async` enables timestamp compensation and `first_pts=0` is specifically documented as padding the beginning with silence when audio starts after video. The bundled FFmpeg.wasm core includes the `aresample` filter.
+The output is mono, 16 kHz, signed 16-bit PCM WAV. This shape is chosen because Whisper expects audio that can be converted into consistent speech features, and Transformers.js can consume the resulting numeric samples.
 
 The worker then:
 
@@ -570,10 +565,8 @@ flowchart TD
     Samples --> Model["Run Whisper on slice"]
     Model --> Chunks["Timestamp chunks relative to slice"]
     Chunks --> Offset["Add sliceStartTime"]
-    Offset --> Owner{"Chunk start belongs to this core?"}
-    Owner -->|No| Discard["Discard neighboring overlap chunk"]
-    Owner -->|Yes| Preserve["Preserve absolute ASR timestamps"]
-    Preserve --> Round["Round to milliseconds"]
+    Offset --> Clip["Clip to coreStartTime and coreEndTime"]
+    Clip --> Round["Round to milliseconds"]
     Round --> Segment["RawTranscriptionSegment"]
 ```
 
@@ -583,12 +576,11 @@ Windowing details:
 2. The configured overlap is bounded to no more than one quarter of the core window.
 3. Each window has a core region and optional surrounding overlap.
 4. The ASR result is converted back to the full-video timeline by adding `sliceStartTime`.
-5. A chunk's absolute start time assigns it to the core where the recognized speech begins, preventing a later window from pulling a long overlap chunk into earlier silence.
-6. Owned chunks retain their full absolute ASR start and end times, so speech crossing the right boundary is not delayed to the next core start.
-7. Valid chunks that begin in a neighboring core are discarded without recreating the window's fallback text.
-8. Times are rounded to three decimal places.
+5. Chunks that only belong to the neighboring overlap are discarded.
+6. Remaining chunks are clipped to the core window.
+7. Times are rounded to three decimal places.
 
-This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper recognition context, while onset-based ownership prevents both late boundary clipping and early captions inherited from the left overlap.
+This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper context near boundaries, while core clipping limits duplicate subtitles around window edges.
 
 ## Timestamp Modes And Fallback
 
@@ -617,10 +609,8 @@ The worker receives an unknown result shape from the pipeline and normalizes def
    - `end > start`
    - `text` as a string
 5. Invalid chunks are dropped.
-6. Valid chunks are offset onto the full-video timeline.
-7. Boundary-crossing chunks are assigned to the core containing their absolute start time, and their original absolute in/out times are preserved.
-8. If the model returned text without usable timestamp chunks for a window, the text remains available in the plain transcript but no guessed subtitle interval is created.
-9. If valid chunks begin in an adjacent overlap, no fallback caption is created. This prevents neighboring speech from appearing early or being recreated late.
+6. Valid chunks are placed on the full timeline and clipped to the core window.
+7. If no valid chunks remain but fallback text exists, a fallback segment is created for the core window.
 
 When many chunks look word-level, the worker combines them into a single segment with a `words` array. Later formatting can split those words into readable subtitle entries if word timestamps are enabled.
 
@@ -641,8 +631,7 @@ flowchart TD
     WordSplit --> ReadingSpeed["Improve duration and reading speed"]
     SegmentSplit --> ReadingSpeed
     Keep --> ReadingSpeed
-    ReadingSpeed --> SmoothCuts["Merge abrupt adjacent captions when still readable"]
-    SmoothCuts --> Overlap["Trim overlaps and chain short safe gaps"]
+    ReadingSpeed --> Overlap["Trim or shift generated captions to avoid overlaps and tiny flicker gaps"]
     Overlap --> Lines["Apply scored two-line wrapping"]
     Lines --> MakeEntries["Create SubtitleEntry records"]
     MakeEntries --> Sort["Sort and renumber"]
@@ -660,14 +649,6 @@ Formatting preferences:
 | `gapBetweenSubtitles` | `0.04` | Preventing back-to-back overlap after normalization. |
 | `useWordTimestamps` | `false` | Choosing word-level grouping when supported. |
 
-Best-practice inputs used for generated subtitles:
-
-1. [Netflix Timed Text Style Guide: Subtitle Timing Guidelines](https://partnerhelp.netflixstudios.com/hc/en-us/articles/360051554394-Timed-Text-Style-Guide-Subtitle-Timing-Guidelines) uses a minimum subtitle duration of 5/6 second, allows longer maximum display time, recommends a small technical gap, and advises closing gaps below about half a second instead of leaving distracting flicker.
-2. [BBC Subtitle Guidelines](https://bbc.github.io/subtitle-guidelines/) emphasize subtitle breaks that follow linguistic sense, complete clauses, and natural phrase units.
-3. [DCMP Captioning Key](https://dcmp.org/learn/captioningkey) frames synchronization and readability as core caption quality requirements, meaning text should appear with the matching audio and remain readable long enough for viewers.
-
-These sources are applied conservatively in Auto Subtitle. The app still honors the user-facing formatting preferences for generated captions, but the generated-only optimizer now treats the professional 5/6-second minimum as a floor when safe, extends very short captions before export, and reduces sub-half-second gaps by extending the previous caption rather than pulling the next caption too early.
-
 Text formatting behavior:
 
 1. Normalizes CRLF to LF.
@@ -675,11 +656,9 @@ Text formatting behavior:
 3. Removes empty lines.
 4. Removes near-duplicate generated captions from overlapping audio windows when adjacent text and timing are highly similar.
 5. Splits long generated captions first at sentence punctuation, then softer punctuation, then natural phrase boundaries.
-6. Penalizes word-timed cuts that would create a very short phrase flash, even when punctuation exists.
-7. Merges abrupt adjacent generated captions when the combined caption remains within line, duration, and reading-speed limits.
-8. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
-9. Limits final generated caption display to at most two visible lines.
-10. Attempts to balance a short second line by moving a final word when useful.
+6. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
+7. Limits final generated caption display to at most two visible lines.
+8. Attempts to balance a short second line by moving a final word when useful.
 
 Timing formatting behavior:
 
@@ -689,12 +668,11 @@ Timing formatting behavior:
 4. When usable word timestamps exist, generated caption ends prefer the last word end with about 0.18 seconds of tail padding.
 5. Segment-level timing remains the fallback when word timestamps are absent or incomplete.
 6. Generated captions target a maximum reading speed of about 21 characters per second.
-7. Very short generated captions are extended toward the app minimum duration and the professional 5/6-second floor when safe.
-8. Dense generated captions are extended when safe, then split if they still exceed readability limits.
-9. Entries are sorted by start time and end time.
-10. Indices are recalculated from 1.
-11. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
-12. Safe gaps below about 0.5 seconds are chained by extending the previous caption where possible, reducing visible flicker without starting the next word-timed caption early.
+7. Dense generated captions are extended when safe, then split if they still exceed readability limits.
+8. Entries are sorted by start time and end time.
+9. Indices are recalculated from 1.
+10. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
+11. Tiny safe gaps are chained to reduce visible flicker.
 
 Generated-caption helper responsibilities:
 
@@ -704,7 +682,6 @@ Generated-caption helper responsibilities:
 | `calculateCharactersPerSecond` | Measures readable text density over caption duration. |
 | `calculateReadableDuration` | Computes a deterministic readable duration target from text length and formatting preferences. |
 | `needsSplitForReadability` | Decides whether a generated caption needs timing extension or segmentation. |
-| `smoothAbruptGeneratedCaptions` | Merges short or too-fast adjacent generated captions when the result stays readable. |
 | `normalizeForDuplicateComparison` | Canonicalizes generated text for conservative duplicate detection. |
 | `tokenSimilarity` | Compares adjacent generated captions for overlap-window duplicate cleanup. |
 | `dedupeOverlappingSegments` | Removes or safely merges adjacent duplicate generated segments near chunk boundaries. |
@@ -1191,7 +1168,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/subtitle-utils.test.ts`, and `src/tests/transcription-timestamps.test.ts`.
+Current tests live in `src/tests/subtitle-utils.test.ts`.
 
 They cover:
 
@@ -1211,24 +1188,15 @@ They cover:
 14. Generated-caption line breaking that avoids unsafe phrase splits.
 15. Generated-caption punctuation splitting.
 16. Generated-caption reading-speed protection.
-17. Generated-caption extension of very short captions toward readable minimum duration.
-18. Generated-caption word-timestamp sync.
-19. Generated-caption avoidance of abrupt word-timed cuts after very short phrases.
-20. Generated-caption chaining of short safe gaps.
-21. Generated-caption duplicate cleanup near chunk boundaries.
-22. Live transcription preview replacement of pre-existing base subtitles.
-23. Live transcription preview preservation of edited streamed rows.
-24. Live transcription preview preservation of deleted streamed rows.
-25. Valid project JSON round trip.
-26. Malformed project rejection.
-27. Suppression of late fallback captions for left-overlap-only ASR chunks.
-28. Preservation of absolute timestamps when speech begins before a core's right boundary.
-29. Onset-based single-core ownership for boundary-crossing chunks.
-30. Rejection of long left-overlap chunks that would place subtitles into earlier silence.
-31. Suppression of guessed window timing when a model returns text without usable timestamp chunks.
-32. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
+17. Generated-caption word-timestamp sync.
+18. Generated-caption duplicate cleanup near chunk boundaries.
+19. Live transcription preview replacement of pre-existing base subtitles.
+20. Live transcription preview preservation of edited streamed rows.
+21. Live transcription preview preservation of deleted streamed rows.
+22. Valid project JSON round trip.
+23. Malformed project rejection.
 
-The tests focus on deterministic audio-extraction arguments, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
 ## Keyboard Shortcuts
 
@@ -1250,7 +1218,7 @@ The tests focus on deterministic audio-extraction arguments, subtitle utilities,
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
 7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker uses overlap context, onset-based core ownership, and deterministic duplicate cleanup to reduce mistimed or repeated captions, but manual review is still expected.
+8. Chunk-boundary quality can vary. The worker uses overlap context, core clipping, and deterministic duplicate cleanup to reduce repeated captions, but manual review is still expected.
 9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
@@ -1282,7 +1250,7 @@ Other natural extension points:
 flowchart TD
     A["User selects video"] --> B["Browser validates file and creates object URL"]
     B --> C["User starts local transcription"]
-    C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
+    C --> D["Worker extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
     D --> E["Worker loads Whisper through Transformers.js"]
     E --> F["Worker splits decoded audio into overlapped windows"]
     F --> G["Whisper returns text and timestamps"]
