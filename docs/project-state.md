@@ -604,16 +604,21 @@ When many chunks look word-level, the worker combines them into a single segment
 
 ```mermaid
 flowchart TD
-    Raw["RawTranscriptionSegment[]"] --> Clean["Normalize text"]
-    Clean --> WordMode{"Segment has words and word timestamps enabled?"}
-    WordMode -->|Yes| GroupWords["Group words by length, duration, and pauses"]
-    WordMode -->|No| SplitLong["Split long text or long duration segments"]
-    GroupWords --> MakeEntries["Create SubtitleEntry records"]
-    SplitLong --> Lines["Split text into one or two readable lines"]
-    Lines --> MakeEntries
-    MakeEntries --> RemoveEmpty["Remove empty entries"]
-    RemoveEmpty --> NormalizeOverlap["Normalize overlaps and minimum gaps"]
-    NormalizeOverlap --> Sort["Sort and renumber"]
+    Raw["RawTranscriptionSegment[]"] --> Normalize["Normalize text, sort, and clean invalid timing"]
+    Normalize --> WordTiming["Use word timestamps for in/out points when available"]
+    WordTiming --> Dedupe["Remove conservative overlap-window duplicates"]
+    Dedupe --> Extend["Extend short dense captions when safe"]
+    Extend --> Split{"Needs readability split?"}
+    Split -->|Word timestamps| WordSplit["Split by word timing, pauses, punctuation, and length"]
+    Split -->|Segment timestamps| SegmentSplit["Split by punctuation, phrase boundaries, and proportional timing"]
+    Split -->|No| Keep["Keep caption"]
+    WordSplit --> ReadingSpeed["Improve duration and reading speed"]
+    SegmentSplit --> ReadingSpeed
+    Keep --> ReadingSpeed
+    ReadingSpeed --> Overlap["Trim or shift generated captions to avoid overlaps and tiny flicker gaps"]
+    Overlap --> Lines["Apply scored two-line wrapping"]
+    Lines --> MakeEntries["Create SubtitleEntry records"]
+    MakeEntries --> Sort["Sort and renumber"]
     Sort --> Editor["Editor-ready subtitle list"]
 ```
 
@@ -633,18 +638,37 @@ Text formatting behavior:
 1. Normalizes CRLF to LF.
 2. Collapses repeated whitespace inside each line.
 3. Removes empty lines.
-4. Wraps text by word boundaries.
-5. Limits final display to one or two lines where possible.
-6. Attempts to balance a short second line by moving a final word when useful.
+4. Removes near-duplicate generated captions from overlapping audio windows when adjacent text and timing are highly similar.
+5. Splits long generated captions first at sentence punctuation, then softer punctuation, then natural phrase boundaries.
+6. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
+7. Limits final generated caption display to at most two visible lines.
+8. Attempts to balance a short second line by moving a final word when useful.
 
 Timing formatting behavior:
 
 1. Times are rounded to milliseconds.
 2. Times are clamped to zero and optionally to video duration.
-3. Entries are sorted by start time and end time.
-4. Indices are recalculated from 1.
-5. Overlaps are resolved by pushing later entries after earlier entries plus the configured gap.
-6. End times are extended to meet the minimum duration where possible.
+3. When usable word timestamps exist, generated caption starts prefer the first word start with about 0.08 seconds of lead-in.
+4. When usable word timestamps exist, generated caption ends prefer the last word end with about 0.18 seconds of tail padding.
+5. Segment-level timing remains the fallback when word timestamps are absent or incomplete.
+6. Generated captions target a maximum reading speed of about 21 characters per second.
+7. Dense generated captions are extended when safe, then split if they still exceed readability limits.
+8. Entries are sorted by start time and end time.
+9. Indices are recalculated from 1.
+10. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
+11. Tiny safe gaps are chained to reduce visible flicker.
+
+Generated-caption helper responsibilities:
+
+| Helper | Purpose |
+| --- | --- |
+| `optimizeGeneratedCaptions` | Runs the generated-only post-processing pipeline before `SubtitleEntry` creation. |
+| `calculateCharactersPerSecond` | Measures readable text density over caption duration. |
+| `calculateReadableDuration` | Computes a deterministic readable duration target from text length and formatting preferences. |
+| `needsSplitForReadability` | Decides whether a generated caption needs timing extension or segmentation. |
+| `normalizeForDuplicateComparison` | Canonicalizes generated text for conservative duplicate detection. |
+| `tokenSimilarity` | Compares adjacent generated captions for overlap-window duplicate cleanup. |
+| `dedupeOverlappingSegments` | Removes or safely merges adjacent duplicate generated segments near chunk boundaries. |
 
 ## Progress Model
 
@@ -1117,10 +1141,15 @@ They cover:
 11. Subtitle shifting without negative start times.
 12. Split and merge behavior.
 13. Long text formatting into readable lines.
-14. Valid project JSON round trip.
-15. Malformed project rejection.
+14. Generated-caption line breaking that avoids unsafe phrase splits.
+15. Generated-caption punctuation splitting.
+16. Generated-caption reading-speed protection.
+17. Generated-caption word-timestamp sync.
+18. Generated-caption duplicate cleanup near chunk boundaries.
+19. Valid project JSON round trip.
+20. Malformed project rejection.
 
-The tests focus on deterministic subtitle utilities. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
 ## Keyboard Shortcuts
 
@@ -1142,8 +1171,8 @@ The tests focus on deterministic subtitle utilities. They do not currently run a
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
 7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker uses overlap context and core clipping to reduce duplicate or missing captions, but manual review is still expected.
-9. Generated subtitle timing is not guaranteed perfect.
+8. Chunk-boundary quality can vary. The worker uses overlap context, core clipping, and deterministic duplicate cleanup to reduce repeated captions, but manual review is still expected.
+9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
 
@@ -1165,7 +1194,7 @@ Other natural extension points:
 4. Streaming or media-pipeline-based audio extraction for lower memory use.
 5. Waveform-based timing adjustment.
 6. More import/export formats.
-7. Better duplicate reconciliation at chunk boundaries.
+7. More advanced subtitle timing controls for reviewing generated captions.
 8. Screenshot documentation in the README.
 
 ## End-To-End Summary
@@ -1179,8 +1208,9 @@ flowchart TD
     E --> F["Worker splits decoded audio into overlapped windows"]
     F --> G["Whisper returns text and timestamps"]
     G --> H["Worker maps chunks to the full video timeline"]
-    H --> I["App formats chunks into SubtitleEntry records"]
-    I --> J["Editor validates, previews, autosaves, and lets user revise"]
+    H --> I["App optimizes generated captions for timing, duplicates, and readability"]
+    I --> L["App formats optimized captions into SubtitleEntry records"]
+    L --> J["Editor validates, previews, autosaves, and lets user revise"]
     J --> K["User exports SRT, VTT, TXT, or project JSON"]
 ```
 

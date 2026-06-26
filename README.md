@@ -10,6 +10,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Custom video preview with play/pause, seek, volume, fullscreen, subtitle visibility, and active subtitle overlay.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, visible failures, and cancellation.
+- Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, and overlap-window duplicate reduction.
 - Subtitle editor with text and timestamp editing, immediate validation, active-row highlighting, search, add/delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
@@ -96,9 +97,10 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio.
 5. Transformers.js loads the selected Whisper model.
 6. The ASR pipeline requests timestamped output.
-7. Raw model chunks are converted into editable subtitle entries.
-8. The formatting layer normalizes text, timing, line length, ordering, gaps, and overlaps.
-9. The user edits and exports SRT, VTT, TXT, or JSON locally.
+7. Raw model chunks are normalized onto the video timeline.
+8. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, splits long captions, and applies two-line wrapping.
+9. The formatted results become editable subtitle entries.
+10. The user edits and exports SRT, VTT, TXT, or JSON locally.
 
 ## Import And Export
 
@@ -151,7 +153,7 @@ The transcription provider boundary is intentionally small so another local engi
 - Codec support depends on the browser and FFmpeg.wasm build.
 - WebGPU is optional. The app attempts supported WebAssembly or CPU fallback paths, but speed can be much slower.
 - Word-level timestamps depend on model support and may fall back to coarser chunks.
-- Subtitle synchronization is not guaranteed perfect and should be reviewed manually.
+- Generated subtitle synchronization is improved by deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
 
 ## Troubleshooting
 
@@ -189,5 +191,5 @@ This section is informational and not legal advice.
 - Optional local model preflight and cache inspection.
 - More languages and model choices with clearer size estimates.
 - Side-by-side waveform timing adjustments.
-- Better duplicate reconciliation at chunk boundaries.
+- More advanced subtitle timing controls for reviewing generated captions.
 - Real sample screenshots in the README.

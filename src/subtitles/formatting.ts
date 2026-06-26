@@ -10,6 +10,14 @@ export type RawTranscriptionSegment = {
   words?: SubtitleWord[]
 }
 
+const TARGET_MAX_CHARACTERS_PER_SECOND = 21
+const WORD_LEAD_IN_SECONDS = 0.08
+const WORD_TAIL_SECONDS = 0.18
+const PAUSE_SPLIT_SECONDS = 0.35
+const DUPLICATE_GAP_SECONDS = 0.75
+const TINY_GAP_SECONDS = 0.12
+const MIN_GENERATED_CAPTION_DURATION = 0.25
+
 export function normalizeSubtitleText(text: string): string {
   return text
     .replace(/\r\n/g, '\n')
@@ -22,18 +30,24 @@ export function normalizeSubtitleText(text: string): string {
 
 export function splitIntoSubtitleLines(text: string, maxCharsPerLine: number): string {
   const normalized = normalizeSubtitleText(text).replace(/\n+/g, ' ')
+  const limit = Math.max(1, Math.floor(maxCharsPerLine))
 
-  if (normalized.length <= maxCharsPerLine) {
+  if (normalized.length <= limit) {
     return normalized
   }
 
-  const words = normalized.split(' ')
+  const words = normalized.split(/\s+/).filter(Boolean)
+  const bestSplit = findBestLineSplit(words, limit)
+  if (bestSplit !== null) {
+    return `${words.slice(0, bestSplit).join(' ')}\n${words.slice(bestSplit).join(' ')}`
+  }
+
   const lines: string[] = []
   let current = ''
 
   for (const word of words) {
     const next = current ? `${current} ${word}` : word
-    if (next.length <= maxCharsPerLine || !current) {
+    if (next.length <= limit || !current) {
       current = next
       continue
     }
@@ -47,13 +61,13 @@ export function splitIntoSubtitleLines(text: string, maxCharsPerLine: number): s
   }
 
   if (lines.length <= 2) {
-    return balanceShortLastLine(lines, maxCharsPerLine).join('\n')
+    return balanceShortLastLine(lines, limit).join('\n')
   }
 
   const midpoint = Math.ceil(lines.length / 2)
   const first = lines.slice(0, midpoint).join(' ')
   const second = lines.slice(midpoint).join(' ')
-  return balanceShortLastLine([first, second], maxCharsPerLine).join('\n')
+  return balanceShortLastLine([first, second], limit).join('\n')
 }
 
 export function formatSubtitleText(text: string, preferences: FormattingPreferences): string {
@@ -179,123 +193,682 @@ export function formatTranscriptionSegments(
   preferences: FormattingPreferences,
   duration?: number,
 ): SubtitleEntry[] {
-  const entries: SubtitleEntry[] = []
-
-  for (const segment of segments) {
-    const text = normalizeSubtitleText(segment.text)
+  const entries = optimizeGeneratedCaptions(segments, preferences, duration).flatMap((segment, index) => {
+    const text = formatSubtitleText(segment.text, preferences)
     if (!text) {
-      continue
+      return []
     }
 
-    if (segment.words?.length && preferences.useWordTimestamps) {
-      entries.push(...groupWords(segment.words, preferences, duration))
-      continue
-    }
-
-    const splitSegments = splitLongSegment(segment, preferences)
-    for (const splitSegment of splitSegments) {
-      const formatted = formatSubtitleText(splitSegment.text, preferences)
-      if (formatted) {
-        entries.push(
-          makeSubtitleEntry({
-            startTime: clampTime(splitSegment.startTime, duration),
-            endTime: clampTime(splitSegment.endTime, duration),
-            text: formatted,
-            confidence: splitSegment.confidence,
-          }),
-        )
-      }
-    }
-  }
-
-  return normalizeOverlaps(removeEmptyEntries(entries), preferences, duration)
-}
-
-function groupWords(words: SubtitleWord[], preferences: FormattingPreferences, duration?: number): SubtitleEntry[] {
-  const entries: SubtitleEntry[] = []
-  let group: SubtitleWord[] = []
-
-  const flush = () => {
-    if (!group.length) {
-      return
-    }
-
-    const text = group.map((word) => word.text).join(' ')
-    entries.push(
+    return [
       makeSubtitleEntry({
-        startTime: clampTime(group[0].startTime, duration),
-        endTime: clampTime(group[group.length - 1].endTime, duration),
-        text: formatSubtitleText(text, preferences),
-        words: group,
+        id: `generated-${index + 1}`,
+        index: index + 1,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        text,
+        confidence: segment.confidence,
+        words: segment.words,
       }),
-    )
-    group = []
-  }
+    ]
+  })
 
-  for (const word of words) {
-    const candidate = [...group, word]
-    const candidateText = candidate.map((item) => item.text).join(' ')
-    const candidateDuration = candidate.at(-1)!.endTime - candidate[0].startTime
-    const previous = group.at(-1)
-    const pause = previous ? word.startTime - previous.endTime : 0
-
-    if (
-      group.length > 0 &&
-      (candidateText.length > preferences.maxCharsPerSubtitle ||
-        candidateDuration > preferences.maxDuration ||
-        pause > 0.9)
-    ) {
-      flush()
-    }
-
-    group.push(word)
-  }
-
-  flush()
-  return entries
+  return sortAndRenumber(entries)
 }
 
-function splitLongSegment(
-  segment: RawTranscriptionSegment,
+export function optimizeGeneratedCaptions(
+  segments: RawTranscriptionSegment[],
   preferences: FormattingPreferences,
+  duration?: number,
 ): RawTranscriptionSegment[] {
-  const text = normalizeSubtitleText(segment.text).replace(/\n+/g, ' ')
-  const duration = Math.max(0.1, segment.endTime - segment.startTime)
+  const normalized = normalizeGeneratedSegments(segments, preferences, duration)
+  const deduped = dedupeOverlappingSegments(normalized, preferences, duration)
+  const extended = extendSegmentDurationsBeforeSplitting(deduped, preferences, duration)
+  const split = extended.flatMap((segment) => splitGeneratedSegment(segment, preferences, duration))
+  const readable = improveGeneratedCaptionDurations(split, preferences, duration)
+  return normalizeGeneratedCaptionOverlaps(readable, preferences, duration)
+}
 
-  if (text.length <= preferences.maxCharsPerSubtitle && duration <= preferences.maxDuration) {
-    return [segment]
+export function calculateCharactersPerSecond(text: string, startTime: number, endTime: number): number {
+  const duration = endTime - startTime
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return Number.POSITIVE_INFINITY
   }
 
-  const parts = splitTextByLength(text, preferences.maxCharsPerSubtitle)
-  return parts.map((part, index) => {
-    const startRatio = index / parts.length
-    const endRatio = (index + 1) / parts.length
+  return countReadableCharacters(text) / duration
+}
+
+export function calculateReadableDuration(text: string, preferences: FormattingPreferences): number {
+  const readableDuration = countReadableCharacters(text) / TARGET_MAX_CHARACTERS_PER_SECOND
+  const minimum = Math.max(MIN_GENERATED_CAPTION_DURATION, preferences.minDuration)
+  return roundTime(Math.min(preferences.maxDuration, Math.max(minimum, readableDuration)))
+}
+
+export function needsSplitForReadability(
+  text: string,
+  startTime: number,
+  endTime: number,
+  preferences: FormattingPreferences,
+): boolean {
+  const normalized = normalizeSubtitleText(text).replace(/\n+/g, ' ')
+  const duration = endTime - startTime
+  return (
+    normalized.length > getMaxGeneratedCaptionCharacters(preferences) ||
+    duration > preferences.maxDuration ||
+    calculateCharactersPerSecond(normalized, startTime, endTime) > TARGET_MAX_CHARACTERS_PER_SECOND
+  )
+}
+
+export function normalizeForDuplicateComparison(text: string): string {
+  return normalizeSubtitleText(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+export function tokenSimilarity(first: string, second: string): number {
+  const firstTokens = tokenizeForComparison(first)
+  const secondTokens = tokenizeForComparison(second)
+  if (!firstTokens.length && !secondTokens.length) {
+    return 1
+  }
+  if (!firstTokens.length || !secondTokens.length) {
+    return 0
+  }
+
+  const remaining = new Map<string, number>()
+  for (const token of secondTokens) {
+    remaining.set(token, (remaining.get(token) ?? 0) + 1)
+  }
+
+  let matches = 0
+  for (const token of firstTokens) {
+    const count = remaining.get(token) ?? 0
+    if (count > 0) {
+      matches += 1
+      remaining.set(token, count - 1)
+    }
+  }
+
+  return matches / Math.max(firstTokens.length, secondTokens.length)
+}
+
+export function dedupeOverlappingSegments(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const deduped: RawTranscriptionSegment[] = []
+
+  for (const segment of sortRawSegments(segments)) {
+    const previous = deduped.at(-1)
+    if (previous && areNearDuplicateSegments(previous, segment)) {
+      deduped[deduped.length - 1] = chooseDuplicateSegment(previous, segment, preferences, duration)
+      continue
+    }
+
+    deduped.push(segment)
+  }
+
+  return deduped
+}
+
+function normalizeGeneratedSegments(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  return sortRawSegments(segments)
+    .flatMap((segment): RawTranscriptionSegment[] => {
+      const text = normalizeSubtitleText(segment.text).replace(/\n+/g, ' ')
+      if (!text) {
+        return []
+      }
+
+      const usableWords = getUsableWords(segment, duration)
+      const wordStart = usableWords.at(0)?.startTime
+      const wordEnd = usableWords.at(-1)?.endTime
+      const fallbackStart = normalizeSegmentTime(segment.startTime, 0, duration)
+      const fallbackEnd = normalizeSegmentTime(segment.endTime, fallbackStart + preferences.minDuration, duration)
+      const startTime =
+        wordStart === undefined
+          ? fallbackStart
+          : normalizeSegmentTime(wordStart - WORD_LEAD_IN_SECONDS, fallbackStart, duration)
+      const endTime =
+        wordEnd === undefined ? fallbackEnd : normalizeSegmentTime(wordEnd + WORD_TAIL_SECONDS, fallbackEnd, duration)
+      const safeEndTime = endTime > startTime ? endTime : normalizeSegmentTime(startTime + preferences.minDuration, startTime + 0.1, duration)
+
+      return [
+        {
+          ...segment,
+          startTime: roundTime(Math.max(0, startTime)),
+          endTime: roundTime(safeEndTime),
+          text,
+          words: usableWords.length ? usableWords : undefined,
+        },
+      ]
+    })
+    .filter((segment) => segment.endTime > segment.startTime)
+}
+
+function extendSegmentDurationsBeforeSplitting(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const sorted = sortRawSegments(segments)
+
+  return sorted.map((segment, index) => {
+    if (segment.words?.length) {
+      return segment
+    }
+
+    const nextStart = sorted[index + 1]?.startTime
+    const maxEnd = Math.min(
+      duration ?? Number.POSITIVE_INFINITY,
+      nextStart === undefined ? Number.POSITIVE_INFINITY : nextStart - preferences.gapBetweenSubtitles,
+    )
+    const desiredEnd = segment.startTime + calculateTotalReadableDuration(segment.text, preferences)
+    const endTime = Math.min(maxEnd, Math.max(segment.endTime, desiredEnd))
+
     return {
       ...segment,
-      startTime: roundTime(segment.startTime + duration * startRatio),
-      endTime: roundTime(segment.startTime + duration * endRatio),
-      text: part,
+      endTime: roundTime(Math.max(segment.startTime + MIN_GENERATED_CAPTION_DURATION, endTime)),
     }
   })
 }
 
-function splitTextByLength(text: string, maxLength: number): string[] {
-  const parts: string[] = []
-  let remaining = text.trim()
-
-  while (remaining.length > maxLength) {
-    const slice = remaining.slice(0, maxLength + 1)
-    const punctuation = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('? '), slice.lastIndexOf('! '))
-    const splitAt = punctuation > maxLength * 0.45 ? punctuation + 1 : Math.max(slice.lastIndexOf(' '), maxLength)
-    parts.push(remaining.slice(0, splitAt).trim())
-    remaining = remaining.slice(splitAt).trim()
+function splitGeneratedSegment(
+  segment: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  if (segment.words?.length) {
+    return splitWordTimedSegment(segment, preferences, duration)
   }
 
-  if (remaining) {
-    parts.push(remaining)
+  return splitPlainTimedSegment(segment, preferences, duration)
+}
+
+function splitWordTimedSegment(
+  segment: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const words = getUsableWords(segment, duration)
+  if (!words.length) {
+    return splitPlainTimedSegment({ ...segment, words: undefined }, preferences, duration)
+  }
+
+  const groups: SubtitleWord[][] = []
+  let startIndex = 0
+
+  while (startIndex < words.length) {
+    const endIndex = findBestWordGroupEnd(words, startIndex, preferences)
+    groups.push(words.slice(startIndex, endIndex + 1))
+    startIndex = endIndex + 1
+  }
+
+  return groups.map((group) => {
+    const text = group.map((word) => word.text).join(' ')
+    const startTime = normalizeSegmentTime(group[0].startTime - WORD_LEAD_IN_SECONDS, 0, duration)
+    const endTime = normalizeSegmentTime(group[group.length - 1].endTime + WORD_TAIL_SECONDS, group[0].startTime, duration)
+
+    return {
+      ...segment,
+      startTime: roundTime(startTime),
+      endTime: roundTime(Math.max(endTime, startTime + MIN_GENERATED_CAPTION_DURATION)),
+      text,
+      words: group,
+    }
+  })
+}
+
+function splitPlainTimedSegment(
+  segment: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const text = normalizeSubtitleText(segment.text).replace(/\n+/g, ' ')
+  if (!text) {
+    return []
+  }
+
+  const parts = splitTextIntoReadableParts(text, segment.endTime - segment.startTime, preferences)
+  if (parts.length <= 1) {
+    return [
+      {
+        ...segment,
+        text,
+        endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, segment.endTime)),
+      },
+    ]
+  }
+
+  const weights = parts.map((part) => Math.max(MIN_GENERATED_CAPTION_DURATION, calculateTotalReadableDuration(part, preferences)))
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
+  const totalDuration = Math.max(0.05 * parts.length, segment.endTime - segment.startTime)
+  const minimumPartDuration =
+    totalDuration >= MIN_GENERATED_CAPTION_DURATION * parts.length
+      ? MIN_GENERATED_CAPTION_DURATION
+      : Math.max(0.05, totalDuration / parts.length)
+  let cursor = segment.startTime
+
+  return parts.map((part, index) => {
+    const isLast = index === parts.length - 1
+    const remainingParts = parts.length - index - 1
+    const partDuration = isLast ? segment.endTime - cursor : totalDuration * (weights[index] / totalWeight)
+    const latestEnd = segment.endTime - minimumPartDuration * remainingParts
+    const targetEnd = cursor + Math.max(minimumPartDuration, partDuration)
+    const endTime = isLast ? segment.endTime : roundTime(Math.min(latestEnd, targetEnd))
+    const caption = {
+      ...segment,
+      startTime: roundTime(cursor),
+      endTime: roundTime(Math.max(endTime, cursor + minimumPartDuration)),
+      text: part,
+      words: undefined,
+    }
+    cursor = caption.endTime
+    return caption
+  })
+}
+
+function improveGeneratedCaptionDurations(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const sorted = sortRawSegments(segments)
+
+  return sorted.map((segment, index) => {
+    const nextStart = sorted[index + 1]?.startTime
+    const maxEnd = Math.min(
+      duration ?? Number.POSITIVE_INFINITY,
+      nextStart === undefined ? segment.startTime + preferences.maxDuration : nextStart - preferences.gapBetweenSubtitles,
+      segment.startTime + preferences.maxDuration,
+    )
+
+    if (segment.words?.length) {
+      const words = getUsableWords(segment, duration)
+      const firstWord = words.at(0)
+      const lastWord = words.at(-1)
+      if (!firstWord || !lastWord) {
+        return segment
+      }
+
+      return {
+        ...segment,
+        startTime: roundTime(Math.max(0, firstWord.startTime - WORD_LEAD_IN_SECONDS)),
+        endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, lastWord.endTime + WORD_TAIL_SECONDS, maxEnd)),
+        words,
+      }
+    }
+
+    if (calculateCharactersPerSecond(segment.text, segment.startTime, segment.endTime) <= TARGET_MAX_CHARACTERS_PER_SECOND) {
+      return {
+        ...segment,
+        endTime: roundTime(Math.min(maxEnd, segment.endTime)),
+      }
+    }
+
+    const desiredEnd = segment.startTime + calculateReadableDuration(segment.text, preferences)
+    return {
+      ...segment,
+      endTime: roundTime(Math.min(maxEnd, Math.max(segment.endTime, desiredEnd))),
+    }
+  })
+}
+
+function normalizeGeneratedCaptionOverlaps(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const normalized: RawTranscriptionSegment[] = []
+
+  for (const segment of sortRawSegments(segments)) {
+    const next = {
+      ...segment,
+      startTime: clampTime(segment.startTime, duration),
+      endTime: clampTime(segment.endTime, duration),
+    }
+
+    const previous = normalized.at(-1)
+    if (previous) {
+      const requiredStart = previous.endTime + preferences.gapBetweenSubtitles
+      const actualGap = next.startTime - previous.endTime
+
+      if (actualGap < preferences.gapBetweenSubtitles) {
+        const trimmedPreviousEnd = roundTime(next.startTime - preferences.gapBetweenSubtitles)
+        const previousContentEnd = getContentEndTime(previous)
+
+        if (trimmedPreviousEnd >= previous.startTime + MIN_GENERATED_CAPTION_DURATION && trimmedPreviousEnd >= previousContentEnd) {
+          previous.endTime = trimmedPreviousEnd
+        } else {
+          const shiftedStart = roundTime(requiredStart)
+          const currentContentStart = getContentStartTime(next)
+          if (!next.words?.length || shiftedStart <= currentContentStart + WORD_LEAD_IN_SECONDS) {
+            next.startTime = shiftedStart
+          } else if (previousContentEnd >= previous.startTime + MIN_GENERATED_CAPTION_DURATION) {
+            previous.endTime = roundTime(Math.min(previous.endTime, previousContentEnd))
+          } else {
+            next.startTime = shiftedStart
+          }
+        }
+      } else if (actualGap > preferences.gapBetweenSubtitles && actualGap < TINY_GAP_SECONDS) {
+        const chainedStart = roundTime(requiredStart)
+        const currentContentStart = getContentStartTime(next)
+        if (!next.words?.length || chainedStart <= currentContentStart + WORD_LEAD_IN_SECONDS) {
+          next.startTime = chainedStart
+        }
+      }
+    }
+
+    if (next.endTime <= next.startTime) {
+      next.endTime = roundTime(next.startTime + MIN_GENERATED_CAPTION_DURATION)
+    }
+
+    if (duration !== undefined) {
+      next.endTime = Math.min(duration, next.endTime)
+    }
+
+    if (next.endTime > next.startTime) {
+      normalized.push(next)
+    }
+  }
+
+  return sortRawSegments(normalized)
+}
+
+function splitTextIntoReadableParts(
+  text: string,
+  duration: number,
+  preferences: FormattingPreferences,
+): string[] {
+  const queue = [normalizeSubtitleText(text).replace(/\n+/g, ' ')]
+  const parts: string[] = []
+  let guard = 0
+
+  while (queue.length && guard < 100) {
+    guard += 1
+    const current = queue.shift() ?? ''
+    const estimatedDuration = estimatePartDuration(current, text, duration)
+    if (!current || !needsSplitForReadability(current, 0, estimatedDuration, preferences)) {
+      if (current) {
+        parts.push(current)
+      }
+      continue
+    }
+
+    const splitIndex = findBestCaptionTextSplit(current, preferences)
+    if (splitIndex === null) {
+      parts.push(current)
+      continue
+    }
+
+    const first = current.slice(0, splitIndex).trim()
+    const second = current.slice(splitIndex).trim()
+    if (!first || !second) {
+      parts.push(current)
+      continue
+    }
+
+    queue.unshift(second)
+    queue.unshift(first)
   }
 
   return parts
+}
+
+function findBestCaptionTextSplit(text: string, preferences: FormattingPreferences): number | null {
+  const strong = findPunctuationSplit(text, /[.!?]["')\]]?\s+/g, preferences)
+  if (strong !== null) {
+    return strong
+  }
+
+  const soft = findPunctuationSplit(text, /[,;:\u2013\u2014]["')\]]?\s+/g, preferences)
+  if (soft !== null) {
+    return soft
+  }
+
+  const words = text.split(/\s+/).filter(Boolean)
+  if (words.length <= 2) {
+    return null
+  }
+
+  const target = Math.min(getMaxGeneratedCaptionCharacters(preferences), Math.ceil(text.length / 2))
+  let best: { index: number; score: number } | null = null
+  let offset = 0
+
+  for (let wordIndex = 1; wordIndex < words.length; wordIndex += 1) {
+    offset += words[wordIndex - 1].length + (wordIndex === 1 ? 0 : 1)
+    const first = words.slice(0, wordIndex).join(' ')
+    const second = words.slice(wordIndex).join(' ')
+    if (!isReasonableCaptionPart(first, preferences) || !isReasonableCaptionPart(second, preferences)) {
+      continue
+    }
+
+    const score =
+      Math.abs(first.length - target) +
+      phraseBreakPenalty(words[wordIndex - 1], words[wordIndex]) +
+      orphanCaptionPenalty(first, second)
+    if (!best || score < best.score) {
+      best = { index: offset + 1, score }
+    }
+  }
+
+  return best?.index ?? null
+}
+
+function findPunctuationSplit(
+  text: string,
+  pattern: RegExp,
+  preferences: FormattingPreferences,
+): number | null {
+  let match: RegExpExecArray | null
+  let best: { index: number; score: number } | null = null
+  const target = Math.min(getMaxGeneratedCaptionCharacters(preferences), Math.ceil(text.length / 2))
+
+  while ((match = pattern.exec(text)) !== null) {
+    const index = match.index + match[0].trimEnd().length
+    const first = text.slice(0, index).trim()
+    const second = text.slice(index).trim()
+    if (!isReasonableCaptionPart(first, preferences) || !isReasonableCaptionPart(second, preferences)) {
+      continue
+    }
+
+    const score = Math.abs(first.length - target) + orphanCaptionPenalty(first, second)
+    if (!best || score < best.score) {
+      best = { index, score }
+    }
+  }
+
+  return best?.index ?? null
+}
+
+function isReasonableCaptionPart(text: string, preferences: FormattingPreferences): boolean {
+  const words = text.split(/\s+/).filter(Boolean)
+  if (words.length <= 1 && text.length < preferences.maxCharsPerLine * 0.6) {
+    return false
+  }
+
+  return text.length <= getMaxGeneratedCaptionCharacters(preferences)
+}
+
+function findBestWordGroupEnd(
+  words: SubtitleWord[],
+  startIndex: number,
+  preferences: FormattingPreferences,
+): number {
+  const lastIndex = words.length - 1
+  const remainingText = words.slice(startIndex).map((word) => word.text).join(' ')
+  const remainingDuration = words[lastIndex].endTime - words[startIndex].startTime
+
+  if (!needsSplitForReadability(remainingText, 0, remainingDuration, preferences)) {
+    return lastIndex
+  }
+
+  let best: { index: number; score: number } | null = null
+
+  for (let index = startIndex; index < lastIndex; index += 1) {
+    const group = words.slice(startIndex, index + 1)
+    const text = group.map((word) => word.text).join(' ')
+    const groupDuration = group.at(-1)!.endTime - group[0].startTime
+    const remainingCount = lastIndex - index
+    const nextWord = words[index + 1]
+    const pauseAfter = Math.max(0, nextWord.startTime - words[index].endTime)
+    const maxCaptionCharacters = getMaxGeneratedCaptionCharacters(preferences)
+    const overLimitPenalty =
+      text.length > maxCaptionCharacters || groupDuration > preferences.maxDuration ? 200 : 0
+    const score =
+      overLimitPenalty +
+      Math.abs(text.length - maxCaptionCharacters * 0.75) +
+      phraseBreakPenalty(words[index].text, nextWord.text) +
+      (hasStrongPunctuation(words[index].text) ? -80 : 0) +
+      (hasSoftPunctuation(words[index].text) ? -45 : 0) +
+      (pauseAfter >= PAUSE_SPLIT_SECONDS ? -35 : 0) +
+      (group.length <= 1 || remainingCount <= 1 ? 70 : 0) +
+      (groupDuration < preferences.minDuration && group.length > 1 ? 12 : 0)
+
+    if (!best || score < best.score) {
+      best = { index, score }
+    }
+  }
+
+  return best?.index ?? Math.min(lastIndex, startIndex + 1)
+}
+
+function chooseDuplicateSegment(
+  first: RawTranscriptionSegment,
+  second: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment {
+  const preferred = scoreDuplicateCandidate(second, preferences) > scoreDuplicateCandidate(first, preferences) ? second : first
+  const other = preferred === first ? second : first
+  const preferredText = normalizeForDuplicateComparison(preferred.text)
+  const otherText = normalizeForDuplicateComparison(other.text)
+  const shouldUseLongerText = otherText.includes(preferredText) && other.text.length > preferred.text.length
+  const text = shouldUseLongerText ? other.text : preferred.text
+  const mergedStart = Math.min(first.startTime, second.startTime)
+  const mergedEnd = Math.max(first.endTime, second.endTime)
+  const mergedDuration = mergedEnd - mergedStart
+  const readableDuration = calculateReadableDuration(text, preferences)
+  const canMergeTiming =
+    !preferred.words?.length &&
+    mergedDuration <= preferences.maxDuration &&
+    mergedDuration <= Math.max(readableDuration + 0.8, preferred.endTime - preferred.startTime + 0.5)
+
+  return {
+    ...preferred,
+    startTime: roundTime(canMergeTiming ? mergedStart : preferred.startTime),
+    endTime: roundTime(canMergeTiming ? Math.min(duration ?? Number.POSITIVE_INFINITY, mergedEnd) : preferred.endTime),
+    text,
+  }
+}
+
+function scoreDuplicateCandidate(segment: RawTranscriptionSegment, preferences: FormattingPreferences): number {
+  const wordScore = segment.words?.length ? 4 : 0
+  const textScore = Math.min(3, countReadableCharacters(segment.text) / 40)
+  const duration = segment.endTime - segment.startTime
+  const readableDuration = calculateReadableDuration(segment.text, preferences)
+  const timingScore = -Math.abs(duration - readableDuration) / Math.max(readableDuration, 0.1)
+
+  return wordScore + textScore + timingScore
+}
+
+function areNearDuplicateSegments(first: RawTranscriptionSegment, second: RawTranscriptionSegment): boolean {
+  const gap =
+    first.endTime < second.startTime
+      ? second.startTime - first.endTime
+      : second.endTime < first.startTime
+        ? first.startTime - second.endTime
+        : 0
+
+  if (gap > DUPLICATE_GAP_SECONDS) {
+    return false
+  }
+
+  const firstText = normalizeForDuplicateComparison(first.text)
+  const secondText = normalizeForDuplicateComparison(second.text)
+  if (!firstText || !secondText) {
+    return false
+  }
+
+  const shorter = firstText.length <= secondText.length ? firstText : secondText
+  const longer = firstText.length > secondText.length ? firstText : secondText
+  return (
+    firstText === secondText ||
+    (shorter.length >= 12 && longer.includes(shorter)) ||
+    tokenSimilarity(firstText, secondText) >= 0.82
+  )
+}
+
+function sortRawSegments(segments: RawTranscriptionSegment[]): RawTranscriptionSegment[] {
+  return [...segments].sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
+}
+
+function getUsableWords(segment: RawTranscriptionSegment, duration?: number): SubtitleWord[] {
+  const words = (segment.words ?? [])
+    .map((word) => {
+      const text = normalizeSubtitleText(word.text).replace(/\n+/g, ' ')
+      const startTime = clampTime(word.startTime, duration)
+      const endTime = clampTime(word.endTime, duration)
+      return { ...word, text, startTime, endTime }
+    })
+    .filter((word) => word.text && Number.isFinite(word.startTime) && Number.isFinite(word.endTime) && word.endTime > word.startTime)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
+
+  if (!words.length) {
+    return []
+  }
+
+  const segmentTokens = tokenizeForComparison(segment.text)
+  const wordTokens = tokenizeForComparison(words.map((word) => word.text).join(' '))
+  if (segmentTokens.length > 2 && wordTokens.length < segmentTokens.length * 0.65) {
+    return []
+  }
+
+  return words
+}
+
+function normalizeSegmentTime(value: number, fallback: number, duration?: number): number {
+  const safeValue = Number.isFinite(value) ? value : fallback
+  return clampTime(safeValue, duration)
+}
+
+function calculateTotalReadableDuration(text: string, preferences: FormattingPreferences): number {
+  return roundTime(Math.max(preferences.minDuration, countReadableCharacters(text) / TARGET_MAX_CHARACTERS_PER_SECOND))
+}
+
+function getMaxGeneratedCaptionCharacters(preferences: FormattingPreferences): number {
+  const lineCapacity = Math.max(1, Math.floor(preferences.maxCharsPerLine)) * 2
+  return Math.max(1, Math.min(preferences.maxCharsPerSubtitle, lineCapacity))
+}
+
+function countReadableCharacters(text: string): number {
+  return normalizeSubtitleText(text).replace(/\s+/g, ' ').trim().length
+}
+
+function tokenizeForComparison(text: string): string[] {
+  const normalized = normalizeForDuplicateComparison(text)
+  return normalized ? normalized.split(' ') : []
+}
+
+function estimatePartDuration(part: string, original: string, totalDuration: number): number {
+  if (!Number.isFinite(totalDuration) || totalDuration <= 0) {
+    return 0
+  }
+
+  return totalDuration * (Math.max(1, part.length) / Math.max(1, original.length))
+}
+
+function getContentStartTime(segment: RawTranscriptionSegment): number {
+  return segment.words?.at(0)?.startTime ?? segment.startTime
+}
+
+function getContentEndTime(segment: RawTranscriptionSegment): number {
+  return segment.words?.at(-1)?.endTime ?? segment.endTime
 }
 
 function findNaturalSplit(text: string): number {
@@ -315,6 +888,160 @@ function findNaturalSplit(text: string): number {
   }
 
   return midpoint
+}
+
+function findBestLineSplit(words: string[], maxCharsPerLine: number): number | null {
+  if (words.length <= 1) {
+    return null
+  }
+
+  let best: { index: number; score: number } | null = null
+
+  for (let index = 1; index < words.length; index += 1) {
+    const first = words.slice(0, index).join(' ')
+    const second = words.slice(index).join(' ')
+    if (first.length > maxCharsPerLine || second.length > maxCharsPerLine) {
+      continue
+    }
+
+    const previous = words[index - 1]
+    const next = words[index]
+    const score =
+      Math.abs(first.length - second.length) * 1.7 +
+      phraseBreakPenalty(previous, next) +
+      orphanLinePenalty(first, second, maxCharsPerLine) +
+      (hasStrongPunctuation(previous) ? -22 : 0) +
+      (hasSoftPunctuation(previous) ? -12 : 0) +
+      sentenceMixingPenalty(first, second)
+
+    if (!best || score < best.score) {
+      best = { index, score }
+    }
+  }
+
+  return best?.index ?? null
+}
+
+function phraseBreakPenalty(previous: string, next: string): number {
+  const previousWord = normalizePhraseWord(previous)
+  const nextWord = normalizePhraseWord(next)
+  const unsafePreviousWords = new Set([
+    'a',
+    'an',
+    'the',
+    'to',
+    'of',
+    'in',
+    'on',
+    'at',
+    'by',
+    'for',
+    'from',
+    'with',
+    'about',
+    'as',
+    'into',
+    'over',
+    'after',
+    'before',
+    'under',
+    'between',
+    'and',
+    'but',
+    'or',
+    'so',
+    'because',
+    'if',
+    'that',
+    'which',
+    'who',
+    'is',
+    'are',
+    'was',
+    'were',
+    'be',
+    'been',
+    'being',
+    'am',
+    'do',
+    'does',
+    'did',
+    'have',
+    'has',
+    'had',
+    'will',
+    'would',
+    'can',
+    'could',
+    'should',
+    'may',
+    'might',
+    'must',
+    'i',
+    'you',
+    'he',
+    'she',
+    'it',
+    'we',
+    'they',
+  ])
+
+  let penalty = unsafePreviousWords.has(previousWord) ? 35 : 0
+  if (previousWord === 'to' && nextWord) {
+    penalty += 40
+  }
+  if (isCapitalizedWord(previous) && isCapitalizedWord(next)) {
+    penalty += 28
+  }
+  if (nextWord === "'s" || nextWord === 's') {
+    penalty += 50
+  }
+
+  return penalty
+}
+
+function orphanLinePenalty(first: string, second: string, maxCharsPerLine: number): number {
+  const firstWords = first.split(/\s+/).filter(Boolean)
+  const secondWords = second.split(/\s+/).filter(Boolean)
+  const shortThreshold = Math.min(9, maxCharsPerLine * 0.25)
+  let penalty = 0
+
+  if (firstWords.length <= 1 || first.length < shortThreshold) {
+    penalty += 22
+  }
+  if (secondWords.length <= 1 || second.length < shortThreshold) {
+    penalty += 45
+  }
+
+  return penalty
+}
+
+function orphanCaptionPenalty(first: string, second: string): number {
+  const firstWords = first.split(/\s+/).filter(Boolean)
+  const secondWords = second.split(/\s+/).filter(Boolean)
+  return (firstWords.length <= 1 ? 35 : 0) + (secondWords.length <= 1 ? 55 : 0)
+}
+
+function sentenceMixingPenalty(first: string, second: string): number {
+  const firstHasInternalSentenceEnd = /[.!?]\s+\S/.test(first)
+  const secondStartsLowercase = /^[a-z]/.test(second)
+  return (firstHasInternalSentenceEnd ? 18 : 0) + (secondStartsLowercase && hasStrongPunctuation(first) ? 8 : 0)
+}
+
+function normalizePhraseWord(word: string): string {
+  return word.toLowerCase().replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, '')
+}
+
+function hasStrongPunctuation(word: string): boolean {
+  return /[.!?]["')\]]?$/.test(word)
+}
+
+function hasSoftPunctuation(word: string): boolean {
+  return /[,;:\u2013\u2014]["')\]]?$/.test(word)
+}
+
+function isCapitalizedWord(word: string): boolean {
+  return /^[A-Z][a-z]+[,.!?]?$/u.test(word)
 }
 
 function balanceShortLastLine(lines: string[], maxCharsPerLine: number): string[] {
