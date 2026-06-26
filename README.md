@@ -37,6 +37,8 @@ Auto Subtitle is designed to keep media local:
 
 Model files are downloaded by Transformers.js on first use and cached by the browser when supported. That download goes to the model host, but your video and extracted audio are not uploaded by this app.
 
+When the app is started through `local-launch.bat`, transcription progress and generated caption text are also sent to the local Vite dev server so the launcher terminal can show live progress. This stays on `127.0.0.1`.
+
 ## System Requirements
 
 - Node.js and npm
@@ -61,6 +63,7 @@ The launcher:
 - installs dependencies with `npm ci` when possible
 - starts Vite on `http://127.0.0.1:5173`
 - opens the app in the default browser
+- shows local transcription progress and generated caption text in the terminal
 - stops the local server when you press Enter or close the launcher terminal
 - keeps the terminal open if an error occurs
 

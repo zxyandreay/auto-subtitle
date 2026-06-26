@@ -580,6 +580,18 @@ body {
   font-size: 13px;
 }
 
+.progress-card__title {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.progress-card__title span {
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
 progress {
   accent-color: var(--accent);
   height: 8px;

@@ -237,6 +237,7 @@ function App() {
     setProgress({
       stage: 'loading-engine',
       message: 'Starting local transcription worker.',
+      progress: 0.01,
     })
 
     const job = startBrowserWhisperTranscription(video.file, settings, {
@@ -251,6 +252,7 @@ function App() {
       setProgress({
         stage: 'complete',
         message: `Created ${nextEntries.length} editable subtitle entries with ${result.modelId}.`,
+        progress: 1,
       })
       setNotice({
         tone: 'success',
@@ -259,11 +261,12 @@ function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const cancelled = message.toLowerCase().includes('cancelled')
-      setProgress({
+      setProgress((current) => ({
         stage: cancelled ? 'cancelled' : 'failed',
         message: cancelled ? 'Transcription was cancelled.' : 'Transcription failed.',
+        progress: current.progress,
         technicalDetails: message,
-      })
+      }))
       setNotice({
         tone: cancelled ? 'warning' : 'error',
         message: cancelled
@@ -281,10 +284,11 @@ function App() {
     jobRef.current?.cancel()
     jobRef.current = null
     setBusy(false)
-    setProgress({
+    setProgress((current) => ({
       stage: 'cancelled',
       message: 'Transcription cancelled. Worker resources were released.',
-    })
+      progress: current.progress,
+    }))
   }
 
   const handleImportFile = async (file: File) => {

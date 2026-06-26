@@ -39,6 +39,8 @@ export function TranscriptionPanel({
 }: TranscriptionPanelProps) {
   const selectedModel = TRANSCRIPTION_MODELS.find((model) => model.id === settings.modelId) ?? TRANSCRIPTION_MODELS[0]
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
+  const progressPercent =
+    progress.progress === undefined ? null : `${Math.round(Math.max(0, Math.min(1, progress.progress)) * 100)}%`
 
   return (
     <section className="transcription-panel" aria-label="Transcription settings">
@@ -165,7 +167,10 @@ export function TranscriptionPanel({
 
       <div className="progress-card" aria-live="polite" role="status">
         <div>
-          <strong>{stageLabel(progress.stage)}</strong>
+          <strong className="progress-card__title">
+            {stageLabel(progress.stage)}
+            {progressPercent ? <span>{progressPercent}</span> : null}
+          </strong>
           <span>{progress.message}</span>
         </div>
         {progress.progress !== undefined ? (

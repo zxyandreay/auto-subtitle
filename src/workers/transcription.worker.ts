@@ -22,6 +22,60 @@ type BrowserAsrTranscriber = {
   dispose?: () => Promise<void> | void
 }
 
+type DecodedAudio = {
+  samples: Float32Array
+  sampleRate: number
+}
+
+type TranscriptionWindow = {
+  index: number
+  total: number
+  samples: Float32Array
+  sliceStartTime: number
+  coreStartTime: number
+  coreEndTime: number
+}
+
+type NormalizedAsrResult = {
+  segments: RawTranscriptionSegment[]
+  text: string
+}
+
+type TimestampAttempt = {
+  result: unknown
+  timestampMode: TimestampMode
+}
+
+type TerminalLogEvent =
+  | {
+      type: 'start'
+      fileName: string
+      modelId: string
+    }
+  | {
+      type: 'progress'
+      stage: TranscriptionStage
+      message: string
+      progress?: number
+    }
+  | {
+      type: 'caption'
+      startTime: number
+      endTime: number
+      text: string
+    }
+  | {
+      type: 'complete'
+      segmentCount: number
+    }
+  | {
+      type: 'error'
+      message: string
+    }
+
+let terminalJobId = ''
+let lastOverallProgress = 0
+
 self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   const request = event.data
 
@@ -31,7 +85,14 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   }
 
   cancelled = false
+  terminalJobId = createJobId()
+  lastOverallProgress = 0
   transcribe(request.file, request.settings).catch((error: unknown) => {
+    postTerminalLog({
+      type: 'error',
+      message: error instanceof Error ? error.message : 'Transcription failed.',
+    })
+
     if (cancelled) {
       post({
         type: 'error',
@@ -52,6 +113,11 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
 
 async function transcribe(file: File, settings: TranscriptionSettings): Promise<void> {
   assertNotCancelled()
+  postTerminalLog({
+    type: 'start',
+    fileName: file.name,
+    modelId: settings.modelId,
+  })
   postProgress('loading-engine', 'Loading FFmpeg.wasm and Transformers.js.')
 
   const { env, pipeline } = await import('@huggingface/transformers')
@@ -86,18 +152,20 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   try {
     assertNotCancelled()
     postProgress('transcribing', 'Transcribing speech locally with Whisper.')
-    const result = await transcribeWithTimestampFallback(transcriber, audio.samples, settings)
+    const result = await transcribeInWindows(transcriber, audio, settings)
 
     assertNotCancelled()
     postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
-    const normalizedResult = Array.isArray(result) ? result[0] : result
-    const segments = normalizeAsrChunks(normalizedResult?.chunks, normalizedResult?.text ?? '')
+    postTerminalLog({
+      type: 'complete',
+      segmentCount: result.segments.length,
+    })
 
     post({
       type: 'complete',
       result: {
-        segments,
-        text: typeof normalizedResult?.text === 'string' ? normalizedResult.text.trim() : '',
+        segments: result.segments,
+        text: result.text,
         modelId: settings.modelId,
       },
     })
@@ -108,21 +176,67 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   }
 }
 
-async function transcribeWithTimestampFallback(
+async function transcribeInWindows(
+  transcriber: BrowserAsrTranscriber,
+  audio: DecodedAudio,
+  settings: TranscriptionSettings,
+): Promise<NormalizedAsrResult> {
+  const windows = createTranscriptionWindows(audio, settings)
+  const allSegments: RawTranscriptionSegment[] = []
+  const textParts: string[] = []
+  let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
+
+  for (const window of windows) {
+    assertNotCancelled()
+    postProgress(
+      'transcribing',
+      `Transcribing chunk ${window.index + 1} of ${window.total}.`,
+      window.index / window.total,
+    )
+
+    const attempt = await transcribeWindowWithTimestampFallback(transcriber, window.samples, settings, timestampMode)
+    timestampMode = attempt.timestampMode
+
+    const normalized = normalizeAsrResult(attempt.result, {
+      offsetSeconds: window.sliceStartTime,
+      coreStartTime: window.coreStartTime,
+      coreEndTime: window.coreEndTime,
+    })
+
+    if (normalized.text) {
+      textParts.push(normalized.text)
+    }
+
+    allSegments.push(...normalized.segments)
+    postCaptionSegments(normalized.segments)
+    postProgress(
+      'transcribing',
+      `Completed chunk ${window.index + 1} of ${window.total}.`,
+      (window.index + 1) / window.total,
+    )
+  }
+
+  return {
+    segments: allSegments,
+    text: textParts.join(' ').replace(/\s+/g, ' ').trim(),
+  }
+}
+
+async function transcribeWindowWithTimestampFallback(
   transcriber: BrowserAsrTranscriber,
   samples: Float32Array,
   settings: TranscriptionSettings,
-): Promise<unknown> {
-  const options = createAsrCallOptions(settings)
-
-  if (options.return_timestamps !== 'word') {
-    return transcriber(samples, options)
-  }
+  timestampMode: TimestampMode,
+): Promise<TimestampAttempt> {
+  const options = createAsrCallOptions(settings, timestampMode)
 
   try {
-    return await transcriber(samples, options)
+    return {
+      result: await transcriber(samples, options),
+      timestampMode,
+    }
   } catch (error) {
-    if (!isWordTimestampUnsupportedError(error)) {
+    if (timestampMode !== 'word' || !isWordTimestampUnsupportedError(error)) {
       throw error
     }
 
@@ -132,21 +246,53 @@ async function transcribeWithTimestampFallback(
       'Word timestamps are not available for this model export. Retrying with segment timestamps.',
     )
 
-    return transcriber(samples, {
-      ...options,
-      return_timestamps: true,
-    })
+    return {
+      result: await transcriber(samples, {
+        ...options,
+        return_timestamps: true,
+      }),
+      timestampMode: true,
+    }
   }
 }
 
-function createAsrCallOptions(settings: TranscriptionSettings): AsrCallOptions {
+function createAsrCallOptions(settings: TranscriptionSettings, timestampMode: TimestampMode): AsrCallOptions {
   return {
-    return_timestamps: settings.formatting.useWordTimestamps ? 'word' : true,
-    chunk_length_s: settings.chunkLengthSeconds,
-    stride_length_s: settings.strideLengthSeconds,
+    return_timestamps: timestampMode,
+    chunk_length_s: 0,
+    stride_length_s: 0,
     language: settings.language === 'auto' ? undefined : settings.language,
     task: settings.task,
   }
+}
+
+function createTranscriptionWindows(audio: DecodedAudio, settings: TranscriptionSettings): TranscriptionWindow[] {
+  const duration = audio.samples.length / audio.sampleRate
+  const coreSeconds = Math.min(30, Math.max(5, settings.chunkLengthSeconds))
+  const overlapSeconds = Math.max(0, Math.min(settings.strideLengthSeconds, coreSeconds / 4))
+  const windows: TranscriptionWindow[] = []
+  let coreStartTime = 0
+
+  while (coreStartTime < duration) {
+    const coreEndTime = Math.min(duration, coreStartTime + coreSeconds)
+    const sliceStartTime = Math.max(0, coreStartTime - overlapSeconds)
+    const sliceEndTime = Math.min(duration, coreEndTime + overlapSeconds)
+    const startSample = Math.floor(sliceStartTime * audio.sampleRate)
+    const endSample = Math.max(startSample + 1, Math.ceil(sliceEndTime * audio.sampleRate))
+
+    windows.push({
+      index: windows.length,
+      total: 0,
+      samples: audio.samples.subarray(startSample, endSample),
+      sliceStartTime,
+      coreStartTime,
+      coreEndTime,
+    })
+
+    coreStartTime = coreEndTime
+  }
+
+  return windows.map((window) => ({ ...window, total: windows.length || 1 }))
 }
 
 function isWordTimestampUnsupportedError(error: unknown): boolean {
@@ -263,13 +409,39 @@ function decodePcmWav(bytes: Uint8Array): { samples: Float32Array; sampleRate: n
   return { samples, sampleRate }
 }
 
-function normalizeAsrChunks(chunks: unknown, fallbackText: string): RawTranscriptionSegment[] {
+function normalizeAsrResult(
+  result: unknown,
+  options: {
+    offsetSeconds: number
+    coreStartTime: number
+    coreEndTime: number
+  },
+): NormalizedAsrResult {
+  const normalizedResult = Array.isArray(result) ? result[0] : result
+  const chunks = isRecord(normalizedResult) ? normalizedResult.chunks : undefined
+  const text = isRecord(normalizedResult) && typeof normalizedResult.text === 'string' ? normalizedResult.text.trim() : ''
+
+  return {
+    segments: normalizeAsrChunks(chunks, text, options),
+    text,
+  }
+}
+
+function normalizeAsrChunks(
+  chunks: unknown,
+  fallbackText: string,
+  options?: {
+    offsetSeconds?: number
+    coreStartTime?: number
+    coreEndTime?: number
+  },
+): RawTranscriptionSegment[] {
   if (!Array.isArray(chunks) || chunks.length === 0) {
     return fallbackText.trim()
       ? [
           {
-            startTime: 0,
-            endTime: Math.max(1, fallbackText.length / 14),
+            startTime: options?.coreStartTime ?? 0,
+            endTime: options?.coreEndTime ?? Math.max(1, fallbackText.length / 14),
             text: fallbackText,
           },
         ]
@@ -279,6 +451,18 @@ function normalizeAsrChunks(chunks: unknown, fallbackText: string): RawTranscrip
   const normalized = chunks
     .map((chunk) => normalizeChunk(chunk))
     .filter((chunk): chunk is RawTranscriptionSegment => chunk !== null)
+    .map((chunk) => placeChunkOnTimeline(chunk, options))
+    .filter((chunk): chunk is RawTranscriptionSegment => chunk !== null)
+
+  if (normalized.length === 0 && fallbackText.trim()) {
+    return [
+      {
+        startTime: options?.coreStartTime ?? 0,
+        endTime: options?.coreEndTime ?? Math.max(1, fallbackText.length / 14),
+        text: fallbackText,
+      },
+    ]
+  }
 
   const looksWordLevel = normalized.length > 3 && normalized.every((chunk) => chunk.text.split(/\s+/).length <= 2)
   if (!looksWordLevel) {
@@ -297,6 +481,41 @@ function normalizeAsrChunks(chunks: unknown, fallbackText: string): RawTranscrip
       })),
     },
   ]
+}
+
+function placeChunkOnTimeline(
+  chunk: RawTranscriptionSegment,
+  options?: {
+    offsetSeconds?: number
+    coreStartTime?: number
+    coreEndTime?: number
+  },
+): RawTranscriptionSegment | null {
+  const offset = options?.offsetSeconds ?? 0
+  const absoluteStart = chunk.startTime + offset
+  const absoluteEnd = chunk.endTime + offset
+  const coreStart = options?.coreStartTime
+  const coreEnd = options?.coreEndTime
+
+  if (coreStart !== undefined && absoluteEnd <= coreStart + 0.02) {
+    return null
+  }
+
+  if (coreEnd !== undefined && absoluteStart >= coreEnd - 0.02) {
+    return null
+  }
+
+  const startTime = roundSeconds(coreStart === undefined ? absoluteStart : Math.max(coreStart, absoluteStart))
+  const endTime = roundSeconds(coreEnd === undefined ? absoluteEnd : Math.min(coreEnd, absoluteEnd))
+  if (endTime <= startTime) {
+    return null
+  }
+
+  return {
+    ...chunk,
+    startTime,
+    endTime,
+  }
 }
 
 function normalizeChunk(chunk: unknown): RawTranscriptionSegment | null {
@@ -350,6 +569,21 @@ function getDownloadProgress(data: unknown): { message: string; progress?: numbe
   }
 }
 
+function postCaptionSegments(segments: RawTranscriptionSegment[]): void {
+  for (const segment of segments) {
+    if (!segment.text.trim()) {
+      continue
+    }
+
+    postTerminalLog({
+      type: 'caption',
+      startTime: segment.startTime,
+      endTime: segment.endTime,
+      text: segment.text,
+    })
+  }
+}
+
 function calculateRms(samples: Float32Array): number {
   let sum = 0
   const stride = Math.max(1, Math.floor(samples.length / 500_000))
@@ -364,18 +598,80 @@ function calculateRms(samples: Float32Array): number {
 }
 
 function postProgress(stage: TranscriptionStage, message: string, progress?: number): void {
+  const overallProgress = getOverallProgress(stage, progress)
   post({
     type: 'progress',
     progress: {
       stage,
       message,
-      progress,
+      progress: overallProgress,
     },
+  })
+  postTerminalLog({
+    type: 'progress',
+    stage,
+    message,
+    progress: overallProgress,
   })
 }
 
 function post(event: WorkerEvent): void {
   self.postMessage(event)
+}
+
+function postTerminalLog(event: TerminalLogEvent): void {
+  if (!import.meta.env.DEV || !terminalJobId) {
+    return
+  }
+
+  void fetch('/__auto_subtitle_terminal', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...event,
+      jobId: terminalJobId,
+    }),
+  }).catch(() => undefined)
+}
+
+function getOverallProgress(stage: TranscriptionStage, progress = 0): number {
+  const stageProgress = clampProgress(progress)
+  const mapped = (() => {
+    if (stage === 'loading-engine') {
+      return 0.02
+    }
+
+    if (stage === 'preparing-video') {
+      return 0.06
+    }
+
+    if (stage === 'extracting-audio') {
+      return 0.08 + stageProgress * 0.22
+    }
+
+    if (stage === 'downloading-model') {
+      return 0.3 + stageProgress * 0.25
+    }
+
+    if (stage === 'transcribing') {
+      return 0.55 + stageProgress * 0.4
+    }
+
+    if (stage === 'formatting-subtitles') {
+      return 0.97
+    }
+
+    if (stage === 'complete') {
+      return 1
+    }
+
+    return lastOverallProgress
+  })()
+
+  lastOverallProgress = Math.max(lastOverallProgress, clampProgress(mapped))
+  return lastOverallProgress
 }
 
 function assertNotCancelled(): void {
@@ -398,4 +694,20 @@ function clampProgress(value: number): number {
   }
 
   return Math.max(0, Math.min(1, value))
+}
+
+function roundSeconds(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function createJobId(): string {
+  if ('crypto' in self && 'randomUUID' in self.crypto) {
+    return self.crypto.randomUUID()
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
