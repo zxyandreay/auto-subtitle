@@ -79,11 +79,10 @@ export function placeChunkOnTimeline(
     return null
   }
 
-  const ownershipTime = absoluteStart + (absoluteEnd - absoluteStart) / 2
-  if (options?.coreStartTime !== undefined && ownershipTime < options.coreStartTime) {
+  if (options?.coreStartTime !== undefined && absoluteStart < options.coreStartTime) {
     return null
   }
-  if (options?.coreEndTime !== undefined && ownershipTime >= options.coreEndTime) {
+  if (options?.coreEndTime !== undefined && absoluteStart >= options.coreEndTime) {
     return null
   }
 
@@ -110,12 +109,12 @@ function createFallbackSegment(
   options?: AsrTimelineOptions,
 ): RawTranscriptionSegment[] {
   const text = fallbackText.trim()
-  if (!text) {
+  if (!text || options?.coreStartTime !== undefined || options?.coreEndTime !== undefined) {
     return []
   }
 
-  const startTime = Math.max(0, options?.coreStartTime ?? 0)
-  const endTime = Math.max(startTime + 0.1, options?.coreEndTime ?? Math.max(1, text.length / 14))
+  const startTime = 0
+  const endTime = Math.max(1, text.length / 14)
   return [
     {
       startTime: roundSeconds(startTime),

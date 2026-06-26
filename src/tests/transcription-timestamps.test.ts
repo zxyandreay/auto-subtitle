@@ -16,17 +16,16 @@ describe('transcription window timestamp normalization', () => {
     expect(segments).toEqual([])
   })
 
-  it('preserves the real timestamp of a chunk crossing a core boundary', () => {
+  it('preserves the real timestamp when a crossing chunk begins in the current core', () => {
     const segment = placeChunkOnTimeline(
       {
-        startTime: 4.6,
-        endTime: 5.4,
+        startTime: 29.6,
+        endTime: 30.4,
         text: 'Boundary phrase.',
       },
       {
-        offsetSeconds: 25,
-        coreStartTime: 30,
-        coreEndTime: 60,
+        coreStartTime: 0,
+        coreEndTime: 30,
       },
     )
 
@@ -46,28 +45,45 @@ describe('transcription window timestamp normalization', () => {
         coreStartTime: 0,
         coreEndTime: 30,
       }),
-    ).toBeNull()
+    ).toMatchObject({ startTime: 29.6, endTime: 30.4 })
     expect(
       placeChunkOnTimeline(chunk, {
         coreStartTime: 30,
         coreEndTime: 60,
       }),
-    ).toMatchObject({ startTime: 29.6, endTime: 30.4 })
+    ).toBeNull()
   })
 
-  it('still uses the core interval when a model returns no timestamp chunks', () => {
+  it('does not place a long left-overlap chunk into earlier silence', () => {
+    const segment = placeChunkOnTimeline(
+      {
+        startTime: 1,
+        endTime: 12,
+        text: 'Speech recognized with long overlap context.',
+      },
+      {
+        offsetSeconds: 25,
+        coreStartTime: 30,
+        coreEndTime: 60,
+      },
+    )
+
+    expect(segment).toBeNull()
+  })
+
+  it('does not invent window timing when a model returns no timestamp chunks', () => {
     const segments = normalizeAsrChunks([], 'Untimed fallback text.', {
       offsetSeconds: 25,
       coreStartTime: 30,
       coreEndTime: 60,
     })
 
-    expect(segments).toEqual([
-      {
-        startTime: 30,
-        endTime: 60,
-        text: 'Untimed fallback text.',
-      },
+    expect(segments).toEqual([])
+  })
+
+  it('retains fallback behavior when normalization is used without windows', () => {
+    expect(normalizeAsrChunks([], 'Untimed fallback text.')).toEqual([
+      { startTime: 0, endTime: 1.571, text: 'Untimed fallback text.' },
     ])
   })
 })
