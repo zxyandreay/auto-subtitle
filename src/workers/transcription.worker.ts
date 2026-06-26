@@ -7,6 +7,21 @@ import type { TranscriptionSettings, TranscriptionStage, WorkerEvent, WorkerRequ
 
 let cancelled = false
 
+type TimestampMode = true | 'word'
+
+type AsrCallOptions = {
+  return_timestamps: TimestampMode
+  chunk_length_s: number
+  stride_length_s: number
+  language?: string
+  task: TranscriptionSettings['task']
+}
+
+type BrowserAsrTranscriber = {
+  (audio: Float32Array, options: AsrCallOptions): Promise<unknown>
+  dispose?: () => Promise<void> | void
+}
+
 self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   const request = event.data
 
@@ -55,7 +70,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   assertNotCancelled()
   postProgress('downloading-model', `Loading ${settings.modelId}. First use may download model files.`)
 
-  const transcriber = await pipeline('automatic-speech-recognition', settings.modelId, {
+  const transcriber = (await pipeline('automatic-speech-recognition', settings.modelId, {
     device: settings.executionProvider,
     dtype: settings.dtype === 'auto' ? undefined : settings.dtype,
     progress_callback: (data: unknown) => {
@@ -66,18 +81,12 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
         progress?.progress,
       )
     },
-  })
+  })) as BrowserAsrTranscriber
 
   try {
     assertNotCancelled()
     postProgress('transcribing', 'Transcribing speech locally with Whisper.')
-    const result = await transcriber(audio.samples, {
-      return_timestamps: settings.formatting.useWordTimestamps ? 'word' : true,
-      chunk_length_s: settings.chunkLengthSeconds,
-      stride_length_s: settings.strideLengthSeconds,
-      language: settings.language === 'auto' ? undefined : settings.language,
-      task: settings.task,
-    })
+    const result = await transcribeWithTimestampFallback(transcriber, audio.samples, settings)
 
     assertNotCancelled()
     postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
@@ -97,6 +106,56 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
       await transcriber.dispose()
     }
   }
+}
+
+async function transcribeWithTimestampFallback(
+  transcriber: BrowserAsrTranscriber,
+  samples: Float32Array,
+  settings: TranscriptionSettings,
+): Promise<unknown> {
+  const options = createAsrCallOptions(settings)
+
+  if (options.return_timestamps !== 'word') {
+    return transcriber(samples, options)
+  }
+
+  try {
+    return await transcriber(samples, options)
+  } catch (error) {
+    if (!isWordTimestampUnsupportedError(error)) {
+      throw error
+    }
+
+    assertNotCancelled()
+    postProgress(
+      'transcribing',
+      'Word timestamps are not available for this model export. Retrying with segment timestamps.',
+    )
+
+    return transcriber(samples, {
+      ...options,
+      return_timestamps: true,
+    })
+  }
+}
+
+function createAsrCallOptions(settings: TranscriptionSettings): AsrCallOptions {
+  return {
+    return_timestamps: settings.formatting.useWordTimestamps ? 'word' : true,
+    chunk_length_s: settings.chunkLengthSeconds,
+    stride_length_s: settings.strideLengthSeconds,
+    language: settings.language === 'auto' ? undefined : settings.language,
+    task: settings.task,
+  }
+}
+
+function isWordTimestampUnsupportedError(error: unknown): boolean {
+  const message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error)
+  return (
+    message.includes('Model outputs must contain cross attentions to extract timestamps') ||
+    message.includes('token-level timestamps not available') ||
+    message.includes('output_attentions=True')
+  )
 }
 
 async function extractAudio(file: File): Promise<{ samples: Float32Array; sampleRate: number }> {

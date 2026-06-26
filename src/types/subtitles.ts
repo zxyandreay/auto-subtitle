@@ -39,7 +39,7 @@ export const DEFAULT_FORMATTING_PREFERENCES: FormattingPreferences = {
   minDuration: 1.1,
   maxDuration: 6,
   gapBetweenSubtitles: 0.04,
-  useWordTimestamps: true,
+  useWordTimestamps: false,
 }
 
 export type ProjectMetadata = {
