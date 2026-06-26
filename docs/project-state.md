@@ -631,7 +631,8 @@ flowchart TD
     WordSplit --> ReadingSpeed["Improve duration and reading speed"]
     SegmentSplit --> ReadingSpeed
     Keep --> ReadingSpeed
-    ReadingSpeed --> Overlap["Trim or shift generated captions to avoid overlaps and tiny flicker gaps"]
+    ReadingSpeed --> SmoothCuts["Merge abrupt adjacent captions when still readable"]
+    SmoothCuts --> Overlap["Trim overlaps and chain short safe gaps"]
     Overlap --> Lines["Apply scored two-line wrapping"]
     Lines --> MakeEntries["Create SubtitleEntry records"]
     MakeEntries --> Sort["Sort and renumber"]
@@ -649,6 +650,14 @@ Formatting preferences:
 | `gapBetweenSubtitles` | `0.04` | Preventing back-to-back overlap after normalization. |
 | `useWordTimestamps` | `false` | Choosing word-level grouping when supported. |
 
+Best-practice inputs used for generated subtitles:
+
+1. [Netflix Timed Text Style Guide: Subtitle Timing Guidelines](https://partnerhelp.netflixstudios.com/hc/en-us/articles/360051554394-Timed-Text-Style-Guide-Subtitle-Timing-Guidelines) uses a minimum subtitle duration of 5/6 second, allows longer maximum display time, recommends a small technical gap, and advises closing gaps below about half a second instead of leaving distracting flicker.
+2. [BBC Subtitle Guidelines](https://bbc.github.io/subtitle-guidelines/) emphasize subtitle breaks that follow linguistic sense, complete clauses, and natural phrase units.
+3. [DCMP Captioning Key](https://dcmp.org/learn/captioningkey) frames synchronization and readability as core caption quality requirements, meaning text should appear with the matching audio and remain readable long enough for viewers.
+
+These sources are applied conservatively in Auto Subtitle. The app still honors the user-facing formatting preferences for generated captions, but the generated-only optimizer now treats the professional 5/6-second minimum as a floor when safe, extends very short captions before export, and reduces sub-half-second gaps by extending the previous caption rather than pulling the next caption too early.
+
 Text formatting behavior:
 
 1. Normalizes CRLF to LF.
@@ -656,9 +665,11 @@ Text formatting behavior:
 3. Removes empty lines.
 4. Removes near-duplicate generated captions from overlapping audio windows when adjacent text and timing are highly similar.
 5. Splits long generated captions first at sentence punctuation, then softer punctuation, then natural phrase boundaries.
-6. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
-7. Limits final generated caption display to at most two visible lines.
-8. Attempts to balance a short second line by moving a final word when useful.
+6. Penalizes word-timed cuts that would create a very short phrase flash, even when punctuation exists.
+7. Merges abrupt adjacent generated captions when the combined caption remains within line, duration, and reading-speed limits.
+8. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
+9. Limits final generated caption display to at most two visible lines.
+10. Attempts to balance a short second line by moving a final word when useful.
 
 Timing formatting behavior:
 
@@ -668,11 +679,12 @@ Timing formatting behavior:
 4. When usable word timestamps exist, generated caption ends prefer the last word end with about 0.18 seconds of tail padding.
 5. Segment-level timing remains the fallback when word timestamps are absent or incomplete.
 6. Generated captions target a maximum reading speed of about 21 characters per second.
-7. Dense generated captions are extended when safe, then split if they still exceed readability limits.
-8. Entries are sorted by start time and end time.
-9. Indices are recalculated from 1.
-10. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
-11. Tiny safe gaps are chained to reduce visible flicker.
+7. Very short generated captions are extended toward the app minimum duration and the professional 5/6-second floor when safe.
+8. Dense generated captions are extended when safe, then split if they still exceed readability limits.
+9. Entries are sorted by start time and end time.
+10. Indices are recalculated from 1.
+11. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
+12. Safe gaps below about 0.5 seconds are chained by extending the previous caption where possible, reducing visible flicker without starting the next word-timed caption early.
 
 Generated-caption helper responsibilities:
 
@@ -682,6 +694,7 @@ Generated-caption helper responsibilities:
 | `calculateCharactersPerSecond` | Measures readable text density over caption duration. |
 | `calculateReadableDuration` | Computes a deterministic readable duration target from text length and formatting preferences. |
 | `needsSplitForReadability` | Decides whether a generated caption needs timing extension or segmentation. |
+| `smoothAbruptGeneratedCaptions` | Merges short or too-fast adjacent generated captions when the result stays readable. |
 | `normalizeForDuplicateComparison` | Canonicalizes generated text for conservative duplicate detection. |
 | `tokenSimilarity` | Compares adjacent generated captions for overlap-window duplicate cleanup. |
 | `dedupeOverlappingSegments` | Removes or safely merges adjacent duplicate generated segments near chunk boundaries. |
@@ -1186,13 +1199,16 @@ They cover:
 14. Generated-caption line breaking that avoids unsafe phrase splits.
 15. Generated-caption punctuation splitting.
 16. Generated-caption reading-speed protection.
-17. Generated-caption word-timestamp sync.
-18. Generated-caption duplicate cleanup near chunk boundaries.
-19. Live transcription preview replacement of pre-existing base subtitles.
-20. Live transcription preview preservation of edited streamed rows.
-21. Live transcription preview preservation of deleted streamed rows.
-22. Valid project JSON round trip.
-23. Malformed project rejection.
+17. Generated-caption extension of very short captions toward readable minimum duration.
+18. Generated-caption word-timestamp sync.
+19. Generated-caption avoidance of abrupt word-timed cuts after very short phrases.
+20. Generated-caption chaining of short safe gaps.
+21. Generated-caption duplicate cleanup near chunk boundaries.
+22. Live transcription preview replacement of pre-existing base subtitles.
+23. Live transcription preview preservation of edited streamed rows.
+24. Live transcription preview preservation of deleted streamed rows.
+25. Valid project JSON round trip.
+26. Malformed project rejection.
 
 The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 

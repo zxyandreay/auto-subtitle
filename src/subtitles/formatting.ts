@@ -11,11 +11,14 @@ export type RawTranscriptionSegment = {
 }
 
 const TARGET_MAX_CHARACTERS_PER_SECOND = 21
+const PROFESSIONAL_MIN_SUBTITLE_DURATION_SECONDS = 5 / 6
 const WORD_LEAD_IN_SECONDS = 0.08
 const WORD_TAIL_SECONDS = 0.18
 const PAUSE_SPLIT_SECONDS = 0.35
 const DUPLICATE_GAP_SECONDS = 0.75
 const TINY_GAP_SECONDS = 0.12
+const CHAINABLE_GAP_SECONDS = 0.5
+const MAX_EXTENSION_PAST_AUDIO_SECONDS = 0.5
 const MIN_GENERATED_CAPTION_DURATION = 0.25
 
 export function normalizeSubtitleText(text: string): string {
@@ -225,7 +228,9 @@ export function optimizeGeneratedCaptions(
   const extended = extendSegmentDurationsBeforeSplitting(deduped, preferences, duration)
   const split = extended.flatMap((segment) => splitGeneratedSegment(segment, preferences, duration))
   const readable = improveGeneratedCaptionDurations(split, preferences, duration)
-  return normalizeGeneratedCaptionOverlaps(readable, preferences, duration)
+  const smoothed = smoothAbruptGeneratedCaptions(readable, preferences, duration)
+  const rebalanced = improveGeneratedCaptionDurations(smoothed, preferences, duration)
+  return normalizeGeneratedCaptionOverlaps(rebalanced, preferences, duration)
 }
 
 export function calculateCharactersPerSecond(text: string, startTime: number, endTime: number): number {
@@ -239,7 +244,7 @@ export function calculateCharactersPerSecond(text: string, startTime: number, en
 
 export function calculateReadableDuration(text: string, preferences: FormattingPreferences): number {
   const readableDuration = countReadableCharacters(text) / TARGET_MAX_CHARACTERS_PER_SECOND
-  const minimum = Math.max(MIN_GENERATED_CAPTION_DURATION, preferences.minDuration)
+  const minimum = getMinimumGeneratedCaptionDuration(preferences)
   return roundTime(Math.min(preferences.maxDuration, Math.max(minimum, readableDuration)))
 }
 
@@ -445,12 +450,13 @@ function splitPlainTimedSegment(
     ]
   }
 
-  const weights = parts.map((part) => Math.max(MIN_GENERATED_CAPTION_DURATION, calculateTotalReadableDuration(part, preferences)))
+  const preferredMinimumDuration = getMinimumGeneratedCaptionDuration(preferences)
+  const weights = parts.map((part) => Math.max(preferredMinimumDuration, calculateTotalReadableDuration(part, preferences)))
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
   const totalDuration = Math.max(0.05 * parts.length, segment.endTime - segment.startTime)
   const minimumPartDuration =
-    totalDuration >= MIN_GENERATED_CAPTION_DURATION * parts.length
-      ? MIN_GENERATED_CAPTION_DURATION
+    totalDuration >= preferredMinimumDuration * parts.length
+      ? preferredMinimumDuration
       : Math.max(0.05, totalDuration / parts.length)
   let cursor = segment.startTime
 
@@ -496,18 +502,13 @@ function improveGeneratedCaptionDurations(
         return segment
       }
 
+      const desiredEnd = segment.startTime + calculateReadableDuration(segment.text, preferences)
+      const wordTimedEnd = lastWord.endTime + WORD_TAIL_SECONDS
       return {
         ...segment,
         startTime: roundTime(Math.max(0, firstWord.startTime - WORD_LEAD_IN_SECONDS)),
-        endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, lastWord.endTime + WORD_TAIL_SECONDS, maxEnd)),
+        endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, maxEnd, Math.max(segment.endTime, desiredEnd, wordTimedEnd))),
         words,
-      }
-    }
-
-    if (calculateCharactersPerSecond(segment.text, segment.startTime, segment.endTime) <= TARGET_MAX_CHARACTERS_PER_SECOND) {
-      return {
-        ...segment,
-        endTime: roundTime(Math.min(maxEnd, segment.endTime)),
       }
     }
 
@@ -517,6 +518,84 @@ function improveGeneratedCaptionDurations(
       endTime: roundTime(Math.min(maxEnd, Math.max(segment.endTime, desiredEnd))),
     }
   })
+}
+
+function smoothAbruptGeneratedCaptions(
+  segments: RawTranscriptionSegment[],
+  preferences: FormattingPreferences,
+  duration?: number,
+): RawTranscriptionSegment[] {
+  const smoothed: RawTranscriptionSegment[] = []
+
+  for (const segment of sortRawSegments(segments)) {
+    const previous = smoothed.at(-1)
+    if (previous && shouldMergeAbruptCaptions(previous, segment, preferences, duration)) {
+      smoothed[smoothed.length - 1] = mergeRawSegments(previous, segment, duration)
+      continue
+    }
+
+    smoothed.push(segment)
+  }
+
+  return smoothed
+}
+
+function shouldMergeAbruptCaptions(
+  first: RawTranscriptionSegment,
+  second: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+  duration?: number,
+): boolean {
+  const gap = second.startTime - first.endTime
+  if (gap < -preferences.gapBetweenSubtitles || gap > CHAINABLE_GAP_SECONDS) {
+    return false
+  }
+
+  if (!isAbruptGeneratedCaption(first, preferences) && !isAbruptGeneratedCaption(second, preferences)) {
+    return false
+  }
+
+  const text = joinCaptionText(first.text, second.text)
+  const startTime = Math.min(first.startTime, second.startTime)
+  const endTime = Math.min(duration ?? Number.POSITIVE_INFINITY, Math.max(first.endTime, second.endTime))
+  if (
+    text.length > getMaxGeneratedCaptionCharacters(preferences) ||
+    endTime - startTime > preferences.maxDuration ||
+    calculateCharactersPerSecond(text, startTime, endTime) > TARGET_MAX_CHARACTERS_PER_SECOND + 2
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function isAbruptGeneratedCaption(segment: RawTranscriptionSegment, preferences: FormattingPreferences): boolean {
+  const duration = segment.endTime - segment.startTime
+  const wordCount = tokenizeForComparison(segment.text).length
+  return (
+    duration < getMinimumGeneratedCaptionDuration(preferences) ||
+    calculateCharactersPerSecond(segment.text, segment.startTime, segment.endTime) > TARGET_MAX_CHARACTERS_PER_SECOND ||
+    (wordCount <= 2 && duration < getMinimumGeneratedCaptionDuration(preferences) + 0.2)
+  )
+}
+
+function mergeRawSegments(
+  first: RawTranscriptionSegment,
+  second: RawTranscriptionSegment,
+  duration?: number,
+): RawTranscriptionSegment {
+  const words = [...(first.words ?? []), ...(second.words ?? [])]
+  return {
+    ...first,
+    startTime: roundTime(Math.min(first.startTime, second.startTime)),
+    endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, Math.max(first.endTime, second.endTime))),
+    text: joinCaptionText(first.text, second.text),
+    confidence:
+      first.confidence !== undefined && second.confidence !== undefined
+        ? roundTime((first.confidence + second.confidence) / 2, 4)
+        : first.confidence ?? second.confidence,
+    words: words.length ? words : undefined,
+  }
 }
 
 function normalizeGeneratedCaptionOverlaps(
@@ -555,11 +634,16 @@ function normalizeGeneratedCaptionOverlaps(
             next.startTime = shiftedStart
           }
         }
-      } else if (actualGap > preferences.gapBetweenSubtitles && actualGap < TINY_GAP_SECONDS) {
-        const chainedStart = roundTime(requiredStart)
-        const currentContentStart = getContentStartTime(next)
-        if (!next.words?.length || chainedStart <= currentContentStart + WORD_LEAD_IN_SECONDS) {
-          next.startTime = chainedStart
+      } else if (actualGap > preferences.gapBetweenSubtitles && actualGap < CHAINABLE_GAP_SECONDS) {
+        const chainedPreviousEnd = roundTime(next.startTime - preferences.gapBetweenSubtitles)
+        if (canExtendCaptionEnd(previous, chainedPreviousEnd, preferences, duration)) {
+          previous.endTime = chainedPreviousEnd
+        } else if (actualGap < TINY_GAP_SECONDS) {
+          const chainedStart = roundTime(requiredStart)
+          const currentContentStart = getContentStartTime(next)
+          if (!next.words?.length || chainedStart <= currentContentStart + WORD_LEAD_IN_SECONDS) {
+            next.startTime = chainedStart
+          }
         }
       }
     }
@@ -717,18 +801,34 @@ function findBestWordGroupEnd(
     const remainingCount = lastIndex - index
     const nextWord = words[index + 1]
     const pauseAfter = Math.max(0, nextWord.startTime - words[index].endTime)
+    const possibleDisplayDuration =
+      groupDuration +
+      WORD_LEAD_IN_SECONDS +
+      WORD_TAIL_SECONDS +
+      Math.min(Math.max(0, pauseAfter - preferences.gapBetweenSubtitles), MAX_EXTENSION_PAST_AUDIO_SECONDS)
+    const readableShortfall = Math.max(0, calculateReadableDuration(text, preferences) - possibleDisplayDuration)
+    const remainingWords = words.slice(index + 1)
+    const remainingText = remainingWords.map((word) => word.text).join(' ')
+    const remainingDisplayDuration = remainingWords.length
+      ? words[lastIndex].endTime - remainingWords[0].startTime + WORD_LEAD_IN_SECONDS + WORD_TAIL_SECONDS
+      : 0
+    const remainingShortfall = remainingWords.length
+      ? Math.max(0, calculateReadableDuration(remainingText, preferences) - remainingDisplayDuration)
+      : 0
     const maxCaptionCharacters = getMaxGeneratedCaptionCharacters(preferences)
     const overLimitPenalty =
-      text.length > maxCaptionCharacters || groupDuration > preferences.maxDuration ? 200 : 0
+      text.length > maxCaptionCharacters || groupDuration > preferences.maxDuration ? 400 : 0
     const score =
       overLimitPenalty +
+      readableShortfall * 90 +
+      remainingShortfall * 45 +
       Math.abs(text.length - maxCaptionCharacters * 0.75) +
       phraseBreakPenalty(words[index].text, nextWord.text) +
       (hasStrongPunctuation(words[index].text) ? -80 : 0) +
       (hasSoftPunctuation(words[index].text) ? -45 : 0) +
       (pauseAfter >= PAUSE_SPLIT_SECONDS ? -35 : 0) +
       (group.length <= 1 || remainingCount <= 1 ? 70 : 0) +
-      (groupDuration < preferences.minDuration && group.length > 1 ? 12 : 0)
+      (possibleDisplayDuration < getMinimumGeneratedCaptionDuration(preferences) && group.length > 1 ? 55 : 0)
 
     if (!best || score < best.score) {
       best = { index, score }
@@ -838,7 +938,14 @@ function normalizeSegmentTime(value: number, fallback: number, duration?: number
 }
 
 function calculateTotalReadableDuration(text: string, preferences: FormattingPreferences): number {
-  return roundTime(Math.max(preferences.minDuration, countReadableCharacters(text) / TARGET_MAX_CHARACTERS_PER_SECOND))
+  return roundTime(Math.max(getMinimumGeneratedCaptionDuration(preferences), countReadableCharacters(text) / TARGET_MAX_CHARACTERS_PER_SECOND))
+}
+
+function getMinimumGeneratedCaptionDuration(preferences: FormattingPreferences): number {
+  return Math.min(
+    preferences.maxDuration,
+    Math.max(MIN_GENERATED_CAPTION_DURATION, PROFESSIONAL_MIN_SUBTITLE_DURATION_SECONDS, preferences.minDuration),
+  )
 }
 
 function getMaxGeneratedCaptionCharacters(preferences: FormattingPreferences): number {
@@ -869,6 +976,32 @@ function getContentStartTime(segment: RawTranscriptionSegment): number {
 
 function getContentEndTime(segment: RawTranscriptionSegment): number {
   return segment.words?.at(-1)?.endTime ?? segment.endTime
+}
+
+function canExtendCaptionEnd(
+  segment: RawTranscriptionSegment,
+  targetEnd: number,
+  preferences: FormattingPreferences,
+  duration?: number,
+): boolean {
+  if (targetEnd <= segment.endTime) {
+    return false
+  }
+  if (duration !== undefined && targetEnd > duration) {
+    return false
+  }
+  if (targetEnd - segment.startTime > preferences.maxDuration) {
+    return false
+  }
+  if (targetEnd - getContentEndTime(segment) > MAX_EXTENSION_PAST_AUDIO_SECONDS) {
+    return false
+  }
+
+  return targetEnd >= segment.startTime + MIN_GENERATED_CAPTION_DURATION
+}
+
+function joinCaptionText(first: string, second: string): string {
+  return normalizeSubtitleText(`${first} ${second}`).replace(/\n+/g, ' ')
 }
 
 function findNaturalSplit(text: string): number {
