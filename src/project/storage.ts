@@ -1,6 +1,6 @@
-import type { AutoSubtitlesProject } from '../types/subtitles'
+import type { AutoSubtitleProject } from '../types/subtitles'
 
-const DB_NAME = 'auto-subtitles'
+const DB_NAME = 'auto-subtitle'
 const DB_VERSION = 1
 const STORE_NAME = 'projects'
 const AUTOSAVE_KEY = 'autosave'
@@ -8,11 +8,11 @@ const AUTOSAVE_KEY = 'autosave'
 export type AutosaveRecord = {
   key: typeof AUTOSAVE_KEY
   savedAt: string
-  project: AutoSubtitlesProject
-  history?: AutoSubtitlesProject['subtitles'][]
+  project: AutoSubtitleProject
+  history?: AutoSubtitleProject['subtitles'][]
 }
 
-export async function saveAutosave(project: AutoSubtitlesProject): Promise<void> {
+export async function saveAutosave(project: AutoSubtitleProject): Promise<void> {
   const db = await openDatabase()
   await requestToPromise(
     db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put({

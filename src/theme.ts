@@ -1,6 +1,6 @@
 export type ThemePreference = 'light' | 'dark' | 'system'
 
-const THEME_KEY = 'auto-subtitles-theme'
+const THEME_KEY = 'auto-subtitle-theme'
 
 export function loadThemePreference(): ThemePreference {
   const saved = localStorage.getItem(THEME_KEY)

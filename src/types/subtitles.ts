@@ -43,7 +43,7 @@ export const DEFAULT_FORMATTING_PREFERENCES: FormattingPreferences = {
 }
 
 export type ProjectMetadata = {
-  appName: 'Auto Subtitles'
+  appName: 'Auto Subtitle'
   schemaVersion: 1
   exportedAt: string
   videoFileName?: string
@@ -51,7 +51,7 @@ export type ProjectMetadata = {
   videoDuration?: number
 }
 
-export type AutoSubtitlesProject = {
+export type AutoSubtitleProject = {
   metadata: ProjectMetadata
   subtitles: SubtitleEntry[]
   formatting: FormattingPreferences

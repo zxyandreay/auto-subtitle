@@ -20,5 +20,5 @@ export function downloadTextFile(fileName: string, content: string, type: string
 }
 
 export function baseName(fileName: string): string {
-  return fileName.replace(/\.[^.]+$/, '') || 'auto-subtitles'
+  return fileName.replace(/\.[^.]+$/, '') || 'auto-subtitle'
 }

@@ -42,7 +42,7 @@ export function ProjectToolbar({
       <div className="brand">
         <div className="brand-mark">AS</div>
         <div>
-          <h1>Auto Subtitles</h1>
+          <h1>Auto Subtitle</h1>
           <p>Local-first subtitle generation and editing</p>
         </div>
       </div>

@@ -123,7 +123,7 @@ describe('subtitle editing logic', () => {
 })
 
 describe('project import validation', () => {
-  it('validates an exported Auto Subtitles project', () => {
+  it('validates an exported Auto Subtitle project', () => {
     const project = createProjectExport(
       [makeSubtitleEntry({ startTime: 0, endTime: 2, text: 'Saved text' })],
       DEFAULT_FORMATTING_PREFERENCES,

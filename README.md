@@ -1,6 +1,6 @@
-# Auto Subtitles
+# Auto Subtitle
 
-Auto Subtitles is a local-first web app for creating, previewing, editing, importing, and exporting subtitles for videos on your computer. It is built with React, TypeScript, Vite, FFmpeg.wasm, and Transformers.js.
+Auto Subtitle is a local-first web app for creating, previewing, editing, importing, and exporting subtitles for videos on your computer. It is built with React, TypeScript, Vite, FFmpeg.wasm, and Transformers.js.
 
 The selected video is handled as a browser `File` with a temporary object URL. The app does not upload the video, does not call a paid transcription API, and does not require an account, API key, backend, database, analytics, or tracking.
 
@@ -11,7 +11,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, visible failures, and cancellation.
 - Subtitle editor with text and timestamp editing, immediate validation, active-row highlighting, search, add/delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
-- SRT and WebVTT import/export, transcript TXT export, and Auto Subtitles JSON project export/import.
+- SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
 - Keyboard shortcuts for playback, seeking, undo, and redo.
@@ -27,7 +27,7 @@ Screenshots are not committed yet. Run the app locally and capture:
 
 ## Privacy
 
-Auto Subtitles is designed to keep media local:
+Auto Subtitle is designed to keep media local:
 
 - The selected video is not copied into the repository or `public/`.
 - The app creates a temporary object URL and revokes it when the video is replaced, removed, or the app unmounts.
@@ -61,6 +61,7 @@ The launcher:
 - installs dependencies with `npm ci` when possible
 - starts Vite on `http://127.0.0.1:5173`
 - opens the app in the default browser
+- stops the local server when you press Enter or close the launcher terminal
 - keeps the terminal open if an error occurs
 
 ## Manual Commands
@@ -102,14 +103,14 @@ Supported imports:
 
 - `.srt`
 - `.vtt`
-- `.json` Auto Subtitles project files
+- `.json` Auto Subtitle project files
 
 Supported exports:
 
 - `.srt` SubRip using `HH:MM:SS,mmm`
 - `.vtt` WebVTT using `HH:MM:SS.mmm`
 - `.txt` readable transcript, with optional timestamps
-- `.auto-subtitles.json` project data without the original video
+- `.auto-subtitle.json` project data without the original video
 
 When importing project JSON, the app validates the schema and asks you to select the original video again. Saved video name and duration are used as comparison hints only.
 

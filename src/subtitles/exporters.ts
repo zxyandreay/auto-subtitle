@@ -1,6 +1,6 @@
 import { sortAndRenumber } from './formatting'
 import { validateSubtitles } from './validation'
-import type { AutoSubtitlesProject, FormattingPreferences, SubtitleEntry } from '../types/subtitles'
+import type { AutoSubtitleProject, FormattingPreferences, SubtitleEntry } from '../types/subtitles'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
 import { formatSrtTimestamp, formatVttTimestamp } from '../utils/time'
 
@@ -49,10 +49,10 @@ export function createProjectExport(
     videoDuration?: number
   },
   transcriptionSettings?: Record<string, unknown>,
-): AutoSubtitlesProject {
+): AutoSubtitleProject {
   return {
     metadata: {
-      appName: 'Auto Subtitles',
+      appName: 'Auto Subtitle',
       schemaVersion: 1,
       exportedAt: new Date().toISOString(),
       ...metadata,
@@ -63,11 +63,11 @@ export function createProjectExport(
   }
 }
 
-export function exportProjectJson(project: AutoSubtitlesProject): string {
+export function exportProjectJson(project: AutoSubtitleProject): string {
   return `${JSON.stringify(project, null, 2)}\n`
 }
 
-export function parseProjectJson(content: string): { project?: AutoSubtitlesProject; errors: string[] } {
+export function parseProjectJson(content: string): { project?: AutoSubtitleProject; errors: string[] } {
   try {
     const parsed = JSON.parse(content) as unknown
     return validateProject(parsed)
@@ -78,7 +78,7 @@ export function parseProjectJson(content: string): { project?: AutoSubtitlesProj
   }
 }
 
-export function validateProject(value: unknown): { project?: AutoSubtitlesProject; errors: string[] } {
+export function validateProject(value: unknown): { project?: AutoSubtitleProject; errors: string[] } {
   const errors: string[] = []
 
   if (!isRecord(value)) {
@@ -86,7 +86,7 @@ export function validateProject(value: unknown): { project?: AutoSubtitlesProjec
   }
 
   const metadata = value.metadata
-  if (!isRecord(metadata) || metadata.appName !== 'Auto Subtitles' || metadata.schemaVersion !== 1) {
+  if (!isRecord(metadata) || metadata.appName !== 'Auto Subtitle' || metadata.schemaVersion !== 1) {
     errors.push('Project metadata is missing or uses an unsupported schema.')
   }
 
@@ -99,9 +99,9 @@ export function validateProject(value: unknown): { project?: AutoSubtitlesProjec
     : []
 
   const formatting = normalizeFormatting(value.formatting)
-  const project: AutoSubtitlesProject = {
+  const project: AutoSubtitleProject = {
     metadata: {
-      appName: 'Auto Subtitles',
+      appName: 'Auto Subtitle',
       schemaVersion: 1,
       exportedAt:
         isRecord(metadata) && typeof metadata.exportedAt === 'string'

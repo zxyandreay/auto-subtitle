@@ -340,7 +340,7 @@ function App() {
   }
 
   const handleExport = (kind: 'srt' | 'vtt' | 'txt' | 'json') => {
-    const name = baseName(video?.file.name ?? 'auto-subtitles')
+    const name = baseName(video?.file.name ?? 'auto-subtitle')
 
     try {
       if (kind === 'srt') {
@@ -363,7 +363,7 @@ function App() {
           },
           settings,
         )
-        downloadTextFile(`${name}.auto-subtitles.json`, exportProjectJson(project), 'application/json;charset=utf-8')
+        downloadTextFile(`${name}.auto-subtitle.json`, exportProjectJson(project), 'application/json;charset=utf-8')
       }
 
       setNotice({
