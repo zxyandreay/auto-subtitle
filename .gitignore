@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+dist-ssr/
+.vite/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local environment
+.env
+.env.*
+*.local
+
+# Local media and generated output
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.wav
+*.mp3
+*.m4a
+*.flac
+output/
+exports/
+temp/
+tmp/
+ffmpeg-temp/
+models/
+model-cache/
+.cache/
+
+# Test and tooling caches
+coverage/
+playwright-report/
+test-results/
+qa-artifacts/
+*.tsbuildinfo
+
+# Editor and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

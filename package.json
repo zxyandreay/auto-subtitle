@@ -1,0 +1,35 @@
+{
+  "name": "auto-subtitles",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "@huggingface/transformers": "^4.2.0",
+    "lucide-react": "^1.21.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^29.1.1",
+    "oxlint": "^1.69.0",
+    "playwright": "^1.61.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.0",
+    "vitest": "^4.1.9"
+  }
+}

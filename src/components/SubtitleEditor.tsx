@@ -1,0 +1,426 @@
+import {
+  ArrowDown,
+  ArrowUp,
+  Copy,
+  CornerDownRight,
+  Plus,
+  Scissors,
+  Search,
+  Trash2,
+} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  formatSubtitleText,
+  makeSubtitleEntry,
+  mergeEntries,
+  removeEmptyEntries,
+  sortAndRenumber,
+  splitEntry,
+} from '../subtitles/formatting'
+import { getIssuesForEntry, validateSubtitles } from '../subtitles/validation'
+import type { FormattingPreferences, SubtitleEntry, ValidationIssue } from '../types/subtitles'
+import { formatTimestamp, parseTimestamp } from '../utils/time'
+import { IconButton } from './IconButton'
+
+type SubtitleEditorProps = {
+  entries: SubtitleEntry[]
+  activeEntryId?: string
+  duration?: number
+  formatting: FormattingPreferences
+  autoScroll: boolean
+  showOnlyErrors: boolean
+  onAutoScrollChange: (enabled: boolean) => void
+  onShowOnlyErrorsChange: (enabled: boolean) => void
+  onChange: (entries: SubtitleEntry[]) => void
+  onSeek: (time: number) => void
+  onPlayRange: (startTime: number, endTime: number) => void
+}
+
+export function SubtitleEditor({
+  entries,
+  activeEntryId,
+  duration,
+  formatting,
+  autoScroll,
+  showOnlyErrors,
+  onAutoScrollChange,
+  onShowOnlyErrorsChange,
+  onChange,
+  onSeek,
+  onPlayRange,
+}: SubtitleEditorProps) {
+  const [query, setQuery] = useState('')
+  const [matchIndex, setMatchIndex] = useState(0)
+  const activeRef = useRef<HTMLDivElement | null>(null)
+  const issues = useMemo(() => validateSubtitles(entries, duration), [duration, entries])
+  const issueIds = useMemo(() => new Set(issues.map((issue) => issue.entryId)), [issues])
+  const matches = useMemo(() => {
+    const lowerQuery = query.trim().toLowerCase()
+    if (!lowerQuery) {
+      return []
+    }
+    return entries.filter((entry) => entry.text.toLowerCase().includes(lowerQuery)).map((entry) => entry.id)
+  }, [entries, query])
+  const visibleEntries = showOnlyErrors ? entries.filter((entry) => issueIds.has(entry.id)) : entries
+
+  useEffect(() => {
+    setMatchIndex(0)
+  }, [query])
+
+  useEffect(() => {
+    if (autoScroll && activeRef.current) {
+      activeRef.current.scrollIntoView({ block: 'nearest' })
+    }
+  }, [activeEntryId, autoScroll])
+
+  const commit = (next: SubtitleEntry[]) => onChange(sortAndRenumber(next))
+
+  const updateEntry = (id: string, patch: Partial<SubtitleEntry>) => {
+    commit(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
+  }
+
+  const insertAt = (index: number, placement: 'before' | 'after') => {
+    const anchor = entries[index]
+    const startTime = anchor
+      ? placement === 'before'
+        ? Math.max(0, anchor.startTime - 2)
+        : anchor.endTime + 0.1
+      : 0
+    const endTime = anchor
+      ? placement === 'before'
+        ? Math.max(startTime + 1, anchor.startTime - 0.1)
+        : anchor.endTime + 2
+      : 2
+    const next = makeSubtitleEntry({ startTime, endTime, text: 'New subtitle' })
+    const position = placement === 'before' ? index : index + 1
+    commit([...entries.slice(0, position), next, ...entries.slice(position)])
+  }
+
+  const jumpToMatch = (direction: 1 | -1) => {
+    if (!matches.length) {
+      return
+    }
+    const nextIndex = (matchIndex + direction + matches.length) % matches.length
+    setMatchIndex(nextIndex)
+    const entry = entries.find((item) => item.id === matches[nextIndex])
+    if (entry) {
+      onSeek(entry.startTime)
+    }
+  }
+
+  return (
+    <section className="editor-panel" aria-label="Subtitle editor">
+      <div className="panel-heading">
+        <div>
+          <h2>Subtitle editor</h2>
+          <p>
+            {entries.length} entries
+            {issues.length ? `, ${issues.length} validation ${issues.length === 1 ? 'issue' : 'issues'}` : ', no issues'}
+          </p>
+        </div>
+        <button className="button button--soft" type="button" onClick={() => insertAt(entries.length - 1, 'after')}>
+          <Plus size={16} />
+          Add
+        </button>
+      </div>
+
+      <div className="editor-tools">
+        <label className="search-box">
+          <Search size={16} />
+          <input
+            aria-label="Search subtitle text"
+            placeholder="Search subtitles"
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <div className="match-nav">
+          <span>
+            {matches.length ? `${matchIndex + 1}/${matches.length}` : '0/0'}
+          </span>
+          <IconButton label="Previous search match" onClick={() => jumpToMatch(-1)}>
+            <ArrowUp size={16} />
+          </IconButton>
+          <IconButton label="Next search match" onClick={() => jumpToMatch(1)}>
+            <ArrowDown size={16} />
+          </IconButton>
+        </div>
+        <label className="toggle-line">
+          <input
+            checked={showOnlyErrors}
+            type="checkbox"
+            onChange={(event) => onShowOnlyErrorsChange(event.target.checked)}
+          />
+          Errors
+        </label>
+        <label className="toggle-line">
+          <input
+            checked={autoScroll}
+            type="checkbox"
+            onChange={(event) => onAutoScrollChange(event.target.checked)}
+          />
+          Auto-scroll
+        </label>
+      </div>
+
+      <div className="subtitle-list" role="list">
+        {visibleEntries.length ? (
+          visibleEntries.map((entry) => {
+            const index = entries.findIndex((item) => item.id === entry.id)
+            const entryIssues = getIssuesForEntry(entry.id, entries, duration)
+            const isActive = entry.id === activeEntryId
+            const isMatch = matches[matchIndex] === entry.id
+
+            return (
+              <SubtitleRow
+                refCallback={isActive ? (element) => (activeRef.current = element) : undefined}
+                key={entry.id}
+                entry={entry}
+                formatting={formatting}
+                issues={entryIssues}
+                isActive={isActive}
+                isMatch={isMatch}
+                onAddAfter={() => insertAt(index, 'after')}
+                onAddBefore={() => insertAt(index, 'before')}
+                onDelete={() => commit(entries.filter((item) => item.id !== entry.id))}
+                onDuplicate={() => {
+                  const duplicate = makeSubtitleEntry({
+                    startTime: entry.endTime + 0.1,
+                    endTime: entry.endTime + Math.max(1, entry.endTime - entry.startTime),
+                    text: entry.text,
+                  })
+                  commit([...entries.slice(0, index + 1), duplicate, ...entries.slice(index + 1)])
+                }}
+                onMergeNext={() => {
+                  const next = entries[index + 1]
+                  if (next) {
+                    commit([...entries.slice(0, index), mergeEntries(entry, next), ...entries.slice(index + 2)])
+                  }
+                }}
+                onMergePrevious={() => {
+                  const previous = entries[index - 1]
+                  if (previous) {
+                    commit([...entries.slice(0, index - 1), mergeEntries(previous, entry), ...entries.slice(index + 1)])
+                  }
+                }}
+                onMoveDown={() => {
+                  if (index < entries.length - 1) {
+                    const next = [...entries]
+                    const moved = next[index]
+                    next[index] = next[index + 1]
+                    next[index + 1] = moved
+                    commit(next.map((item, itemIndex) => ({ ...item, index: itemIndex + 1 })))
+                  }
+                }}
+                onMoveUp={() => {
+                  if (index > 0) {
+                    const next = [...entries]
+                    const moved = next[index]
+                    next[index] = next[index - 1]
+                    next[index - 1] = moved
+                    commit(next.map((item, itemIndex) => ({ ...item, index: itemIndex + 1 })))
+                  }
+                }}
+                onPlayRange={() => onPlayRange(entry.startTime, entry.endTime)}
+                onSeek={() => onSeek(entry.startTime)}
+                onSplit={() => {
+                  const [first, second] = splitEntry(entry)
+                  commit([...entries.slice(0, index), first, second, ...entries.slice(index + 1)])
+                }}
+                onUpdate={(patch) => updateEntry(entry.id, patch)}
+              />
+            )
+          })
+        ) : (
+          <div className="empty-editor">
+            <p>No subtitles yet.</p>
+            <button className="button button--primary" type="button" onClick={() => insertAt(-1, 'after')}>
+              <Plus size={16} />
+              Create first subtitle
+            </button>
+          </div>
+        )}
+      </div>
+
+      {entries.length ? (
+        <div className="editor-footer">
+          <button className="button button--ghost" type="button" onClick={() => commit(removeEmptyEntries(entries))}>
+            Remove empty entries
+          </button>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+type SubtitleRowProps = {
+  entry: SubtitleEntry
+  issues: ValidationIssue[]
+  formatting: FormattingPreferences
+  isActive: boolean
+  isMatch: boolean
+  refCallback?: (element: HTMLDivElement | null) => void
+  onUpdate: (patch: Partial<SubtitleEntry>) => void
+  onSeek: () => void
+  onPlayRange: () => void
+  onAddBefore: () => void
+  onAddAfter: () => void
+  onDelete: () => void
+  onSplit: () => void
+  onMergePrevious: () => void
+  onMergeNext: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+  onDuplicate: () => void
+}
+
+function SubtitleRow({
+  entry,
+  issues,
+  formatting,
+  isActive,
+  isMatch,
+  refCallback,
+  onUpdate,
+  onSeek,
+  onPlayRange,
+  onAddBefore,
+  onAddAfter,
+  onDelete,
+  onSplit,
+  onMergePrevious,
+  onMergeNext,
+  onMoveUp,
+  onMoveDown,
+  onDuplicate,
+}: SubtitleRowProps) {
+  const hasError = issues.some((issue) => issue.level === 'error')
+
+  return (
+    <div
+      ref={refCallback}
+      className={`subtitle-row ${isActive ? 'subtitle-row--active' : ''} ${isMatch ? 'subtitle-row--match' : ''} ${hasError ? 'subtitle-row--error' : ''}`}
+      role="listitem"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' && event.target === event.currentTarget) {
+          onSeek()
+        }
+      }}
+    >
+      <div className="subtitle-row__top">
+        <button className="row-index" type="button" onClick={onSeek}>
+          {entry.index}
+        </button>
+        <TimestampInput
+          label={`Start time for subtitle ${entry.index}`}
+          value={entry.startTime}
+          onCommit={(value) => onUpdate({ startTime: value })}
+        />
+        <TimestampInput
+          label={`End time for subtitle ${entry.index}`}
+          value={entry.endTime}
+          onCommit={(value) => onUpdate({ endTime: value })}
+        />
+        <div className="row-actions">
+          <IconButton label="Play subtitle range" onClick={onPlayRange}>
+            <CornerDownRight size={15} />
+          </IconButton>
+          <IconButton label="Split subtitle" onClick={onSplit}>
+            <Scissors size={15} />
+          </IconButton>
+          <IconButton label="Duplicate subtitle" onClick={onDuplicate}>
+            <Copy size={15} />
+          </IconButton>
+          <IconButton label="Move subtitle up" onClick={onMoveUp}>
+            <ArrowUp size={15} />
+          </IconButton>
+          <IconButton label="Move subtitle down" onClick={onMoveDown}>
+            <ArrowDown size={15} />
+          </IconButton>
+          <IconButton label="Delete subtitle" variant="danger" onClick={onDelete}>
+            <Trash2 size={15} />
+          </IconButton>
+        </div>
+      </div>
+
+      <textarea
+        aria-label={`Subtitle ${entry.index} text`}
+        value={entry.text}
+        onChange={(event) => onUpdate({ text: event.target.value })}
+        onBlur={(event) => onUpdate({ text: formatSubtitleText(event.target.value, formatting) })}
+      />
+
+      <div className="row-secondary-actions">
+        <button type="button" onClick={onAddBefore}>
+          Add before
+        </button>
+        <button type="button" onClick={onAddAfter}>
+          Add after
+        </button>
+        <button type="button" onClick={onMergePrevious}>
+          Merge previous
+        </button>
+        <button type="button" onClick={onMergeNext}>
+          Merge next
+        </button>
+      </div>
+
+      {issues.length ? (
+        <ul className="issue-list" aria-live="polite">
+          {issues.map((issue) => (
+            <li className={`issue-list__item issue-list__item--${issue.level}`} key={`${issue.code}-${issue.message}`}>
+              {issue.message}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+type TimestampInputProps = {
+  label: string
+  value: number
+  onCommit: (value: number) => void
+}
+
+function TimestampInput({ label, value, onCommit }: TimestampInputProps) {
+  const [draft, setDraft] = useState(formatTimestamp(value, { alwaysHours: true }))
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    setDraft(formatTimestamp(value, { alwaysHours: true }))
+    setError('')
+  }, [value])
+
+  return (
+    <label className={`timestamp-field ${error ? 'timestamp-field--error' : ''}`}>
+      <span className="sr-only">{label}</span>
+      <input
+        aria-invalid={Boolean(error)}
+        aria-label={label}
+        value={draft}
+        onBlur={() => {
+          const parsed = parseTimestamp(draft)
+          if (parsed === null) {
+            setError('Use HH:MM:SS.mmm, MM:SS.mmm, or seconds.')
+            return
+          }
+          setError('')
+          onCommit(parsed)
+        }}
+        onChange={(event) => {
+          setDraft(event.target.value)
+          if (parseTimestamp(event.target.value) === null) {
+            setError('Invalid time')
+          } else {
+            setError('')
+          }
+        }}
+      />
+      {error ? <span className="timestamp-error">{error}</span> : null}
+    </label>
+  )
+}
