@@ -94,7 +94,8 @@ The core design is a single-page app with a worker-backed transcription provider
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
-| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, normalizes timestamps, posts progress, partial results, and final results. |
+| Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
+| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, and posts progress, partial results, and final results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
 | Project storage | `src/project/storage.ts` | Stores and restores project autosave records in IndexedDB. |
 | Vite dev server | `vite.config.ts` | Serves the app, applies cross-origin isolation headers, excludes heavy WASM dependencies from optimization, exposes terminal progress middleware in dev. |
@@ -287,7 +288,7 @@ flowchart TD
     Loop -->|Yes| Asr["Run Whisper ASR on window"]
     Asr --> TimestampFallback{"Word timestamps supported?"}
     TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
-    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline"]
+    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core without clipping timestamps"]
     SegmentRetry --> Normalize
     Normalize --> PartialPreview["Post cumulative partial result to app"]
     PartialPreview --> CaptionLog["Post terminal caption events in dev"]
@@ -576,11 +577,12 @@ Windowing details:
 2. The configured overlap is bounded to no more than one quarter of the core window.
 3. Each window has a core region and optional surrounding overlap.
 4. The ASR result is converted back to the full-video timeline by adding `sliceStartTime`.
-5. Chunks that only belong to the neighboring overlap are discarded.
-6. Remaining chunks are clipped to the core window.
-7. Times are rounded to three decimal places.
+5. A chunk's timestamp midpoint assigns it to exactly one core region, preventing adjacent windows from owning the same boundary chunk.
+6. Owned chunks retain their full absolute ASR start and end times, including a start just before the core boundary.
+7. Valid chunks that belong only to a neighboring core are discarded without recreating the window's fallback text at the current core start.
+8. Times are rounded to three decimal places.
 
-This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper context near boundaries, while core clipping limits duplicate subtitles around window edges.
+This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper context near boundaries, while single-core ownership limits duplicates without moving a phrase's start forward to the boundary.
 
 ## Timestamp Modes And Fallback
 
@@ -609,8 +611,10 @@ The worker receives an unknown result shape from the pipeline and normalizes def
    - `end > start`
    - `text` as a string
 5. Invalid chunks are dropped.
-6. Valid chunks are placed on the full timeline and clipped to the core window.
-7. If no valid chunks remain but fallback text exists, a fallback segment is created for the core window.
+6. Valid chunks are offset onto the full-video timeline.
+7. Boundary-crossing chunks are assigned to one core by timestamp midpoint, but their original absolute in/out times are preserved.
+8. If the model returned no timestamp chunks, fallback text is assigned to the core interval.
+9. If valid chunks existed but all belong to an adjacent overlap, no fallback caption is created. This prevents earlier overlap speech from reappearing late at the current core start.
 
 When many chunks look word-level, the worker combines them into a single segment with a `words` array. Later formatting can split those words into readable subtitle entries if word timestamps are enabled.
 
@@ -1179,7 +1183,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/subtitle-utils.test.ts`.
+Current tests live in `src/tests/subtitle-utils.test.ts` and `src/tests/transcription-timestamps.test.ts`.
 
 They cover:
 
@@ -1209,6 +1213,10 @@ They cover:
 24. Live transcription preview preservation of deleted streamed rows.
 25. Valid project JSON round trip.
 26. Malformed project rejection.
+27. Suppression of late fallback captions for left-overlap-only ASR chunks.
+28. Preservation of absolute timestamps for boundary-crossing ASR chunks.
+29. Single-core ownership for boundary-crossing chunks.
+30. Core-timed fallback behavior when a model returns no timestamp chunks.
 
 The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
