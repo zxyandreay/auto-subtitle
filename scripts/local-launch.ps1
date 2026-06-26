@@ -2,7 +2,8 @@ param(
   [string]$HostAddress = "127.0.0.1",
   [int]$Port = 5173,
   [string]$Url = "http://127.0.0.1:5173",
-  [int]$WatchdogParentProcessId = 0,
+  [int]$WatchdogHostProcessId = 0,
+  [int]$WatchdogLauncherProcessId = 0,
   [int]$WatchdogRootProcessId = 0
 )
 
@@ -22,12 +23,20 @@ function Stop-ProcessTree {
   Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
 }
 
-if ($WatchdogParentProcessId -gt 0 -and $WatchdogRootProcessId -gt 0) {
-  while (Get-Process -Id $WatchdogParentProcessId -ErrorAction SilentlyContinue) {
+if ($WatchdogHostProcessId -gt 0 -and $WatchdogLauncherProcessId -gt 0 -and $WatchdogRootProcessId -gt 0) {
+  $hostAlive = $true
+  $launcherAlive = $true
+
+  while ($hostAlive -and $launcherAlive) {
     Start-Sleep -Milliseconds 500
+    $hostAlive = $null -ne (Get-Process -Id $WatchdogHostProcessId -ErrorAction SilentlyContinue)
+    $launcherAlive = $null -ne (Get-Process -Id $WatchdogLauncherProcessId -ErrorAction SilentlyContinue)
   }
 
   Stop-ProcessTree -RootProcessId $WatchdogRootProcessId
+  if (-not $hostAlive -and $launcherAlive) {
+    Stop-Process -Id $WatchdogLauncherProcessId -Force -ErrorAction SilentlyContinue
+  }
   exit 0
 }
 
@@ -38,7 +47,14 @@ function Quote-ProcessArgument {
 }
 
 function Start-LauncherWatchdog {
-  param([int]$RootProcessId)
+  param(
+    [int]$HostProcessId,
+    [int]$RootProcessId
+  )
+
+  if ($HostProcessId -le 0) {
+    return
+  }
 
   $powershellCommand = (Get-Command powershell.exe -CommandType Application -ErrorAction Stop).Source
   $watchdogArguments = @(
@@ -47,7 +63,9 @@ function Start-LauncherWatchdog {
     (Quote-ProcessArgument "Bypass")
     (Quote-ProcessArgument "-File")
     (Quote-ProcessArgument $PSCommandPath)
-    (Quote-ProcessArgument "-WatchdogParentProcessId")
+    (Quote-ProcessArgument "-WatchdogHostProcessId")
+    (Quote-ProcessArgument ([string]$HostProcessId))
+    (Quote-ProcessArgument "-WatchdogLauncherProcessId")
     (Quote-ProcessArgument ([string]$PID))
     (Quote-ProcessArgument "-WatchdogRootProcessId")
     (Quote-ProcessArgument ([string]$RootProcessId))
@@ -60,7 +78,18 @@ function Start-LauncherWatchdog {
     -WindowStyle Hidden | Out-Null
 }
 
-function Test-EnterPressed {
+function Get-ParentProcessId {
+  param([int]$ProcessId)
+
+  try {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+    return [int]$process.ParentProcessId
+  } catch {
+    return 0
+  }
+}
+
+function Test-StopRequested {
   if ([Console]::IsInputRedirected) {
     return $false
   }
@@ -73,7 +102,7 @@ function Test-EnterPressed {
       }
     }
   } catch {
-    return $false
+    return $true
   }
 
   return $false
@@ -81,6 +110,7 @@ function Test-EnterPressed {
 
 $server = $null
 $exitCode = 0
+$launcherHostProcessId = Get-ParentProcessId -ProcessId $PID
 
 try {
   $nodeCommand = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
@@ -111,7 +141,7 @@ try {
   }
 
   $server.StandardInput.Close()
-  Start-LauncherWatchdog -RootProcessId $server.Id
+  Start-LauncherWatchdog -HostProcessId $launcherHostProcessId -RootProcessId $server.Id
 
   Write-Host "Press ENTER to stop the local server and close this session."
   Write-Host ""
@@ -122,7 +152,14 @@ try {
       break
     }
 
-    if (Test-EnterPressed) {
+    if ($launcherHostProcessId -gt 0 -and -not (Get-Process -Id $launcherHostProcessId -ErrorAction SilentlyContinue)) {
+      Write-Host ""
+      Write-Host "Terminal session closed. Stopping local Auto Subtitle server..."
+      $exitCode = 0
+      break
+    }
+
+    if (Test-StopRequested) {
       Write-Host ""
       Write-Host "Stopping local Auto Subtitle server..."
       $exitCode = 0
