@@ -10,6 +10,7 @@ type HistoryState = {
 
 type HistoryAction =
   | { type: 'commit'; entries: SubtitleEntry[] }
+  | { type: 'preview'; entries: SubtitleEntry[] }
   | { type: 'replace'; entries: SubtitleEntry[] }
   | { type: 'undo' }
   | { type: 'redo' }
@@ -32,6 +33,10 @@ export function useUndoableSubtitles() {
     dispatch({ type: 'replace', entries })
   }, [])
 
+  const preview = useCallback((entries: SubtitleEntry[]) => {
+    dispatch({ type: 'preview', entries })
+  }, [])
+
   const clear = useCallback(() => {
     dispatch({ type: 'clear' })
   }, [])
@@ -49,6 +54,7 @@ export function useUndoableSubtitles() {
     canUndo: state.past.length > 0,
     canRedo: state.future.length > 0,
     commit,
+    preview,
     replace,
     clear,
     undo,
@@ -66,6 +72,12 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
         future: [],
       }
     }
+    case 'preview':
+      return {
+        past: state.past,
+        present: sortAndRenumber(action.entries),
+        future: [],
+      }
     case 'replace':
       return {
         past: [],

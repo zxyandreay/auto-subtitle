@@ -93,8 +93,9 @@ The core design is a single-page app with a worker-backed transcription provider
 | --- | --- | --- |
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
-| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress and result callbacks, detects browser capability warnings. |
-| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, normalizes timestamps, posts progress and results. |
+| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
+| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, normalizes timestamps, posts progress, partial results, and final results. |
+| Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
 | Project storage | `src/project/storage.ts` | Stores and restores project autosave records in IndexedDB. |
 | Vite dev server | `vite.config.ts` | Serves the app, applies cross-origin isolation headers, excludes heavy WASM dependencies from optimization, exposes terminal progress middleware in dev. |
 | Windows launcher | `local-launch.bat`, `scripts/local-launch.ps1` | Installs dependencies if needed, starts Vite, opens the browser, and stops the Vite process tree when the user presses Enter or closes the launcher session. |
@@ -288,7 +289,8 @@ flowchart TD
     TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
     TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline"]
     SegmentRetry --> Normalize
-    Normalize --> CaptionLog["Post terminal caption events in dev"]
+    Normalize --> PartialPreview["Post cumulative partial result to app"]
+    PartialPreview --> CaptionLog["Post terminal caption events in dev"]
     CaptionLog --> Loop
     Loop -->|No| Complete["Post complete result to app"]
 ```
@@ -322,10 +324,13 @@ sequenceDiagram
         Worker->>HF: transcriber(samples, ASR options)
         HF-->>Worker: text and timestamp chunks
         Worker-->>App: progress transcribing
+        Worker-->>Provider: partial cumulative result
+        Provider-->>App: onPartial(result)
+        App->>App: merge live generated captions into editor
         Worker--)Vite: dev-only caption and progress events
     end
     Worker-->>App: complete result
-    App->>App: format segments into SubtitleEntry list
+    App->>App: final format and merge preserving live edits
     App-->>User: Complete notice and editable subtitles
 ```
 
@@ -337,6 +342,17 @@ Cancellation is user-driven from the `Cancel` button or app teardown:
 4. The app marks the progress stage as `cancelled`, keeps the current progress value, clears busy state, and leaves the editor ready for manual work or imports.
 
 The worker also checks `assertNotCancelled()` between major steps so cooperative cancellation can stop long flows when the worker has not already been terminated.
+
+Live partial previews use the same local worker path. After each completed audio window, the worker posts a non-terminal `partial` event with the cumulative raw segments. The provider forwards that event through `onPartial`, and the app formats those generated segments into preview subtitles. The editor receives the preview subtitles immediately, so the user can seek, preview, and edit captions before the final transcription result arrives.
+
+The live preview merge keeps user changes stable while the worker continues:
+
+1. Existing subtitles from before transcription are treated as the base that the generated result will replace.
+2. Streamed generated rows are tracked by id.
+3. If the user edits a streamed row, later partial updates preserve that edited row.
+4. If the user deletes a streamed row, later partial updates do not re-add that same generated row.
+5. User-added rows created during transcription are kept alongside streamed generated rows.
+6. Final completion applies the full generated-caption optimization again and merges it with any preserved live edits before settling the editor state.
 
 ## Detailed Video Processing
 
@@ -669,6 +685,32 @@ Generated-caption helper responsibilities:
 | `normalizeForDuplicateComparison` | Canonicalizes generated text for conservative duplicate detection. |
 | `tokenSimilarity` | Compares adjacent generated captions for overlap-window duplicate cleanup. |
 | `dedupeOverlappingSegments` | Removes or safely merges adjacent duplicate generated segments near chunk boundaries. |
+
+## Live Subtitle Preview While Transcribing
+
+```mermaid
+flowchart TD
+    Chunk["Completed transcription window"] --> Partial["Worker posts partial cumulative result"]
+    Partial --> Provider["Provider calls onPartial"]
+    Provider --> Format["App formats generated segments"]
+    Format --> Merge["mergeLiveTranscriptionPreview"]
+    Merge --> Editor["Subtitle editor updates immediately"]
+    Editor --> UserEdit{"User edits or deletes a live row?"}
+    UserEdit -->|Yes| Track["markLiveTranscriptionPreviewEdits"]
+    Track --> Merge
+    UserEdit -->|No| NextChunk["Wait for next partial result"]
+    NextChunk --> Partial
+```
+
+Live preview details:
+
+1. Partial results are local worker messages; they do not add a backend or external transcription service.
+2. The worker sends cumulative raw segments after each audio window finishes.
+3. The app formats partial segments with the same generated-caption optimizer used for the final result.
+4. `useUndoableSubtitles.preview` updates the current editor contents without adding automatic worker updates to the undo history.
+5. `mergeLiveTranscriptionPreview` removes the pre-transcription base entries once generated captions arrive, matching final transcription replacement behavior.
+6. User edits and deletions to streamed generated rows are tracked and preserved across later partial updates.
+7. Rows the user adds manually during transcription are kept alongside streamed generated rows.
 
 ## Progress Model
 
@@ -1146,8 +1188,11 @@ They cover:
 16. Generated-caption reading-speed protection.
 17. Generated-caption word-timestamp sync.
 18. Generated-caption duplicate cleanup near chunk boundaries.
-19. Valid project JSON round trip.
-20. Malformed project rejection.
+19. Live transcription preview replacement of pre-existing base subtitles.
+20. Live transcription preview preservation of edited streamed rows.
+21. Live transcription preview preservation of deleted streamed rows.
+22. Valid project JSON round trip.
+23. Malformed project rejection.
 
 The tests focus on deterministic subtitle utilities and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1208,8 +1253,9 @@ flowchart TD
     E --> F["Worker splits decoded audio into overlapped windows"]
     F --> G["Whisper returns text and timestamps"]
     G --> H["Worker maps chunks to the full video timeline"]
-    H --> I["App optimizes generated captions for timing, duplicates, and readability"]
-    I --> L["App formats optimized captions into SubtitleEntry records"]
+    H --> P["App streams partial captions into the subtitle editor"]
+    P --> I["App optimizes generated captions for timing, duplicates, and readability"]
+    I --> L["App formats optimized captions into settled SubtitleEntry records"]
     L --> J["Editor validates, previews, autosaves, and lets user revise"]
     J --> K["User exports SRT, VTT, TXT, or project JSON"]
 ```

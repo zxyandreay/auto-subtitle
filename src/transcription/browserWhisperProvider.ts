@@ -8,6 +8,7 @@ import type {
 
 export type TranscriptionCallbacks = {
   onProgress: (progress: TranscriptionProgress) => void
+  onPartial?: (result: TranscriptionResult) => void
 }
 
 export type TranscriptionJob = {
@@ -35,6 +36,11 @@ export function startBrowserWhisperTranscription(
 
       if (data.type === 'progress') {
         callbacks.onProgress(data.progress)
+        return
+      }
+
+      if (data.type === 'partial') {
+        callbacks.onPartial?.(data.result)
         return
       }
 

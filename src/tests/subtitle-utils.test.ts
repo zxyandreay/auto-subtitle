@@ -12,6 +12,11 @@ import {
 } from '../subtitles/formatting'
 import { createProjectExport, exportSrt, exportVtt, parseProjectJson } from '../subtitles/exporters'
 import { parseSrt, parseVtt } from '../subtitles/importers'
+import {
+  createLiveTranscriptionPreviewState,
+  markLiveTranscriptionPreviewEdits,
+  mergeLiveTranscriptionPreview,
+} from '../subtitles/livePreview'
 import { validateSubtitles } from '../subtitles/validation'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
 import { formatSrtTimestamp, formatVttTimestamp, parseTimestamp } from '../utils/time'
@@ -219,6 +224,51 @@ describe('generated caption optimization', () => {
 
     expect(entries).toHaveLength(1)
     expect(entries[0].text.replace(/\n/g, ' ')).toBe('This line repeats near the boundary.')
+  })
+})
+
+describe('live transcription preview merging', () => {
+  it('shows generated captions while dropping pre-existing base subtitles', () => {
+    const base = [makeSubtitleEntry({ id: 'manual-existing', startTime: 0, endTime: 2, text: 'old subtitle' })]
+    const generated = [makeSubtitleEntry({ id: 'generated-1', startTime: 1, endTime: 3, text: 'live caption' })]
+    const state = createLiveTranscriptionPreviewState(base)
+
+    const merged = mergeLiveTranscriptionPreview(base, generated, state)
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].id).toBe('generated-1')
+    expect(merged[0].text).toBe('live caption')
+  })
+
+  it('preserves user edits to streamed captions during later partial updates', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const firstGenerated = [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2, text: 'first draft' })]
+    const firstPreview = mergeLiveTranscriptionPreview([], firstGenerated, state)
+    const editedPreview = [{ ...firstPreview[0], text: 'edited by user' }]
+
+    markLiveTranscriptionPreviewEdits(firstPreview, editedPreview, state)
+
+    const secondGenerated = [
+      makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2.5, text: 'updated draft' }),
+      makeSubtitleEntry({ id: 'generated-2', startTime: 2.6, endTime: 4, text: 'next live caption' }),
+    ]
+    const merged = mergeLiveTranscriptionPreview(editedPreview, secondGenerated, state)
+
+    expect(merged).toHaveLength(2)
+    expect(merged[0].text).toBe('edited by user')
+    expect(merged[1].text).toBe('next live caption')
+  })
+
+  it('keeps deleted streamed captions removed during later partial updates', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const firstGenerated = [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2, text: 'remove me' })]
+    const firstPreview = mergeLiveTranscriptionPreview([], firstGenerated, state)
+
+    markLiveTranscriptionPreviewEdits(firstPreview, [], state)
+
+    const merged = mergeLiveTranscriptionPreview([], firstGenerated, state)
+
+    expect(merged).toEqual([])
   })
 })
 

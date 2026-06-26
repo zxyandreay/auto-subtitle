@@ -9,7 +9,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Drag-and-drop video import with local privacy messaging, file metadata, size warnings, duration warnings, and validation.
 - Custom video preview with play/pause, seek, volume, fullscreen, subtitle visibility, and active subtitle overlay.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
-- Worker-based transcription lifecycle with meaningful stages, model download progress when available, visible failures, and cancellation.
+- Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, and overlap-window duplicate reduction.
 - Subtitle editor with text and timestamp editing, immediate validation, active-row highlighting, search, add/delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
@@ -98,9 +98,11 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 5. Transformers.js loads the selected Whisper model.
 6. The ASR pipeline requests timestamped output.
 7. Raw model chunks are normalized onto the video timeline.
-8. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, splits long captions, and applies two-line wrapping.
-9. The formatted results become editable subtitle entries.
-10. The user edits and exports SRT, VTT, TXT, or JSON locally.
+8. After each completed audio window, partial generated subtitles are formatted and shown immediately in the subtitle editor.
+9. The user can preview, seek, and edit those live subtitles while transcription continues.
+10. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, splits long captions, and applies two-line wrapping.
+11. The final formatted results settle into editable subtitle entries.
+12. The user edits and exports SRT, VTT, TXT, or JSON locally.
 
 ## Import And Export
 

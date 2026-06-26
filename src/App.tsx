@@ -19,11 +19,18 @@ import {
 } from './subtitles/formatting'
 import { createProjectExport, exportProjectJson, exportSrt, exportTranscript, exportVtt, parseProjectJson } from './subtitles/exporters'
 import { parseSubtitleFile } from './subtitles/importers'
+import {
+  createLiveTranscriptionPreviewState,
+  markLiveTranscriptionPreviewEdits,
+  mergeLiveTranscriptionPreview,
+  type LiveTranscriptionPreviewState,
+} from './subtitles/livePreview'
 import { applyTheme, loadThemePreference, saveThemePreference, type ThemePreference } from './theme'
 import { detectBrowserCapabilities, getCapabilityWarnings } from './transcription/capabilities'
 import { startBrowserWhisperTranscription, type TranscriptionJob } from './transcription/browserWhisperProvider'
-import type { TranscriptionProgress } from './transcription/types'
+import type { TranscriptionProgress, TranscriptionResult, TranscriptionSettings } from './transcription/types'
 import { DEFAULT_TRANSCRIPTION_SETTINGS } from './transcription/types'
+import type { SubtitleEntry } from './types/subtitles'
 import { baseName, downloadTextFile } from './utils/format'
 import './styles/app.css'
 
@@ -61,11 +68,17 @@ function App() {
   const [playRangeRequest, setPlayRangeRequest] = useState<{ startTime: number; endTime: number; id: number }>()
   const [playToggleRequest, setPlayToggleRequest] = useState(0)
   const jobRef = useRef<TranscriptionJob | null>(null)
-  const { subtitles, canRedo, canUndo, clear, commit, redo, replace, undo } = useUndoableSubtitles()
+  const { subtitles, canRedo, canUndo, clear, commit, preview, redo, replace, undo } = useUndoableSubtitles()
+  const subtitlesRef = useRef<SubtitleEntry[]>(subtitles)
+  const livePreviewStateRef = useRef<LiveTranscriptionPreviewState | null>(null)
 
   const capabilities = useMemo(() => detectBrowserCapabilities(), [])
   const capabilityWarnings = useMemo(() => getCapabilityWarnings(capabilities), [capabilities])
   const activeSubtitle = subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime)
+
+  useEffect(() => {
+    subtitlesRef.current = subtitles
+  }, [subtitles])
 
   const requestSeek = useCallback((time: number) => {
     setSeekRequest({ time, id: Date.now() })
@@ -227,11 +240,71 @@ function App() {
     }
   }
 
+  const commitSubtitleChanges = useCallback(
+    (entries: SubtitleEntry[]) => {
+      const nextEntries = sortAndRenumber(entries)
+      const livePreviewState = livePreviewStateRef.current
+      if (livePreviewState) {
+        markLiveTranscriptionPreviewEdits(subtitlesRef.current, nextEntries, livePreviewState)
+      }
+
+      subtitlesRef.current = nextEntries
+      commit(nextEntries)
+    },
+    [commit],
+  )
+
+  const replaceSubtitleEntries = useCallback(
+    (entries: SubtitleEntry[]) => {
+      const nextEntries = sortAndRenumber(entries)
+      livePreviewStateRef.current = null
+      subtitlesRef.current = nextEntries
+      replace(nextEntries)
+    },
+    [replace],
+  )
+
+  const applyLiveTranscriptionPreview = useCallback(
+    (
+      result: TranscriptionResult,
+      transcriptionSettings: TranscriptionSettings,
+      videoDuration: number | undefined,
+      final: boolean,
+    ) => {
+      const generatedEntries = formatTranscriptionSegments(
+        result.segments,
+        transcriptionSettings.formatting,
+        videoDuration,
+      )
+      if (!final && generatedEntries.length === 0) {
+        return subtitlesRef.current
+      }
+
+      const livePreviewState = livePreviewStateRef.current
+      const nextEntries = livePreviewState
+        ? mergeLiveTranscriptionPreview(subtitlesRef.current, generatedEntries, livePreviewState)
+        : generatedEntries
+
+      subtitlesRef.current = nextEntries
+      if (final) {
+        replace(nextEntries)
+      } else {
+        preview(nextEntries)
+      }
+
+      return nextEntries
+    },
+    [preview, replace],
+  )
+
   const handleStartTranscription = async () => {
     if (!video) {
       return
     }
 
+    const transcriptionSettings = settings
+    const videoDuration = video.duration || undefined
+    livePreviewStateRef.current = createLiveTranscriptionPreviewState(subtitlesRef.current)
     setNotice(null)
     setBusy(true)
     setProgress({
@@ -240,15 +313,16 @@ function App() {
       progress: 0.01,
     })
 
-    const job = startBrowserWhisperTranscription(video.file, settings, {
+    const job = startBrowserWhisperTranscription(video.file, transcriptionSettings, {
       onProgress: setProgress,
+      onPartial: (partial) =>
+        applyLiveTranscriptionPreview(partial, transcriptionSettings, videoDuration, false),
     })
     jobRef.current = job
 
     try {
       const result = await job.done
-      const nextEntries = formatTranscriptionSegments(result.segments, settings.formatting, video.duration || undefined)
-      replace(nextEntries)
+      const nextEntries = applyLiveTranscriptionPreview(result, transcriptionSettings, videoDuration, true)
       setProgress({
         stage: 'complete',
         message: `Created ${nextEntries.length} editable subtitle entries with ${result.modelId}.`,
@@ -277,12 +351,14 @@ function App() {
     } finally {
       setBusy(false)
       jobRef.current = null
+      livePreviewStateRef.current = null
     }
   }
 
   const handleCancelTranscription = () => {
     jobRef.current?.cancel()
     jobRef.current = null
+    livePreviewStateRef.current = null
     setBusy(false)
     setProgress((current) => ({
       stage: 'cancelled',
@@ -306,7 +382,7 @@ function App() {
           return
         }
 
-        replace(parsed.project.subtitles)
+        replaceSubtitleEntries(parsed.project.subtitles)
         setSettings((current) => ({
           ...current,
           formatting: parsed.project?.formatting ?? current.formatting,
@@ -328,7 +404,7 @@ function App() {
         return
       }
 
-      replace(result.entries)
+      replaceSubtitleEntries(result.entries)
       setNotice({
         tone: result.warnings.length ? 'warning' : 'success',
         message: `Imported ${result.entries.length} subtitle entries from ${file.name}.`,
@@ -399,7 +475,7 @@ function App() {
   }
 
   const reformatExisting = () => {
-    commit(
+    commitSubtitleChanges(
       subtitles.map((entry) => ({
         ...entry,
         text: formatSubtitleText(entry.text, settings.formatting),
@@ -412,7 +488,7 @@ function App() {
       return
     }
 
-    replace(autosave.project.subtitles)
+    replaceSubtitleEntries(autosave.project.subtitles)
     setSettings((current) => ({ ...current, formatting: autosave.project.formatting }))
     setNotice({
       tone: 'success',
@@ -442,6 +518,11 @@ function App() {
         }}
         onClearSubtitles={() => {
           if (window.confirm('Clear all subtitle entries? This can be undone only if you have not refreshed the app.')) {
+            const livePreviewState = livePreviewStateRef.current
+            if (livePreviewState) {
+              markLiveTranscriptionPreviewEdits(subtitlesRef.current, [], livePreviewState)
+            }
+            subtitlesRef.current = []
             clear()
           }
         }}
@@ -513,14 +594,18 @@ function App() {
                   'Normalize subtitle timing? This may alter manually edited timestamps to remove overlaps.',
                 )
               ) {
-                commit(normalizeOverlaps(subtitles, settings.formatting, video?.duration))
+                commitSubtitleChanges(normalizeOverlaps(subtitles, settings.formatting, video?.duration))
               }
             }}
             onRedo={redo}
-            onRemoveEmpty={() => commit(removeEmptyEntries(subtitles))}
-            onRenumber={() => commit(sortAndRenumber(subtitles))}
-            onShiftBackward={() => commit(shiftEntries(subtitles, -Math.abs(shiftMilliseconds), video?.duration))}
-            onShiftForward={() => commit(shiftEntries(subtitles, Math.abs(shiftMilliseconds), video?.duration))}
+            onRemoveEmpty={() => commitSubtitleChanges(removeEmptyEntries(subtitles))}
+            onRenumber={() => commitSubtitleChanges(sortAndRenumber(subtitles))}
+            onShiftBackward={() =>
+              commitSubtitleChanges(shiftEntries(subtitles, -Math.abs(shiftMilliseconds), video?.duration))
+            }
+            onShiftForward={() =>
+              commitSubtitleChanges(shiftEntries(subtitles, Math.abs(shiftMilliseconds), video?.duration))
+            }
             onShiftMillisecondsChange={setShiftMilliseconds}
             onUndo={undo}
           />
@@ -533,7 +618,7 @@ function App() {
             formatting={settings.formatting}
             showOnlyErrors={showOnlyErrors}
             onAutoScrollChange={setAutoScroll}
-            onChange={commit}
+            onChange={commitSubtitleChanges}
             onPlayRange={(startTime, endTime) => setPlayRangeRequest({ startTime, endTime, id: Date.now() })}
             onSeek={requestSeek}
             onShowOnlyErrorsChange={setShowOnlyErrors}

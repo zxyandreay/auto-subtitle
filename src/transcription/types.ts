@@ -101,6 +101,11 @@ export type WorkerCompleteEvent = {
   result: TranscriptionResult
 }
 
+export type WorkerPartialEvent = {
+  type: 'partial'
+  result: TranscriptionResult
+}
+
 export type WorkerErrorEvent = {
   type: 'error'
   error: {
@@ -109,4 +114,4 @@ export type WorkerErrorEvent = {
   }
 }
 
-export type WorkerEvent = WorkerProgressEvent | WorkerCompleteEvent | WorkerErrorEvent
+export type WorkerEvent = WorkerProgressEvent | WorkerPartialEvent | WorkerCompleteEvent | WorkerErrorEvent

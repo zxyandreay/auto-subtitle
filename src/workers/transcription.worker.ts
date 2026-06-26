@@ -208,6 +208,7 @@ async function transcribeInWindows(
     }
 
     allSegments.push(...normalized.segments)
+    postPartialResult(allSegments, textParts, settings.modelId)
     postCaptionSegments(normalized.segments)
     postProgress(
       'transcribing',
@@ -582,6 +583,17 @@ function postCaptionSegments(segments: RawTranscriptionSegment[]): void {
       text: segment.text,
     })
   }
+}
+
+function postPartialResult(segments: RawTranscriptionSegment[], textParts: string[], modelId: string): void {
+  post({
+    type: 'partial',
+    result: {
+      segments: [...segments],
+      text: textParts.join(' ').replace(/\s+/g, ' ').trim(),
+      modelId,
+    },
+  })
 }
 
 function calculateRms(samples: Float32Array): number {
