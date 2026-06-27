@@ -9,6 +9,7 @@ type TranscriptionPanelProps = {
   capabilityWarnings: string[]
   progress: TranscriptionProgress
   busy: boolean
+  locked?: boolean
   hasVideo: boolean
   onSettingsChange: (settings: TranscriptionSettings) => void
   onStart: () => void
@@ -32,6 +33,7 @@ export function TranscriptionPanel({
   capabilityWarnings,
   progress,
   busy,
+  locked = false,
   hasVideo,
   onSettingsChange,
   onStart,
@@ -183,7 +185,7 @@ export function TranscriptionPanel({
       <div className="transcription-actions">
         <button
           className="button button--primary"
-          disabled={!hasVideo || busy || cannotRun}
+          disabled={!hasVideo || busy || locked || cannotRun}
           type="button"
           onClick={onStart}
         >

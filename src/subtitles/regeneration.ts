@@ -46,11 +46,13 @@ export function replaceEntriesInRange(
   const untouched = entries.filter((entry) => !overlapsRange(entry, range))
   const previous = [...untouched].reverse().find((entry) => entry.endTime <= range.startTime)
   const next = untouched.find((entry) => entry.startTime >= range.endTime)
-  const minimumStart = Math.max(range.startTime, (previous?.endTime ?? range.startTime) + preferences.gapBetweenSubtitles)
+  const minimumStart = previous
+    ? Math.max(range.startTime, previous.endTime + preferences.gapBetweenSubtitles)
+    : range.startTime
   const maximumEnd = Math.min(
     range.endTime,
     duration ?? Number.POSITIVE_INFINITY,
-    (next?.startTime ?? range.endTime) - preferences.gapBetweenSubtitles,
+    next ? next.startTime - preferences.gapBetweenSubtitles : range.endTime,
   )
   let cursor = minimumStart
 

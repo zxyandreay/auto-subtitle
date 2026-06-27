@@ -4,6 +4,7 @@ import {
   Copy,
   CornerDownRight,
   Plus,
+  RefreshCw,
   Scissors,
   Search,
   Trash2,
@@ -30,12 +31,14 @@ type SubtitleEditorProps = {
   formatting: FormattingPreferences
   autoScroll: boolean
   showOnlyErrors: boolean
+  canRegenerate: boolean
   capturePlayheadTime: () => number
   onAutoScrollChange: (enabled: boolean) => void
   onShowOnlyErrorsChange: (enabled: boolean) => void
   onChange: (entries: SubtitleEntry[]) => void
   onSeek: (time: number) => void
   onPlayRange: (startTime: number, endTime: number) => void
+  onRegenerate: (entry: SubtitleEntry) => void
 }
 
 export function SubtitleEditor({
@@ -45,12 +48,14 @@ export function SubtitleEditor({
   formatting,
   autoScroll,
   showOnlyErrors,
+  canRegenerate,
   capturePlayheadTime,
   onAutoScrollChange,
   onShowOnlyErrorsChange,
   onChange,
   onSeek,
   onPlayRange,
+  onRegenerate,
 }: SubtitleEditorProps) {
   const [query, setQuery] = useState('')
   const [matchIndex, setMatchIndex] = useState(0)
@@ -248,12 +253,14 @@ export function SubtitleEditor({
                   }
                 }}
                 onPlayRange={() => onPlayRange(entry.startTime, entry.endTime)}
+                onRegenerate={() => onRegenerate(entry)}
                 onSeek={() => onSeek(entry.startTime)}
                 onSplit={() => {
                   const [first, second] = splitEntry(entry)
                   commit([...entries.slice(0, index), first, second, ...entries.slice(index + 1)])
                 }}
                 onUpdate={(patch) => updateEntry(entry.id, patch)}
+                regenerationDisabled={!canRegenerate}
               />
             )
           })
@@ -290,6 +297,7 @@ type SubtitleRowProps = {
   onUpdate: (patch: Partial<SubtitleEntry>) => void
   onSeek: () => void
   onPlayRange: () => void
+  onRegenerate: () => void
   onAddBefore: () => void
   onAddAfter: () => void
   onFocusHandled: () => void
@@ -300,6 +308,7 @@ type SubtitleRowProps = {
   onMoveUp: () => void
   onMoveDown: () => void
   onDuplicate: () => void
+  regenerationDisabled: boolean
 }
 
 function SubtitleRow({
@@ -313,6 +322,7 @@ function SubtitleRow({
   onUpdate,
   onSeek,
   onPlayRange,
+  onRegenerate,
   onAddBefore,
   onAddAfter,
   onFocusHandled,
@@ -323,6 +333,7 @@ function SubtitleRow({
   onMoveUp,
   onMoveDown,
   onDuplicate,
+  regenerationDisabled,
 }: SubtitleRowProps) {
   const hasError = issues.some((issue) => issue.level === 'error')
   const textRef = useRef<HTMLTextAreaElement | null>(null)
@@ -365,6 +376,9 @@ function SubtitleRow({
           onCommit={(value) => onUpdate({ endTime: value })}
         />
         <div className="row-actions">
+          <IconButton label="Regenerate subtitle" disabled={regenerationDisabled} onClick={onRegenerate}>
+            <RefreshCw size={15} />
+          </IconButton>
           <IconButton label="Play subtitle range" onClick={onPlayRange}>
             <CornerDownRight size={15} />
           </IconButton>

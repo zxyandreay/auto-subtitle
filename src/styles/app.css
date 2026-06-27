@@ -155,7 +155,7 @@ body {
 }
 
 .workspace {
-  align-items: start;
+  align-items: stretch;
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(620px, 1.1fr) minmax(520px, 0.9fr);
@@ -169,6 +169,10 @@ body {
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+}
+
+.workspace__right {
+  height: 100%;
 }
 
 .button,
@@ -645,11 +649,159 @@ progress {
 .editor-panel {
   contain: layout paint;
   display: flex;
+  flex: 1;
   flex-direction: column;
-  height: clamp(620px, calc(100vh - 132px), 900px);
-  height: clamp(620px, calc(100dvh - 132px), 900px);
-  min-height: 0;
+  min-height: 620px;
   overflow: hidden;
+}
+
+.dialog-backdrop {
+  align-items: center;
+  background: rgba(16, 20, 23, 0.58);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 100;
+}
+
+.regeneration-dialog {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  max-width: 680px;
+  overflow: hidden;
+  padding: 16px;
+  width: 100%;
+}
+
+.regeneration-dialog__header,
+.regeneration-dialog__actions,
+.regeneration-generate-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.regeneration-dialog__header h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.regeneration-dialog__header p,
+.regeneration-generate-row > span {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 3px 0 0;
+}
+
+.regeneration-range {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  margin-top: 14px;
+}
+
+.regeneration-range > span {
+  color: var(--muted);
+  padding-bottom: 9px;
+}
+
+.regeneration-range label {
+  display: grid;
+  gap: 5px;
+}
+
+.regeneration-generate-row {
+  margin-top: 12px;
+}
+
+.regeneration-progress {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  font-size: 12px;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.regeneration-progress progress {
+  width: 100%;
+}
+
+.regeneration-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+}
+
+.regeneration-choice {
+  align-items: start;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 10px;
+}
+
+.regeneration-choice--selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.regeneration-choice > input {
+  margin-top: 3px;
+}
+
+.regeneration-choice > span,
+.regeneration-choice__cue {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.regeneration-choice > span > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.regeneration-choice__cue {
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  color: var(--text);
+  line-height: 1.4;
+  margin-top: 5px;
+  padding-top: 7px;
+  white-space: pre-line;
+}
+
+.regeneration-choice__cue > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.regeneration-dialog__actions {
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
 }
 
 .editor-tools {
@@ -835,12 +987,19 @@ progress {
 
 @media (max-width: 1280px) {
   .workspace {
+    align-items: start;
     grid-template-columns: 1fr;
   }
 
+  .workspace__right {
+    height: auto;
+  }
+
   .editor-panel {
+    flex: none;
     height: clamp(560px, 72vh, 760px);
     height: clamp(560px, 72dvh, 760px);
+    min-height: 0;
   }
 }
 
@@ -889,6 +1048,26 @@ progress {
   .editor-panel {
     height: clamp(480px, 70vh, 620px);
     height: clamp(480px, 70dvh, 620px);
+  }
+
+  .regeneration-range {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .regeneration-range > span {
+    display: none;
+  }
+
+  .regeneration-dialog__actions,
+  .regeneration-generate-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .regeneration-dialog__actions .button,
+  .regeneration-generate-row .button {
+    width: 100%;
   }
 }
 

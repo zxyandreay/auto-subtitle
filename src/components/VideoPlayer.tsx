@@ -17,6 +17,7 @@ type VideoPlayerProps = {
   playToggleRequest?: number
   onDuration: (duration: number) => void
   onTime: (time: number) => void
+  onRangePlaybackEnd?: () => void
   onToggleSubtitles: () => void
 }
 
@@ -32,6 +33,7 @@ export function VideoPlayer({
   playToggleRequest,
   onDuration,
   onTime,
+  onRangePlaybackEnd,
   onToggleSubtitles,
 }: VideoPlayerProps) {
   const rangeEndRef = useRef<number | null>(null)
@@ -103,6 +105,7 @@ export function VideoPlayer({
               if (rangeEndRef.current !== null && nextTime >= rangeEndRef.current) {
                 event.currentTarget.pause()
                 rangeEndRef.current = null
+                onRangePlaybackEnd?.()
               }
             }}
             onVolumeChange={(event) => setVolume(event.currentTarget.volume)}

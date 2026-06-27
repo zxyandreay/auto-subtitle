@@ -125,6 +125,22 @@ describe('regenerated subtitle replacement', () => {
       ),
     ).toBe(existing)
   })
+
+  it('does not add boundary gaps when there are no untouched neighboring cues', () => {
+    const replacement = [
+      makeSubtitleEntry({ id: 'new', startTime: 10, endTime: 15, text: 'Full range' }),
+    ]
+
+    const result = replaceEntriesInRange(
+      [],
+      replacement,
+      range,
+      DEFAULT_FORMATTING_PREFERENCES,
+      30,
+    )
+
+    expect(result[0]).toMatchObject({ startTime: 10, endTime: 15 })
+  })
 })
 
 function candidate(id: string, text: string): RegenerationCandidate {
