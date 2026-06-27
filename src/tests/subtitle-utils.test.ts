@@ -181,6 +181,23 @@ describe('generated caption optimization', () => {
     expectGeneratedLinesToRespectPreferences(entries)
   })
 
+  it('extends very short generated captions toward the readable minimum when safe', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        {
+          startTime: 0,
+          endTime: 0.4,
+          text: 'Okay.',
+        },
+      ],
+      generatedPreferences,
+      5,
+    )
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0].endTime - entries[0].startTime).toBeGreaterThanOrEqual(generatedPreferences.minDuration)
+  })
+
   it('uses word timestamps to tighten generated caption start and end times', () => {
     const entries = formatTranscriptionSegments(
       [
@@ -202,6 +219,62 @@ describe('generated caption optimization', () => {
     expect(entries).toHaveLength(1)
     expect(entries[0].startTime).toBeCloseTo(0.92, 3)
     expect(entries[0].endTime).toBeCloseTo(2.58, 3)
+  })
+
+  it('avoids abrupt word-timed cuts after very short phrases', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        {
+          startTime: 0,
+          endTime: 4,
+          text: 'We agree. This should continue as one readable phrase before the next caption.',
+          words: [
+            { text: 'We', startTime: 0, endTime: 0.12 },
+            { text: 'agree.', startTime: 0.14, endTime: 0.32 },
+            { text: 'This', startTime: 0.44, endTime: 0.62 },
+            { text: 'should', startTime: 0.64, endTime: 0.82 },
+            { text: 'continue', startTime: 0.84, endTime: 1.1 },
+            { text: 'as', startTime: 1.12, endTime: 1.22 },
+            { text: 'one', startTime: 1.24, endTime: 1.4 },
+            { text: 'readable', startTime: 1.42, endTime: 1.72 },
+            { text: 'phrase', startTime: 1.74, endTime: 2.02 },
+            { text: 'before', startTime: 2.04, endTime: 2.24 },
+            { text: 'the', startTime: 2.26, endTime: 2.36 },
+            { text: 'next', startTime: 2.38, endTime: 2.56 },
+            { text: 'caption.', startTime: 2.58, endTime: 2.9 },
+          ],
+        },
+      ],
+      { ...generatedPreferences, useWordTimestamps: true },
+      6,
+    )
+
+    expect(entries[0].text.replace(/\n/g, ' ')).not.toBe('We agree.')
+    expect(entries[0].endTime - entries[0].startTime).toBeGreaterThanOrEqual(generatedPreferences.minDuration)
+    expectGeneratedLinesToRespectPreferences(entries)
+  })
+
+  it('chains short generated gaps by extending the previous caption when safe', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        {
+          startTime: 0,
+          endTime: 1.2,
+          text: 'First readable caption.',
+        },
+        {
+          startTime: 1.45,
+          endTime: 2.8,
+          text: 'Second readable caption.',
+        },
+      ],
+      generatedPreferences,
+      5,
+    )
+
+    expect(entries).toHaveLength(2)
+    const gap = entries[1].startTime - entries[0].endTime
+    expect(gap).toBeLessThanOrEqual(generatedPreferences.gapBetweenSubtitles + 0.001)
   })
 
   it('deduplicates repeated generated captions near chunk boundaries', () => {
