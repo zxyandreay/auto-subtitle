@@ -93,11 +93,12 @@ The core design is a single-page app with a worker-backed transcription provider
 | --- | --- | --- |
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
-| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
-| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds the FFmpeg command that preserves delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
+| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
+| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that preserve delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
+| Range regeneration | `src/transcription/regeneration.ts`, `src/subtitles/regeneration.ts` | Validates ranges, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
 | Transcription windowing | `src/transcription/windowing.ts` | Plans contiguous ownership cores and overlap context while keeping every model input within Whisper's 30-second limit. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
-| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, and posts progress, partial results, and final results. |
+| Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes full or bounded audio, loads the ASR model, transcribes windows or sequential regeneration profiles, and posts typed results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
 | Project storage | `src/project/storage.ts` | Stores and restores project autosave records in IndexedDB. |
 | Vite dev server | `vite.config.ts` | Serves the app, applies cross-origin isolation headers, excludes heavy WASM dependencies from optimization, exposes terminal progress middleware in dev. |
@@ -202,6 +203,7 @@ flowchart TB
     FormattingPanel --> Preferences["Formatting preferences"]
     GlobalTools --> BatchOps["Shift, normalize, clean, jump, undo, redo"]
     SubtitleEditor --> RowOps["Add, edit, split, merge, duplicate, move, delete"]
+    SubtitleEditor --> Regenerate["Regenerate editable subtitle range"]
 ```
 
 ### Component Responsibilities
@@ -214,6 +216,7 @@ flowchart TB
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/chunk settings, capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
+| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. |
 | `IconButton` | `src/components/IconButton.tsx` | Shared accessible icon button with `aria-label` and `title`. |
 | `SubtitleLogo` | `src/components/SubtitleLogo.tsx` | Reusable letter-free SVG caption-bubble symbol displayed in the app header. |
 
@@ -409,12 +412,14 @@ new Worker(new URL('../workers/transcription.worker.ts', import.meta.url), {
 })
 ```
 
-The provider listens for three worker outcomes:
+The provider listens for typed worker outcomes:
 
 | Worker event | Provider behavior |
 | --- | --- |
 | `progress` | Calls `callbacks.onProgress(data.progress)`. |
+| `partial` | Full transcription only: forwards cumulative generated segments through `onPartial`. |
 | `complete` | Terminates the worker and resolves the job promise. |
+| `regeneration-complete` | Terminates the worker and resolves the range-regeneration promise. |
 | `error` | Terminates the worker and rejects the job promise. |
 
 ### 3. Worker Initialization
@@ -749,6 +754,46 @@ Live preview details:
 6. User edits and deletions to streamed generated rows are tracked and preserved across later partial updates.
 7. Rows the user adds manually during transcription are kept alongside streamed generated rows.
 
+## Subtitle Range Regeneration
+
+```mermaid
+flowchart TD
+    Row["User clicks regenerate on a subtitle row"] --> Dialog["Dialog opens with editable cue range"]
+    Dialog --> Validate{"Finite, inside video, positive, and <= 30 seconds?"}
+    Validate -->|No| RangeError["Show inline validation error"]
+    Validate -->|Yes| Request["Provider posts regenerate request"]
+    Request --> Extract["FFmpeg extracts range plus bounded context once"]
+    Extract --> Load["Load selected Whisper pipeline once"]
+    Load --> Profiles["Run greedy and sampled profiles sequentially"]
+    Profiles --> Normalize["Restore absolute timestamps and constrain to range"]
+    Normalize --> Dedupe["Keep up to three normalized-text-distinct candidates"]
+    Dedupe --> Compare["Dialog shows original and alternatives"]
+    Compare --> Preview["Temporary video-overlay preview"]
+    Compare --> Apply["Replace overlapping cues in one commit"]
+    Apply --> Undo["Undo restores every replaced cue"]
+```
+
+Regeneration details:
+
+1. A row action is enabled only when a source video is selected and no local model job is active.
+2. The dialog starts with the row's current timestamps and supports arbitrary adjusted ranges up to 30 seconds.
+3. Context planning adds up to two seconds on each side only when the complete extracted model input remains within Whisper's 30-second budget.
+4. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
+5. The current model, language, task, engine, dtype, word-timestamp preference, and formatting preferences are captured when generation begins.
+6. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
+7. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
+8. Empty, silent, duplicate-only, cancelled, or failed regeneration produces no editor mutation.
+9. Candidate formatting is bounded to the selected range before display. Applying also respects the configured gap from nearest untouched cues.
+10. Preview replaces cues only in the video overlay and clears when range playback finishes or the dialog closes.
+11. Apply removes every cue overlapping the selected range, inserts the chosen candidate, sorts and renumbers, and calls the undoable `commit` path once.
+12. The original option closes the dialog without changing subtitles.
+
+Full transcription and regeneration have separate job references but are mutually exclusive. This avoids running two FFmpeg.wasm/model pipelines concurrently while preserving independent progress and cancellation UI.
+
+## Editor Height And Scrolling
+
+At desktop widths, the workspace grid stretches both columns to the same height. The right column keeps Timing tools at the top and lets `editor-panel` flex through all remaining space, aligning its bottom with the Local transcription and Formatting content on the left. `subtitle-list` remains the only scrolling editor region; the panel itself clips overflow. At the one-column breakpoint, the right column returns to automatic height and the existing viewport-bounded editor height is restored.
+
 ## Progress Model
 
 The worker emits semantic stages and maps them to monotonic overall progress. The browser progress bar and the local launcher terminal both consume the same overall values.
@@ -981,16 +1026,20 @@ The editor supports:
 7. Insert the new entry chronologically with a two-second default duration, shortened at the known video end when needed.
 8. Reveal the new row, focus its text area, and select the placeholder for immediate replacement; error-only filtering is disabled so the row cannot remain hidden.
 9. Add before and add after relative to an existing row, with the new row focused immediately.
-10. Delete.
-11. Duplicate.
-12. Split.
-13. Merge previous and merge next.
-14. Move up and move down.
-15. Play only the current subtitle range.
-16. Seek to the subtitle start.
-17. Inline timestamp editing.
-18. Inline text editing.
-19. Text reformatting on blur.
+10. Open local range regeneration from any row when its source video is selected.
+11. Adjust and validate a regeneration range up to 30 seconds.
+12. Compare the current cues with up to three distinct local Whisper alternatives.
+13. Preview a choice against video without committing it, then keep the original or apply one undoable replacement.
+14. Delete.
+15. Duplicate.
+16. Split.
+17. Merge previous and merge next.
+18. Move up and move down.
+19. Play only the current subtitle range.
+20. Seek to the subtitle start.
+21. Inline timestamp editing.
+22. Inline text editing.
+23. Text reformatting on blur.
 
 Timestamp input accepts:
 
@@ -1175,10 +1224,13 @@ The app intentionally keeps errors visible:
 | FFmpeg load or exec failure | Worker error posts back to app; notice shows failure details. |
 | Invalid WAV output | Worker throws `FFmpeg did not produce a valid WAV file.` |
 | Unexpected WAV shape | Worker throws `Expected mono 16-bit PCM WAV audio.` |
-| Silent extracted audio | Worker throws `The extracted audio appears to be empty or silent.` |
+| Silent extracted audio | Full transcription throws its existing silent-audio error; regeneration returns no alternatives and preserves current cues. |
 | Model download or pipeline failure | Worker posts error with stack details when available. |
 | Word timestamp unsupported | Worker retries with segment timestamps. |
 | User cancellation | Progress becomes `cancelled`; busy state clears. |
+| Invalid regeneration range | Dialog blocks non-finite, negative, empty, out-of-video, or longer-than-30-second requests before worker startup. |
+| Empty or duplicate regeneration results | Dialog explains that no distinct timestamped alternative was found; original cues remain unchanged. |
+| Regeneration failure or cancellation | Dedicated worker is terminated, temporary preview is cleared, and original cues remain unchanged. |
 | Autosave load/save failure | Warning notice; app remains usable. |
 | Import parse failure | Error notice with parse or validation details. |
 | Export failure | Error notice with exception message. |
@@ -1209,7 +1261,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
+Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/regeneration-dialog.test.tsx`, `src/tests/regeneration-utils.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
 
 They cover:
 
@@ -1251,8 +1303,13 @@ They cover:
 36. Manual subtitle creation at the millisecond-rounded playhead time.
 37. Manual cue duration shortening at the known end of a video.
 38. Preservation of playhead timing while video metadata still reports an unknown zero duration.
+39. Regeneration range validation and 30-second context budgeting.
+40. Fixed bounded decoding profiles and normalized candidate deduplication.
+41. Range-constrained segment timing and all-overlap cue replacement.
+42. Neighbor-gap clamping without invented gaps at an open range boundary.
+43. Regeneration dialog defaults, validation, preview, apply, original no-op, and Escape cancellation.
 
-The tests focus on deterministic audio-extraction arguments, transcription-window planning, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
 ## Keyboard Shortcuts
 
@@ -1278,6 +1335,7 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
+12. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time.
 
 ## Extension Points
 

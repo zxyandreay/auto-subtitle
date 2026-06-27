@@ -12,6 +12,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
 - Subtitle editor with playhead-accurate manual insertion, immediate text focus, timestamp editing, validation, active-row highlighting, search, delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
+- Local subtitle regeneration for editable ranges up to 30 seconds, with the original plus as many as three distinct Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
@@ -108,6 +109,18 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 
 The 30-second ceiling follows Whisper's fixed input context, while the overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
 
+## Regenerating A Subtitle Range
+
+1. Select a video and create, import, or generate subtitles.
+2. Use the regenerate icon on a subtitle row.
+3. Adjust the prefilled start/end timestamps if a wider section is needed; one request is limited to 30 seconds.
+4. Generate alternatives. The worker extracts that range once, loads the selected Whisper model once, and performs bounded sequential decoding passes locally.
+5. Compare the unchanged current cues with up to three distinct alternatives.
+6. Preview any choice against the video without modifying the editor.
+7. Apply an alternative to replace all cues overlapping the range as one undoable edit, or keep the original unchanged.
+
+Regeneration uses the current language, output task, model, engine, and formatting preferences. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
+
 ## Generated Caption Readability
 
 Generated captions use a deterministic, local-only post-processing pass informed by public subtitle guidance from Netflix, BBC, and DCMP:
@@ -169,6 +182,7 @@ The transcription provider boundary is intentionally small so another local engi
 - Codec support depends on the browser and FFmpeg.wasm build.
 - WebGPU is optional. The app attempts supported WebAssembly or CPU fallback paths, but speed can be much slower.
 - Word-level timestamps depend on model support and may fall back to coarser chunks.
+- Range regeneration starts a fresh worker and model pipeline for each request. Browser caching avoids unchanged model downloads, but repeated requests still require local initialization and audio extraction.
 - Generated subtitle synchronization is improved by deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
 
 ## Troubleshooting
