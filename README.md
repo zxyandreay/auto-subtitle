@@ -96,13 +96,16 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 3. A Web Worker loads FFmpeg.wasm and Transformers.js.
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
 5. Transformers.js loads the selected Whisper model.
-6. The ASR pipeline requests timestamped output.
-7. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.
-8. After each completed audio window, partial generated subtitles are formatted and shown immediately in the subtitle editor.
-9. The user can preview, seek, and edit those live subtitles while transcription continues.
-10. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, smooths abrupt cuts, chains short safe gaps, splits long captions, and applies two-line wrapping.
-11. The final formatted results settle into editable subtitle entries.
-12. The user edits and exports SRT, VTT, TXT, or JSON locally.
+6. The worker creates model-safe audio windows no longer than Whisper's 30-second input budget, with overlap reserved inside each window instead of appended beyond it.
+7. The ASR pipeline requests timestamped output for each window.
+8. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.
+9. After each completed audio window, partial generated subtitles are formatted and shown immediately in the subtitle editor.
+10. The user can preview, seek, and edit those live subtitles while transcription continues.
+11. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, smooths abrupt cuts, chains short safe gaps, splits long captions, and applies two-line wrapping.
+12. The final formatted results settle into editable subtitle entries.
+13. The user edits and exports SRT, VTT, TXT, or JSON locally.
+
+The 30-second ceiling follows Whisper's fixed input context, while the overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
 
 ## Generated Caption Readability
 

@@ -6,6 +6,7 @@ import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import { buildAudioExtractionArgs } from '../transcription/audioExtraction'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
 import type { TranscriptionSettings, TranscriptionStage, WorkerEvent, WorkerRequest } from '../transcription/types'
+import { createTranscriptionWindowPlan } from '../transcription/windowing'
 
 let cancelled = false
 
@@ -257,6 +258,7 @@ async function transcribeWindowWithTimestampFallback(
 function createAsrCallOptions(settings: TranscriptionSettings, timestampMode: TimestampMode): AsrCallOptions {
   return {
     return_timestamps: timestampMode,
+    // The worker supplies one model-safe window so it can stream each result immediately.
     chunk_length_s: 0,
     stride_length_s: 0,
     language: settings.language === 'auto' ? undefined : settings.language,
@@ -266,31 +268,27 @@ function createAsrCallOptions(settings: TranscriptionSettings, timestampMode: Ti
 
 function createTranscriptionWindows(audio: DecodedAudio, settings: TranscriptionSettings): TranscriptionWindow[] {
   const duration = audio.samples.length / audio.sampleRate
-  const coreSeconds = Math.min(30, Math.max(5, settings.chunkLengthSeconds))
-  const overlapSeconds = Math.max(0, Math.min(settings.strideLengthSeconds, coreSeconds / 4))
-  const windows: TranscriptionWindow[] = []
-  let coreStartTime = 0
+  const plan = createTranscriptionWindowPlan(
+    duration,
+    settings.chunkLengthSeconds,
+    settings.strideLengthSeconds,
+  )
+  const maxWindowSamples = Math.max(1, Math.floor(plan.windowSeconds * audio.sampleRate))
 
-  while (coreStartTime < duration) {
-    const coreEndTime = Math.min(duration, coreStartTime + coreSeconds)
-    const sliceStartTime = Math.max(0, coreStartTime - overlapSeconds)
-    const sliceEndTime = Math.min(duration, coreEndTime + overlapSeconds)
-    const startSample = Math.floor(sliceStartTime * audio.sampleRate)
-    const endSample = Math.max(startSample + 1, Math.ceil(sliceEndTime * audio.sampleRate))
+  return plan.windows.map((timing, index) => {
+    const startSample = Math.floor(timing.sliceStartTime * audio.sampleRate)
+    const requestedEndSample = Math.max(startSample + 1, Math.ceil(timing.sliceEndTime * audio.sampleRate))
+    const endSample = Math.min(audio.samples.length, startSample + maxWindowSamples, requestedEndSample)
 
-    windows.push({
-      index: windows.length,
-      total: 0,
+    return {
+      index,
+      total: plan.windows.length || 1,
       samples: audio.samples.subarray(startSample, endSample),
-      sliceStartTime,
-      coreStartTime,
-      coreEndTime,
-    })
-
-    coreStartTime = coreEndTime
-  }
-
-  return windows.map((window) => ({ ...window, total: windows.length || 1 }))
+      sliceStartTime: startSample / audio.sampleRate,
+      coreStartTime: timing.coreStartTime,
+      coreEndTime: timing.coreEndTime,
+    }
+  })
 }
 
 function isWordTimestampUnsupportedError(error: unknown): boolean {

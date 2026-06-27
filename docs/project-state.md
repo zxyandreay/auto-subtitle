@@ -95,6 +95,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels the transcription worker, exposes progress, partial-result, and final-result callbacks, detects browser capability warnings. |
 | Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds the FFmpeg command that preserves delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
+| Transcription windowing | `src/transcription/windowing.ts` | Plans contiguous ownership cores and overlap context while keeping every model input within Whisper's 30-second limit. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
 | Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes audio, loads the ASR model, transcribes audio windows, and posts progress, partial results, and final results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
@@ -555,18 +556,20 @@ The worker calls the transcriber with:
 }
 ```
 
-`chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization.
+`chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization. Every manually prepared input is therefore kept at or below Whisper's 30-second feature-input limit.
 
 ## Audio Windowing And Timestamp Normalization
 
 ```mermaid
 flowchart TD
     Audio["Full decoded Float32Array"] --> Duration["duration = samples.length / sampleRate"]
-    Duration --> Core["coreSeconds = min(30, max(5, setting chunk length))"]
-    Core --> Overlap["overlapSeconds = min(setting overlap, coreSeconds / 4)"]
-    Overlap --> SliceLoop["Create each slice"]
+    Duration --> Window["windowSeconds = min(30, max(5, setting chunk length))"]
+    Window --> Overlap["overlapSeconds = min(setting overlap, windowSeconds / 4)"]
+    Overlap --> Core["coreSeconds = windowSeconds - 2 * overlapSeconds"]
+    Core --> SliceLoop["Create each contiguous ownership core"]
     SliceLoop --> Slice["sliceStart = max(0, coreStart - overlap)\nsliceEnd = min(duration, coreEnd + overlap)"]
-    Slice --> Samples["samples.subarray(startSample, endSample)"]
+    Slice --> Limit["Clamp sample count to windowSeconds * sampleRate"]
+    Limit --> Samples["samples.subarray(startSample, endSample)"]
     Samples --> Model["Run Whisper on slice"]
     Model --> Chunks["Timestamp chunks relative to slice"]
     Chunks --> Offset["Add sliceStartTime"]
@@ -579,16 +582,21 @@ flowchart TD
 
 Windowing details:
 
-1. The configured chunk length is bounded by the worker to a minimum of 5 seconds and a maximum of 30 seconds.
-2. The configured overlap is bounded to no more than one quarter of the core window.
-3. Each window has a core region and optional surrounding overlap.
-4. The ASR result is converted back to the full-video timeline by adding `sliceStartTime`.
-5. A chunk's absolute start time assigns it to the core where the recognized speech begins, preventing a later window from pulling a long overlap chunk into earlier silence.
-6. Owned chunks retain their full absolute ASR start and end times, so speech crossing the right boundary is not delayed to the next core start.
-7. Valid chunks that begin in a neighboring core are discarded without recreating the window's fallback text.
-8. Times are rounded to three decimal places.
+1. The configured chunk length represents the complete model input and is bounded to a minimum of 5 seconds and a maximum of 30 seconds.
+2. The configured overlap is bounded to no more than one quarter of that complete model window.
+3. Left and right overlap are subtracted from the ownership core: `coreSeconds = windowSeconds - (2 * overlapSeconds)`.
+4. With the default 30-second chunk and 5-second overlap, interior windows contain a 20-second core plus 5 seconds of context on each side. They are exactly 30 seconds long, never 40 seconds.
+5. First and last windows are naturally shorter when context is unavailable at the media boundary.
+6. Sample-index rounding is capped to the model-window sample budget, and `sliceStartTime` is derived from the exact first sample passed to Whisper.
+7. The ASR result is converted back to the full-video timeline by adding that exact `sliceStartTime`.
+8. A chunk's absolute start time assigns it to the core where the recognized speech begins, preventing a later window from pulling a long overlap chunk into earlier silence.
+9. Owned chunks retain their full absolute ASR start and end times, so speech crossing the right boundary is not delayed to the next core start.
+10. Valid chunks that begin in a neighboring core are discarded without recreating the window's fallback text.
+11. Times are rounded to three decimal places.
 
 This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper recognition context, while onset-based ownership prevents both late boundary clipping and early captions inherited from the left overlap.
+
+The window budget is synchronization-critical. The previous calculation treated a 30-second setting as a 30-second core and then appended 5 seconds on both sides. Interior calls were therefore 40 seconds long while Transformers.js internal chunking was disabled. Whisper's feature extractor only retained the first 30 seconds, silently omitting the end of those calls and breaking continuity around later core boundaries. Reserving overlap inside the 30-second budget ensures every owned timeline region is actually heard by the model. See the official [Transformers.js ASR pipeline options](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper model documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
 
 ## Timestamp Modes And Fallback
 
@@ -1191,7 +1199,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/subtitle-utils.test.ts`, and `src/tests/transcription-timestamps.test.ts`.
+Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
 
 They cover:
 
@@ -1226,9 +1234,12 @@ They cover:
 29. Onset-based single-core ownership for boundary-crossing chunks.
 30. Rejection of long left-overlap chunks that would place subtitles into earlier silence.
 31. Suppression of guessed window timing when a model returns text without usable timestamp chunks.
-32. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
+32. Model windows that include overlap without exceeding Whisper's 30-second input budget.
+33. Complete, contiguous core ownership across the full audio timeline.
+34. Full-size cores when overlap is disabled and conservative clamping when overlap is excessive.
+35. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
 
-The tests focus on deterministic audio-extraction arguments, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The tests focus on deterministic audio-extraction arguments, transcription-window planning, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
 ## Keyboard Shortcuts
 
@@ -1250,7 +1261,7 @@ The tests focus on deterministic audio-extraction arguments, subtitle utilities,
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
 7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker uses overlap context, onset-based core ownership, and deterministic duplicate cleanup to reduce mistimed or repeated captions, but manual review is still expected.
+8. Chunk-boundary quality can vary. The worker keeps overlap inside Whisper's 30-second input budget, uses onset-based core ownership, and applies deterministic duplicate cleanup to reduce mistimed or repeated captions, but manual review is still expected.
 9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
@@ -1284,7 +1295,7 @@ flowchart TD
     B --> C["User starts local transcription"]
     C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
     D --> E["Worker loads Whisper through Transformers.js"]
-    E --> F["Worker splits decoded audio into overlapped windows"]
+    E --> F["Worker splits decoded audio into model-safe windows with overlap inside the 30-second budget"]
     F --> G["Whisper returns text and timestamps"]
     G --> H["Worker maps chunks to the full video timeline"]
     H --> P["App streams partial captions into the subtitle editor"]
