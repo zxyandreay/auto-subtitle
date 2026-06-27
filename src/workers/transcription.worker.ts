@@ -68,6 +68,9 @@ type TerminalLogEvent =
       type: 'start'
       fileName: string
       modelId: string
+      jobKind: 'transcription' | 'regeneration'
+      startTime?: number
+      endTime?: number
     }
   | {
       type: 'progress'
@@ -84,6 +87,8 @@ type TerminalLogEvent =
   | {
       type: 'complete'
       segmentCount: number
+      jobKind: 'transcription' | 'regeneration'
+      candidateCount?: number
     }
   | {
       type: 'error'
@@ -139,6 +144,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
     type: 'start',
     fileName: file.name,
     modelId: settings.modelId,
+    jobKind: 'transcription',
   })
   postProgress('loading-engine', 'Loading FFmpeg.wasm and Transformers.js.')
 
@@ -165,6 +171,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
     postTerminalLog({
       type: 'complete',
       segmentCount: result.segments.length,
+      jobKind: 'transcription',
     })
 
     post({
@@ -194,7 +201,14 @@ async function regenerate(
   }
 
   assertNotCancelled()
-  postTerminalLog({ type: 'start', fileName: file.name, modelId: settings.modelId })
+  postTerminalLog({
+    type: 'start',
+    fileName: file.name,
+    modelId: settings.modelId,
+    jobKind: 'regeneration',
+    startTime: range.startTime,
+    endTime: range.endTime,
+  })
   postProgress('loading-engine', 'Loading local regeneration tools.')
 
   const extractionRange = planRegenerationAudioRange(range, videoDuration)
@@ -296,6 +310,8 @@ function postRegenerationComplete(
   postTerminalLog({
     type: 'complete',
     segmentCount: candidates.reduce((total, candidate) => total + candidate.segments.length, 0),
+    jobKind: 'regeneration',
+    candidateCount: candidates.length,
   })
   post({
     type: 'regeneration-complete',

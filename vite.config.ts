@@ -14,6 +14,8 @@ type TerminalLogPayload = {
   endTime?: number
   text?: string
   segmentCount?: number
+  candidateCount?: number
+  jobKind?: 'transcription' | 'regeneration'
 }
 
 const TERMINAL_LOG_PATH = '/__auto_subtitle_terminal'
@@ -78,12 +80,18 @@ function autoSubtitleTerminalPlugin(): Plugin {
   }
 }
 
-function renderTerminalLog(
+export function renderTerminalLog(
   payload: TerminalLogPayload,
   writeProgressLine: (line: string) => void,
   logLine: (line: string) => void,
 ): void {
   if (payload.type === 'start') {
+    if (payload.jobKind === 'regeneration') {
+      logLine(
+        `[Auto Subtitle] Regenerating ${formatTerminalTime(payload.startTime)} -> ${formatTerminalTime(payload.endTime)} in ${payload.fileName ?? 'selected video'} with ${payload.modelId ?? 'Whisper'}`,
+      )
+      return
+    }
     logLine(`[Auto Subtitle] Transcribing ${payload.fileName ?? 'selected video'} with ${payload.modelId ?? 'Whisper'}`)
     return
   }
@@ -99,6 +107,10 @@ function renderTerminalLog(
   }
 
   if (payload.type === 'complete') {
+    if (payload.jobKind === 'regeneration') {
+      logLine(`[Auto Subtitle] Regeneration complete: ${payload.candidateCount ?? 0} alternative(s) created.`)
+      return
+    }
     logLine(`[Auto Subtitle] Complete: ${payload.segmentCount ?? 0} caption segment(s) created.`)
     return
   }
@@ -124,7 +136,7 @@ function formatTerminalTime(value: number | undefined): string {
 
   const minutes = Math.floor(value / 60)
   const seconds = value % 60
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toFixed(2).padStart(5, '0')}`
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toFixed(3).padStart(6, '0')}`
 }
 
 function trimTerminalText(value: string | undefined): string {
