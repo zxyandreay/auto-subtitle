@@ -388,6 +388,44 @@ describe('project import validation', () => {
     expect(result.project).toBeUndefined()
     expect(result.errors.length).toBeGreaterThan(0)
   })
+
+  it('preserves known saved speech models and normalizes unknown model ids to Base', () => {
+    const knownProject = createProjectExport([], DEFAULT_FORMATTING_PREFERENCES, {}, {
+      modelId: 'onnx-community/whisper-large-v3-turbo',
+      language: 'japanese',
+      task: 'transcribe',
+      executionProvider: 'webgpu',
+    })
+    const unknownProject = createProjectExport([], DEFAULT_FORMATTING_PREFERENCES, {}, {
+      modelId: 'retired/model',
+      language: 'english',
+      task: 'transcribe',
+      executionProvider: 'auto',
+    })
+
+    expect(parseProjectJson(JSON.stringify(knownProject)).project?.transcriptionSettings?.modelId).toBe(
+      'onnx-community/whisper-large-v3-turbo',
+    )
+    expect(parseProjectJson(JSON.stringify(unknownProject)).project?.transcriptionSettings?.modelId).toBe(
+      'onnx-community/whisper-base',
+    )
+  })
+
+  it('normalizes incompatible saved model settings during project import', () => {
+    const project = createProjectExport([], DEFAULT_FORMATTING_PREFERENCES, {}, {
+      modelId: 'distil-whisper/distil-large-v3',
+      language: 'korean',
+      task: 'transcribe',
+      executionProvider: 'wasm',
+    })
+
+    expect(parseProjectJson(JSON.stringify(project)).project?.transcriptionSettings?.modelId).toBe(
+      'onnx-community/whisper-base',
+    )
+    expect(parseProjectJson(JSON.stringify(project)).warnings).toEqual([
+      'Distil Large v3 is English-only, so the model was switched to Base for this language.',
+    ])
+  })
 })
 
 function expectGeneratedLinesToRespectPreferences(entries: { text: string }[]): void {

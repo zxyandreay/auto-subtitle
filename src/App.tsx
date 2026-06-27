@@ -36,13 +36,14 @@ import {
   type RegenerationJob,
   type TranscriptionJob,
 } from './transcription/browserWhisperProvider'
+import { resolveCompatibleModelId } from './transcription/models'
 import type {
   RegenerationRange,
   TranscriptionProgress,
   TranscriptionResult,
   TranscriptionSettings,
 } from './transcription/types'
-import { DEFAULT_TRANSCRIPTION_SETTINGS } from './transcription/types'
+import { DEFAULT_TRANSCRIPTION_SETTINGS, normalizeTranscriptionSettings } from './transcription/types'
 import type { SubtitleEntry } from './types/subtitles'
 import { baseName, downloadTextFile } from './utils/format'
 import './styles/app.css'
@@ -106,6 +107,14 @@ function App() {
   const capabilities = useMemo(() => detectBrowserCapabilities(), [])
   const capabilityWarnings = useMemo(() => getCapabilityWarnings(capabilities), [capabilities])
   const activeSubtitle = subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime)
+
+  const handleSettingsChange = useCallback((nextSettings: TranscriptionSettings) => {
+    const resolved = resolveCompatibleModelId(nextSettings)
+    setSettings({ ...nextSettings, modelId: resolved.modelId })
+    if (resolved.changed && resolved.reason) {
+      setNotice({ tone: 'warning', message: resolved.reason })
+    }
+  }, [])
 
   useEffect(() => {
     subtitlesRef.current = subtitles
@@ -347,10 +356,14 @@ function App() {
       return
     }
 
-    const transcriptionSettings = settings
+    const resolvedModel = resolveCompatibleModelId(settings)
+    const transcriptionSettings = { ...settings, modelId: resolvedModel.modelId }
+    if (resolvedModel.changed) {
+      setSettings(transcriptionSettings)
+    }
     const videoDuration = video.duration || undefined
     livePreviewStateRef.current = createLiveTranscriptionPreviewState(subtitlesRef.current)
-    setNotice(null)
+    setNotice(resolvedModel.reason ? { tone: 'warning', message: resolvedModel.reason } : null)
     setBusy(true)
     setProgress({
       stage: 'loading-engine',
@@ -445,7 +458,14 @@ function App() {
       return
     }
 
-    const transcriptionSettings = settings
+    const resolvedModel = resolveCompatibleModelId(settings)
+    const transcriptionSettings = { ...settings, modelId: resolvedModel.modelId }
+    if (resolvedModel.changed) {
+      setSettings(transcriptionSettings)
+      if (resolvedModel.reason) {
+        setNotice({ tone: 'warning', message: resolvedModel.reason })
+      }
+    }
     const videoDuration = video.duration || undefined
     const originalEntries = subtitlesRef.current.filter(
       (entry) => entry.endTime > range.startTime && entry.startTime < range.endTime,
@@ -559,13 +579,15 @@ function App() {
         }
 
         replaceSubtitleEntries(parsed.project.subtitles)
-        setSettings((current) => ({
-          ...current,
-          formatting: parsed.project?.formatting ?? current.formatting,
-        }))
+        const restored = normalizeTranscriptionSettings(parsed.project.transcriptionSettings, {
+          ...settings,
+          formatting: parsed.project.formatting,
+        })
+        setSettings({ ...restored.settings, formatting: parsed.project.formatting })
         setNotice({
-          tone: 'success',
+          tone: parsed.warnings.length ? 'warning' : 'success',
           message: buildProjectImportMessage(parsed.project.metadata.videoFileName, parsed.project.metadata.videoDuration),
+          details: parsed.warnings.join('\n') || undefined,
         })
         return
       }
@@ -665,10 +687,15 @@ function App() {
     }
 
     replaceSubtitleEntries(autosave.project.subtitles)
-    setSettings((current) => ({ ...current, formatting: autosave.project.formatting }))
+    const restored = normalizeTranscriptionSettings(autosave.project.transcriptionSettings, {
+      ...settings,
+      formatting: autosave.project.formatting,
+    })
+    setSettings({ ...restored.settings, formatting: autosave.project.formatting })
     setNotice({
-      tone: 'success',
+      tone: restored.reason ? 'warning' : 'success',
       message: buildProjectImportMessage(autosave.project.metadata.videoFileName, autosave.project.metadata.videoDuration),
+      details: restored.reason,
     })
   }
 
@@ -746,7 +773,7 @@ function App() {
               settings={settings}
               locked={regenerationBusy}
               onCancel={handleCancelTranscription}
-              onSettingsChange={setSettings}
+              onSettingsChange={handleSettingsChange}
               onStart={() => void handleStartTranscription()}
             />
 

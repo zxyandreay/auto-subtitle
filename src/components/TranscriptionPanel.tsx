@@ -1,7 +1,12 @@
 import { AlertTriangle, Cpu, DownloadCloud, Loader2, Square, Wand2 } from 'lucide-react'
 import type { BrowserCapabilities } from '../transcription/capabilities'
+import {
+  getSpeechModelOption,
+  getSpeechModelWarnings,
+  isModelCompatibleWithSettings,
+  SPEECH_MODELS,
+} from '../transcription/models'
 import type { TranscriptionProgress, TranscriptionSettings } from '../transcription/types'
-import { TRANSCRIPTION_MODELS } from '../transcription/types'
 
 type TranscriptionPanelProps = {
   settings: TranscriptionSettings
@@ -39,8 +44,12 @@ export function TranscriptionPanel({
   onStart,
   onCancel,
 }: TranscriptionPanelProps) {
-  const selectedModel = TRANSCRIPTION_MODELS.find((model) => model.id === settings.modelId) ?? TRANSCRIPTION_MODELS[0]
+  const selectedModel = getSpeechModelOption(settings.modelId)
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
+  const warnings = [
+    ...capabilityWarnings,
+    ...getSpeechModelWarnings(settings, { webGpu: capabilities.webGpu, dtype: settings.dtype }),
+  ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
   const progressPercent =
     progress.progress === undefined ? null : `${Math.round(Math.max(0, Math.min(1, progress.progress)) * 100)}%`
 
@@ -88,9 +97,13 @@ export function TranscriptionPanel({
             value={settings.modelId}
             onChange={(event) => onSettingsChange({ ...settings, modelId: event.target.value })}
           >
-            {TRANSCRIPTION_MODELS.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label}
+            {SPEECH_MODELS.map((model) => (
+              <option
+                disabled={!isModelCompatibleWithSettings(model.id, settings)}
+                key={model.id}
+                value={model.id}
+              >
+                {`${model.label} - ${model.shortLabel} (${model.languages === 'english-only' ? 'English only' : 'Multilingual'}${model.highResource ? ', high resource' : ''})`}
               </option>
             ))}
           </select>
@@ -147,18 +160,38 @@ export function TranscriptionPanel({
             }
           />
         </label>
+
+        <label>
+          Precision
+          <select
+            value={settings.dtype}
+            onChange={(event) =>
+              onSettingsChange({
+                ...settings,
+                dtype: event.target.value as TranscriptionSettings['dtype'],
+              })
+            }
+          >
+            <option value="auto">Auto</option>
+            <option value="q8">q8</option>
+            <option value="fp32">Full precision</option>
+          </select>
+        </label>
       </div>
 
       <div className="model-note">
         <DownloadCloud size={16} />
         <span>
-          {selectedModel.description} Expect {selectedModel.estimatedSize}; browser cache is used when supported.
+          <strong>{selectedModel.shortLabel}</strong> is {selectedModel.languages === 'english-only' ? 'English only' : 'multilingual'}.
+          {' '}
+          {selectedModel.description} First use can download model files; later runs use the browser cache when available.
+          {selectedModel.warning ? ` ${selectedModel.warning}` : ''}
         </span>
       </div>
 
-      {capabilityWarnings.length ? (
+      {warnings.length ? (
         <div className="capability-list">
-          {capabilityWarnings.map((warning) => (
+          {warnings.map((warning) => (
             <p className="notice notice--warning" key={warning}>
               <AlertTriangle size={15} />
               {warning}
@@ -205,7 +238,7 @@ function stageLabel(stage: TranscriptionProgress['stage']): string {
   const labels: Record<TranscriptionProgress['stage'], string> = {
     idle: 'Ready',
     'loading-engine': 'Loading transcription engine',
-    'downloading-model': 'Downloading model',
+    'downloading-model': 'Loading speech model',
     'preparing-video': 'Preparing video',
     'extracting-audio': 'Extracting audio',
     transcribing: 'Transcribing',
