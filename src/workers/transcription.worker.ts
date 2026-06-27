@@ -3,9 +3,25 @@ import { fetchFile } from '@ffmpeg/util'
 import coreUrl from '@ffmpeg/core?url'
 import wasmUrl from '@ffmpeg/core/wasm?url'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
-import { buildAudioExtractionArgs } from '../transcription/audioExtraction'
+import { constrainSegmentsToRange } from '../subtitles/regeneration'
+import { buildAudioExtractionArgs, type AudioExtractionRange } from '../transcription/audioExtraction'
+import {
+  dedupeRegenerationCandidates,
+  MAX_REGENERATION_CANDIDATES,
+  planRegenerationAudioRange,
+  REGENERATION_DECODING_PROFILES,
+  validateRegenerationRange,
+  type RegenerationDecodingProfile,
+} from '../transcription/regeneration'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
-import type { TranscriptionSettings, TranscriptionStage, WorkerEvent, WorkerRequest } from '../transcription/types'
+import type {
+  RegenerationCandidate,
+  RegenerationRange,
+  TranscriptionSettings,
+  TranscriptionStage,
+  WorkerEvent,
+  WorkerRequest,
+} from '../transcription/types'
 import { createTranscriptionWindowPlan } from '../transcription/windowing'
 
 let cancelled = false
@@ -18,6 +34,9 @@ type AsrCallOptions = {
   stride_length_s: number
   language?: string
   task: TranscriptionSettings['task']
+  do_sample?: boolean
+  temperature?: number
+  top_k?: number
 }
 
 type BrowserAsrTranscriber = {
@@ -85,7 +104,12 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   cancelled = false
   terminalJobId = createJobId()
   lastOverallProgress = 0
-  transcribe(request.file, request.settings).catch((error: unknown) => {
+  const task =
+    request.type === 'regenerate'
+      ? regenerate(request.file, request.settings, request.range, request.videoDuration)
+      : transcribe(request.file, request.settings)
+
+  task.catch((error: unknown) => {
     postTerminalLog({
       type: 'error',
       message: error instanceof Error ? error.message : 'Transcription failed.',
@@ -118,11 +142,6 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   })
   postProgress('loading-engine', 'Loading FFmpeg.wasm and Transformers.js.')
 
-  const { env, pipeline } = await import('@huggingface/transformers')
-  env.allowLocalModels = false
-  env.allowRemoteModels = true
-  env.useBrowserCache = true
-
   assertNotCancelled()
   postProgress('preparing-video', 'Preparing the selected video file.')
   const audio = await extractAudio(file)
@@ -134,18 +153,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   assertNotCancelled()
   postProgress('downloading-model', `Loading ${settings.modelId}. First use may download model files.`)
 
-  const transcriber = (await pipeline('automatic-speech-recognition', settings.modelId, {
-    device: settings.executionProvider,
-    dtype: settings.dtype === 'auto' ? undefined : settings.dtype,
-    progress_callback: (data: unknown) => {
-      const progress = getDownloadProgress(data)
-      postProgress(
-        'downloading-model',
-        progress?.message ?? 'Downloading or reading model files from browser cache.',
-        progress?.progress,
-      )
-    },
-  })) as BrowserAsrTranscriber
+  const transcriber = await loadTranscriber(settings)
 
   try {
     assertNotCancelled()
@@ -172,6 +180,127 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
       await transcriber.dispose()
     }
   }
+}
+
+async function regenerate(
+  file: File,
+  settings: TranscriptionSettings,
+  range: RegenerationRange,
+  videoDuration?: number,
+): Promise<void> {
+  const validationError = validateRegenerationRange(range, videoDuration)
+  if (validationError) {
+    throw new Error(validationError)
+  }
+
+  assertNotCancelled()
+  postTerminalLog({ type: 'start', fileName: file.name, modelId: settings.modelId })
+  postProgress('loading-engine', 'Loading local regeneration tools.')
+
+  const extractionRange = planRegenerationAudioRange(range, videoDuration)
+  postProgress('preparing-video', 'Preparing the selected subtitle range.')
+  const audio = await extractAudio(file, {
+    startTime: extractionRange.extractionStartTime,
+    endTime: extractionRange.extractionEndTime,
+  })
+
+  if (calculateRms(audio.samples) < 0.0008) {
+    postRegenerationComplete(range, [], settings.modelId)
+    return
+  }
+
+  assertNotCancelled()
+  postProgress('downloading-model', `Loading ${settings.modelId} for local regeneration.`)
+  const transcriber = await loadTranscriber(settings)
+
+  try {
+    const candidates: RegenerationCandidate[] = []
+    let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
+
+    for (const [profileIndex, profile] of REGENERATION_DECODING_PROFILES.entries()) {
+      assertNotCancelled()
+      postProgress(
+        'transcribing',
+        `Generating local alternative ${Math.min(candidates.length + 1, MAX_REGENERATION_CANDIDATES)} of ${MAX_REGENERATION_CANDIDATES}.`,
+        profileIndex / REGENERATION_DECODING_PROFILES.length,
+      )
+
+      const attempt = await transcribeWindowWithTimestampFallback(
+        transcriber,
+        audio.samples,
+        settings,
+        timestampMode,
+        profile,
+      )
+      timestampMode = attempt.timestampMode
+      const normalized = normalizeAsrResult(attempt.result, {
+        offsetSeconds: extractionRange.extractionStartTime,
+        coreStartTime: range.startTime,
+        coreEndTime: range.endTime,
+      })
+      const segments = constrainSegmentsToRange(normalized.segments, range)
+      const text = segments.map((segment) => segment.text).join(' ').replace(/\s+/g, ' ').trim()
+
+      if (text) {
+        candidates.push({ id: profile.id, segments, text })
+      }
+
+      const uniqueCandidates = dedupeRegenerationCandidates(candidates)
+      candidates.splice(0, candidates.length, ...uniqueCandidates)
+      postProgress(
+        'transcribing',
+        `Completed regeneration pass ${profileIndex + 1} of ${REGENERATION_DECODING_PROFILES.length}.`,
+        (profileIndex + 1) / REGENERATION_DECODING_PROFILES.length,
+      )
+
+      if (candidates.length >= MAX_REGENERATION_CANDIDATES) {
+        break
+      }
+    }
+
+    assertNotCancelled()
+    postRegenerationComplete(range, candidates, settings.modelId)
+  } finally {
+    if ('dispose' in transcriber && typeof transcriber.dispose === 'function') {
+      await transcriber.dispose()
+    }
+  }
+}
+
+async function loadTranscriber(settings: TranscriptionSettings): Promise<BrowserAsrTranscriber> {
+  const { env, pipeline } = await import('@huggingface/transformers')
+  env.allowLocalModels = false
+  env.allowRemoteModels = true
+  env.useBrowserCache = true
+
+  return (await pipeline('automatic-speech-recognition', settings.modelId, {
+    device: settings.executionProvider,
+    dtype: settings.dtype === 'auto' ? undefined : settings.dtype,
+    progress_callback: (data: unknown) => {
+      const progress = getDownloadProgress(data)
+      postProgress(
+        'downloading-model',
+        progress?.message ?? 'Downloading or reading model files from browser cache.',
+        progress?.progress,
+      )
+    },
+  })) as BrowserAsrTranscriber
+}
+
+function postRegenerationComplete(
+  range: RegenerationRange,
+  candidates: RegenerationCandidate[],
+  modelId: string,
+): void {
+  postProgress('formatting-subtitles', 'Preparing regenerated subtitle alternatives.')
+  postTerminalLog({
+    type: 'complete',
+    segmentCount: candidates.reduce((total, candidate) => total + candidate.segments.length, 0),
+  })
+  post({
+    type: 'regeneration-complete',
+    result: { range, candidates, modelId },
+  })
 }
 
 async function transcribeInWindows(
@@ -226,8 +355,9 @@ async function transcribeWindowWithTimestampFallback(
   samples: Float32Array,
   settings: TranscriptionSettings,
   timestampMode: TimestampMode,
+  decodingProfile?: RegenerationDecodingProfile,
 ): Promise<TimestampAttempt> {
-  const options = createAsrCallOptions(settings, timestampMode)
+  const options = createAsrCallOptions(settings, timestampMode, decodingProfile)
 
   try {
     return {
@@ -255,7 +385,11 @@ async function transcribeWindowWithTimestampFallback(
   }
 }
 
-function createAsrCallOptions(settings: TranscriptionSettings, timestampMode: TimestampMode): AsrCallOptions {
+function createAsrCallOptions(
+  settings: TranscriptionSettings,
+  timestampMode: TimestampMode,
+  decodingProfile?: RegenerationDecodingProfile,
+): AsrCallOptions {
   return {
     return_timestamps: timestampMode,
     // The worker supplies one model-safe window so it can stream each result immediately.
@@ -263,6 +397,9 @@ function createAsrCallOptions(settings: TranscriptionSettings, timestampMode: Ti
     stride_length_s: 0,
     language: settings.language === 'auto' ? undefined : settings.language,
     task: settings.task,
+    do_sample: decodingProfile?.doSample,
+    temperature: decodingProfile?.temperature,
+    top_k: decodingProfile?.topK,
   }
 }
 
@@ -300,12 +437,18 @@ function isWordTimestampUnsupportedError(error: unknown): boolean {
   )
 }
 
-async function extractAudio(file: File): Promise<{ samples: Float32Array; sampleRate: number }> {
-  postProgress('extracting-audio', 'Extracting mono 16 kHz PCM audio locally with FFmpeg.wasm.')
+async function extractAudio(
+  file: File,
+  range?: AudioExtractionRange,
+): Promise<{ samples: Float32Array; sampleRate: number }> {
+  const message = range
+    ? 'Extracting the selected mono 16 kHz audio range locally with FFmpeg.wasm.'
+    : 'Extracting mono 16 kHz PCM audio locally with FFmpeg.wasm.'
+  postProgress('extracting-audio', message)
 
   const ffmpeg = new FFmpeg()
   ffmpeg.on('progress', ({ progress }) => {
-    postProgress('extracting-audio', 'Extracting audio locally with FFmpeg.wasm.', clampProgress(progress))
+    postProgress('extracting-audio', message, clampProgress(progress))
   })
 
   const inputName = `input-${Date.now()}`
@@ -321,7 +464,7 @@ async function extractAudio(file: File): Promise<{ samples: Float32Array; sample
     await ffmpeg.writeFile(inputName, await fetchFile(file))
 
     assertNotCancelled()
-    const exitCode = await ffmpeg.exec(buildAudioExtractionArgs(inputName, outputName))
+    const exitCode = await ffmpeg.exec(buildAudioExtractionArgs(inputName, outputName, range))
 
     if (exitCode !== 0) {
       throw new Error(`FFmpeg exited with code ${exitCode}.`)

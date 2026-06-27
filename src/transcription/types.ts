@@ -79,17 +79,42 @@ export type TranscriptionResult = {
   modelId: string
 }
 
+export type RegenerationRange = {
+  startTime: number
+  endTime: number
+}
+
+export type RegenerationCandidate = {
+  id: string
+  segments: RawTranscriptionSegment[]
+  text: string
+}
+
+export type RegenerationResult = {
+  range: RegenerationRange
+  candidates: RegenerationCandidate[]
+  modelId: string
+}
+
 export type WorkerStartRequest = {
   type: 'start'
   file: File
   settings: TranscriptionSettings
 }
 
+export type WorkerRegenerateRequest = {
+  type: 'regenerate'
+  file: File
+  settings: TranscriptionSettings
+  range: RegenerationRange
+  videoDuration?: number
+}
+
 export type WorkerCancelRequest = {
   type: 'cancel'
 }
 
-export type WorkerRequest = WorkerStartRequest | WorkerCancelRequest
+export type WorkerRequest = WorkerStartRequest | WorkerRegenerateRequest | WorkerCancelRequest
 
 export type WorkerProgressEvent = {
   type: 'progress'
@@ -99,6 +124,11 @@ export type WorkerProgressEvent = {
 export type WorkerCompleteEvent = {
   type: 'complete'
   result: TranscriptionResult
+}
+
+export type WorkerRegenerationCompleteEvent = {
+  type: 'regeneration-complete'
+  result: RegenerationResult
 }
 
 export type WorkerPartialEvent = {
@@ -114,4 +144,9 @@ export type WorkerErrorEvent = {
   }
 }
 
-export type WorkerEvent = WorkerProgressEvent | WorkerPartialEvent | WorkerCompleteEvent | WorkerErrorEvent
+export type WorkerEvent =
+  | WorkerProgressEvent
+  | WorkerPartialEvent
+  | WorkerCompleteEvent
+  | WorkerRegenerationCompleteEvent
+  | WorkerErrorEvent

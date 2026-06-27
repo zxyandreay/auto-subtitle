@@ -1,9 +1,23 @@
 export const AUDIO_TIMELINE_FILTER = 'aresample=async=1:first_pts=0'
 
-export function buildAudioExtractionArgs(inputName: string, outputName: string): string[] {
+export type AudioExtractionRange = {
+  startTime: number
+  endTime: number
+}
+
+export function buildAudioExtractionArgs(
+  inputName: string,
+  outputName: string,
+  range?: AudioExtractionRange,
+): string[] {
+  const seekArgs = range ? ['-ss', formatSeconds(range.startTime)] : []
+  const durationArgs = range ? ['-t', formatSeconds(range.endTime - range.startTime)] : []
+
   return [
+    ...seekArgs,
     '-i',
     inputName,
+    ...durationArgs,
     '-vn',
     '-af',
     AUDIO_TIMELINE_FILTER,
@@ -17,4 +31,8 @@ export function buildAudioExtractionArgs(inputName: string, outputName: string):
     'wav',
     outputName,
   ]
+}
+
+function formatSeconds(value: number): string {
+  return String(Math.round(value * 1000) / 1000)
 }
