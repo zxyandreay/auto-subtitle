@@ -93,7 +93,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | --- | --- | --- |
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
-| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/capabilities.ts` | Starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
+| Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/models.ts`, `src/transcription/capabilities.ts` | Registers model metadata and compatibility, normalizes settings, starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
 | Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that preserve delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
 | Range regeneration | `src/transcription/regeneration.ts`, `src/subtitles/regeneration.ts` | Validates ranges, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
 | Transcription windowing | `src/transcription/windowing.ts` | Plans contiguous ownership cores and overlap context while keeping every model input within Whisper's 30-second limit. |
@@ -213,7 +213,7 @@ flowchart TB
 | `ProjectToolbar` | `src/components/ProjectToolbar.tsx` | Caption-symbol branding plus project-level import, restore, export, clearing, and theme actions. |
 | `FileDropZone` | `src/components/FileDropZone.tsx` | Drag/drop and file picker for video files, file facts, validation messages, and removal. |
 | `VideoPlayer` | `src/components/VideoPlayer.tsx` | HTML video preview, playback controls, range seek, volume, fullscreen, subtitle overlay, active subtitle lookup. |
-| `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/chunk settings, capability warnings, determinate progress display, start/cancel buttons. |
+| `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
 | `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. |
@@ -498,12 +498,22 @@ The worker computes a sampled RMS value with `calculateRms`. If RMS is below `0.
 
 ### 6. Whisper Model Loading
 
-The app currently exposes two model options:
+`src/transcription/models.ts` is the single registry for model IDs, labels, family, tier, language coverage, supported tasks, full-transcription/regeneration support, recommended engine and dtype, resource level, and warning copy.
 
-| UI label | Model id | Intended tradeoff |
-| --- | --- | --- |
-| Faster model | `onnx-community/whisper-tiny` | Smaller, faster, lower memory, less accurate. |
-| More accurate model | `onnx-community/whisper-base` | Larger, slower, higher memory, usually more accurate. |
+| UI label | Model id | Languages | Translation | Resource level |
+| --- | --- | --- | --- | --- |
+| Fast model - Tiny | `onnx-community/whisper-tiny` | Multilingual | Yes | Low |
+| Balanced model - Base | `onnx-community/whisper-base` | Multilingual | Yes | Medium |
+| High accuracy model - Large v3 Turbo | `onnx-community/whisper-large-v3-turbo` | Multilingual | No | High |
+| English high quality model - Distil Large v3 | `distil-whisper/distil-large-v3` | English only | No | High |
+
+Compatibility is enforced at three boundaries:
+
+1. The selector keeps incompatible models visible but disabled with explanatory metadata.
+2. `App` resolves changes to model, language, or task before saving settings and shows one non-blocking switch notice.
+3. The worker resolves again before pipeline loading, ASR options, partial results, final results, or regeneration results, protecting old projects and direct worker callers.
+
+Distil Large v3 requires an explicitly English language and `transcribe`; its runtime call is forced to `language: 'english'` and `task: 'transcribe'`. Large v3 Turbo also requires `transcribe`. Translation falls back to Base. A non-English Distil selection falls back to Large v3 Turbo for `auto`/`webgpu` execution or Base for `wasm`/`cpu`. Unknown IDs fall back to Base, while Tiny and Base remain compatible with existing settings.
 
 The worker creates a Transformers.js pipeline:
 
@@ -524,9 +534,9 @@ Current `executionProvider` choices:
 | `wasm` | Prefer WebAssembly. |
 | `cpu` | Use CPU execution path. |
 
-Current `dtype` choices in the type model are `auto`, `q8`, and `fp32`. The UI currently leaves dtype at the default `auto`; if it is not `auto`, the worker passes the dtype through to the pipeline.
+Current `dtype` choices in the UI and type model are `auto`, `q8`, and `fp32`. If dtype is not `auto`, the worker passes it through to the pipeline. High-resource models recommend WebGPU and `q8`; missing WebGPU, CPU/WASM selection, and `fp32` each produce a specific warning but do not block the job.
 
-Model download/cache progress is translated from Transformers.js progress callback payloads. The worker supports payloads with either:
+Model download/cache progress is translated from Transformers.js progress callback payloads. The user-facing stage is `Loading speech model`, because files may come from either browser cache or the model repository. Technical details identify the selected label, resolved ID, resource class, engine, and dtype. The worker supports payloads with either:
 
 1. A numeric `progress` percentage, or
 2. Numeric `loaded` and `total` byte counts.
@@ -551,8 +561,9 @@ The app configures the model through these user-facing settings:
 | --- | --- | --- |
 | Spoken language | `language` | `auto` becomes `undefined`; a selected language is passed to the ASR call. |
 | Output | `task` | `transcribe` keeps the source language; `translate` asks Whisper for English output. |
-| Model | `modelId` | Chooses tiny or base ONNX Whisper repository. |
+| Model | `modelId` | Chooses one of the four registered browser-compatible ASR repositories after compatibility resolution. |
 | Engine | `device` | Chooses auto, WebGPU, WASM, or CPU execution provider. |
+| Precision | pipeline `dtype` | Chooses auto, q8, or fp32 model weights. |
 | Use word timestamps | `return_timestamps` | Uses `'word'` when enabled; otherwise uses segment timestamps. |
 
 The worker calls the transcriber with:
@@ -568,6 +579,8 @@ The worker calls the transcriber with:
 ```
 
 `chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization. Every manually prepared input is therefore kept at or below Whisper's 30-second feature-input limit.
+
+For Distil Large v3, the resolver overrides the ASR call to explicit English transcription. Turbo and Distil translation requests never reach the pipeline with `task: 'translate'`; they resolve to Base first. Word-timestamp failure continues to retry the same resolved model with segment timestamps.
 
 ## Audio Windowing And Timestamp Normalization
 
@@ -779,7 +792,7 @@ Regeneration details:
 2. The dialog starts with the row's current timestamps and supports arbitrary adjusted ranges up to 30 seconds.
 3. Context planning adds up to two seconds on each side only when the complete extracted model input remains within Whisper's 30-second budget.
 4. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
-5. The current model, language, task, engine, dtype, word-timestamp preference, and formatting preferences are captured when generation begins.
+5. The current compatible model, language, task, engine, dtype, word-timestamp preference, and formatting preferences are captured when generation begins. The worker enforces compatibility again and returns the resolved model ID.
 6. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
 7. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
 8. Empty, silent, duplicate-only, cancelled, or failed regeneration produces no editor mutation.
@@ -1076,10 +1089,11 @@ flowchart TD
     Kind -->|.vtt| ParseVtt["parseVtt"]
     Kind -->|other| Unsupported["Unsupported warning"]
 
-    ParseJson --> ValidateProject["Validate metadata, subtitles, formatting"]
-    ValidateProject --> ProjectOk{"Valid project?"}
+    ParseJson --> ValidateProject["Validate metadata, subtitles, formatting, settings"]
+    ValidateProject --> NormalizeModel["Normalize model/task/language compatibility"]
+    NormalizeModel --> ProjectOk{"Valid project?"}
     ProjectOk -->|No| ImportError["Show project import errors"]
-    ProjectOk -->|Yes| ReplaceProject["Replace subtitles and formatting"]
+    ProjectOk -->|Yes| ReplaceProject["Replace subtitles, formatting, and restored settings"]
 
     ParseSrt --> CueEntries["SubtitleEntry[]"]
     ParseVtt --> CueEntries
@@ -1115,7 +1129,10 @@ Project JSON parsing:
 5. Requires `subtitles` to be an array.
 6. Normalizes each subtitle entry.
 7. Normalizes formatting preferences with defaults for missing fields.
-8. Validates subtitles and fails import if validation errors exist.
+8. Preserves known model IDs, resolves incompatible combinations, and replaces unknown model IDs with Base without changing schema version.
+9. Restores model, language, task, engine, dtype, chunk, overlap, and formatting settings, with missing legacy fields supplied from current defaults.
+10. Reports a one-time warning when model compatibility changed during import.
+11. Validates subtitles and fails import if validation errors exist.
 
 Project JSON does not contain the original video file. On restore/import, the UI tells the user to select the original video again and includes saved filename and duration hints when available.
 
@@ -1261,7 +1278,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/regeneration-dialog.test.tsx`, `src/tests/regeneration-utils.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
+Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/regeneration-dialog.test.tsx`, `src/tests/regeneration-utils.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-models.test.ts`, `src/tests/transcription-panel.test.tsx`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
 
 They cover:
 
@@ -1308,6 +1325,13 @@ They cover:
 41. Range-constrained segment timing and all-overlap cue replacement.
 42. Neighbor-gap clamping without invented gaps at an open range boundary.
 43. Regeneration dialog defaults, validation, preview, apply, original no-op, and Escape cancellation.
+44. Registry recognition for all four model IDs and backward compatibility for Tiny/Base.
+45. Distil English/transcription and Turbo transcription compatibility rules.
+46. Deterministic fallback behavior for unknown, non-English, and translation settings.
+47. Runtime enforcement of explicit English Distil ASR options.
+48. High-resource WebGPU, precision, and CPU/WASM warnings.
+49. Project model preservation, fallback normalization, and one-time warning details.
+50. Selector model metadata, disabled incompatible options, high-resource guidance, and cache-accurate progress labels.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1349,14 +1373,12 @@ The app has a small transcription provider boundary. A future local engine could
 
 Other natural extension points:
 
-1. Additional Whisper model options with clearer size estimates.
-2. A dtype control in the UI.
-3. More spoken language options.
-4. Streaming or media-pipeline-based audio extraction for lower memory use.
-5. Waveform-based timing adjustment.
-6. More import/export formats.
-7. More advanced subtitle timing controls for reviewing generated captions.
-8. Screenshot documentation in the README.
+1. More spoken language options.
+2. Streaming or media-pipeline-based audio extraction for lower memory use.
+3. Waveform-based timing adjustment.
+4. More import/export formats.
+5. More advanced subtitle timing controls for reviewing generated captions.
+6. Screenshot documentation in the README.
 
 ## End-To-End Summary
 
@@ -1365,7 +1387,8 @@ flowchart TD
     A["User selects video"] --> B["Browser validates file and creates object URL"]
     B --> C["User starts local transcription"]
     C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
-    D --> E["Worker loads Whisper through Transformers.js"]
+    D --> R["Registry resolves a compatible model, language, and task"]
+    R --> E["Worker loads the resolved ASR model through Transformers.js"]
     E --> F["Worker splits decoded audio into model-safe windows with overlap inside the 30-second budget"]
     F --> G["Whisper returns text and timestamps"]
     G --> H["Worker maps chunks to the full video timeline"]

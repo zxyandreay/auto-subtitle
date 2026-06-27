@@ -84,12 +84,18 @@ npm run preview
 
 ## Transcription Models
 
-The app offers:
+| Model | Best for | Languages | Translation | Resource level |
+| --- | --- | --- | --- | --- |
+| Tiny (`onnx-community/whisper-tiny`) | Fast tests and lower-resource devices | Multilingual | Yes | Low |
+| Base (`onnx-community/whisper-base`) | Balanced default use | Multilingual | Yes | Medium |
+| Large v3 Turbo (`onnx-community/whisper-large-v3-turbo`) | High-accuracy transcription | Multilingual | No | High |
+| Distil Large v3 (`distil-whisper/distil-large-v3`) | Fast, high-quality English transcription | English only | No | High |
 
-- Faster model: `onnx-community/whisper-tiny`
-- More accurate model: `onnx-community/whisper-base`
+All four models use the same local Transformers.js automatic speech recognition pipeline for full transcription, live partial captions, final results, and range regeneration. Large v3 Turbo and Distil Large v3 are high-resource models; WebGPU with `q8` precision is recommended, while CPU/WASM or `fp32` can be much slower or require substantially more memory.
 
-Both are loaded through Transformers.js as automatic speech recognition pipelines. Accuracy depends on speech clarity, noise, language, accents, overlapping speakers, device performance, browser support, model choice, and subtitle formatting preferences. Generated subtitles should be manually reviewed.
+Distil Large v3 is enabled only for an explicitly selected English language and the transcription task. Large v3 Turbo is transcription-only. If a language or task change makes the selected model incompatible, Auto Subtitle switches to a compatible multilingual model and shows a non-blocking notice. Tiny and Base remain available for both transcription and translation.
+
+The first use of a model can download its files from Hugging Face. Transformers.js uses the browser cache when supported, so later jobs can read unchanged files locally instead of downloading them again. Accuracy still depends on speech clarity, noise, language, accents, overlapping speakers, device performance, browser support, model choice, and subtitle formatting preferences. Generated subtitles should be manually reviewed.
 
 ## Browser Processing Workflow
 
@@ -97,7 +103,7 @@ Both are loaded through Transformers.js as automatic speech recognition pipeline
 2. The app creates a temporary object URL for preview.
 3. A Web Worker loads FFmpeg.wasm and Transformers.js.
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
-5. Transformers.js loads the selected Whisper model.
+5. The compatibility resolver validates the selected model, language, and task, then Transformers.js loads the resolved model from browser cache or the model repository.
 6. The worker creates model-safe audio windows no longer than Whisper's 30-second input budget, with overlap reserved inside each window instead of appended beyond it.
 7. The ASR pipeline requests timestamped output for each window.
 8. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.
@@ -119,7 +125,7 @@ The 30-second ceiling follows Whisper's fixed input context, while the overlap b
 6. Preview any choice against the video without modifying the editor.
 7. Apply an alternative to replace all cues overlapping the range as one undoable edit, or keep the original unchanged.
 
-Regeneration uses the current language, output task, model, engine, and formatting preferences. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
+Regeneration uses the current compatible language, output task, model, engine, precision, and formatting preferences. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
 
 ## Generated Caption Readability
 
@@ -146,7 +152,7 @@ Supported exports:
 - `.txt` readable transcript, with optional timestamps
 - `.auto-subtitle.json` project data without the original video
 
-When importing project JSON, the app validates the schema and asks you to select the original video again. Saved video name and duration are used as comparison hints only.
+When importing project JSON, the app validates the schema, normalizes saved model compatibility, and asks you to select the original video again. Saved video name and duration are used as comparison hints only. Existing projects that store Tiny or Base continue to restore unchanged; unknown model IDs fall back to Base.
 
 ## Keyboard Shortcuts
 
@@ -177,6 +183,7 @@ The transcription provider boundary is intentionally small so another local engi
 ## Known Limitations
 
 - Browser transcription is demanding. Large videos can require significant memory and time.
+- Large v3 Turbo and Distil Large v3 can exceed device memory on lower-resource browsers. WebGPU and `q8` are recommended, but the app does not block CPU/WASM use.
 - The current FFmpeg.wasm path writes the selected file into FFmpeg's in-memory filesystem before extraction. That is not true streaming for arbitrary containers.
 - Transformers.js chunking is used for long audio, but the extracted audio buffer is still held in browser memory.
 - Codec support depends on the browser and FFmpeg.wasm build.
