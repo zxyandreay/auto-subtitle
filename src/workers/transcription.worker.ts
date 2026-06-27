@@ -6,6 +6,11 @@ import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import { constrainSegmentsToRange } from '../subtitles/regeneration'
 import { buildAudioExtractionArgs, type AudioExtractionRange } from '../transcription/audioExtraction'
 import {
+  getSpeechModelOption,
+  resolveSpeechModelRuntimeSettings,
+  type SpeechModelOption,
+} from '../transcription/models'
+import {
   dedupeRegenerationCandidates,
   MAX_REGENERATION_CANDIDATES,
   planRegenerationAudioRange,
@@ -139,14 +144,20 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
 })
 
 async function transcribe(file: File, settings: TranscriptionSettings): Promise<void> {
+  const runtime = resolveSpeechModelRuntimeSettings(settings)
+  const effectiveSettings = runtime.settings
+  const model = getSpeechModelOption(effectiveSettings.modelId)
   assertNotCancelled()
   postTerminalLog({
     type: 'start',
     fileName: file.name,
-    modelId: settings.modelId,
+    modelId: effectiveSettings.modelId,
     jobKind: 'transcription',
   })
   postProgress('loading-engine', 'Loading FFmpeg.wasm and Transformers.js.')
+  if (runtime.reason) {
+    postProgress('loading-engine', runtime.reason, undefined, `Resolved model: ${effectiveSettings.modelId}`)
+  }
 
   assertNotCancelled()
   postProgress('preparing-video', 'Preparing the selected video file.')
@@ -157,14 +168,19 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   }
 
   assertNotCancelled()
-  postProgress('downloading-model', `Loading ${settings.modelId}. First use may download model files.`)
+  postProgress(
+    'downloading-model',
+    `Loading ${model.shortLabel} from the browser cache or model repository.`,
+    undefined,
+    getModelTechnicalDetails(model, effectiveSettings),
+  )
 
-  const transcriber = await loadTranscriber(settings)
+  const transcriber = await loadTranscriber(effectiveSettings)
 
   try {
     assertNotCancelled()
     postProgress('transcribing', 'Transcribing speech locally with Whisper.')
-    const result = await transcribeInWindows(transcriber, audio, settings)
+    const result = await transcribeInWindows(transcriber, audio, effectiveSettings)
 
     assertNotCancelled()
     postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
@@ -179,7 +195,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
       result: {
         segments: result.segments,
         text: result.text,
-        modelId: settings.modelId,
+        modelId: effectiveSettings.modelId,
       },
     })
   } finally {
@@ -195,6 +211,9 @@ async function regenerate(
   range: RegenerationRange,
   videoDuration?: number,
 ): Promise<void> {
+  const runtime = resolveSpeechModelRuntimeSettings(settings)
+  const effectiveSettings = runtime.settings
+  const model = getSpeechModelOption(effectiveSettings.modelId)
   const validationError = validateRegenerationRange(range, videoDuration)
   if (validationError) {
     throw new Error(validationError)
@@ -204,12 +223,15 @@ async function regenerate(
   postTerminalLog({
     type: 'start',
     fileName: file.name,
-    modelId: settings.modelId,
+    modelId: effectiveSettings.modelId,
     jobKind: 'regeneration',
     startTime: range.startTime,
     endTime: range.endTime,
   })
   postProgress('loading-engine', 'Loading local regeneration tools.')
+  if (runtime.reason) {
+    postProgress('loading-engine', runtime.reason, undefined, `Resolved model: ${effectiveSettings.modelId}`)
+  }
 
   const extractionRange = planRegenerationAudioRange(range, videoDuration)
   postProgress('preparing-video', 'Preparing the selected subtitle range.')
@@ -219,17 +241,22 @@ async function regenerate(
   })
 
   if (calculateRms(audio.samples) < 0.0008) {
-    postRegenerationComplete(range, [], settings.modelId)
+    postRegenerationComplete(range, [], effectiveSettings.modelId)
     return
   }
 
   assertNotCancelled()
-  postProgress('downloading-model', `Loading ${settings.modelId} for local regeneration.`)
-  const transcriber = await loadTranscriber(settings)
+  postProgress(
+    'downloading-model',
+    `Loading ${model.shortLabel} from the browser cache or model repository for local regeneration.`,
+    undefined,
+    getModelTechnicalDetails(model, effectiveSettings),
+  )
+  const transcriber = await loadTranscriber(effectiveSettings)
 
   try {
     const candidates: RegenerationCandidate[] = []
-    let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
+    let timestampMode: TimestampMode = effectiveSettings.formatting.useWordTimestamps ? 'word' : true
 
     for (const [profileIndex, profile] of REGENERATION_DECODING_PROFILES.entries()) {
       assertNotCancelled()
@@ -242,7 +269,7 @@ async function regenerate(
       const attempt = await transcribeWindowWithTimestampFallback(
         transcriber,
         audio.samples,
-        settings,
+        effectiveSettings,
         timestampMode,
         profile,
       )
@@ -273,7 +300,7 @@ async function regenerate(
     }
 
     assertNotCancelled()
-    postRegenerationComplete(range, candidates, settings.modelId)
+    postRegenerationComplete(range, candidates, effectiveSettings.modelId)
   } finally {
     if ('dispose' in transcriber && typeof transcriber.dispose === 'function') {
       await transcriber.dispose()
@@ -282,23 +309,33 @@ async function regenerate(
 }
 
 async function loadTranscriber(settings: TranscriptionSettings): Promise<BrowserAsrTranscriber> {
+  const runtime = resolveSpeechModelRuntimeSettings(settings)
+  const model = getSpeechModelOption(runtime.settings.modelId)
   const { env, pipeline } = await import('@huggingface/transformers')
   env.allowLocalModels = false
   env.allowRemoteModels = true
   env.useBrowserCache = true
 
-  return (await pipeline('automatic-speech-recognition', settings.modelId, {
-    device: settings.executionProvider,
-    dtype: settings.dtype === 'auto' ? undefined : settings.dtype,
-    progress_callback: (data: unknown) => {
-      const progress = getDownloadProgress(data)
-      postProgress(
-        'downloading-model',
-        progress?.message ?? 'Downloading or reading model files from browser cache.',
-        progress?.progress,
-      )
-    },
-  })) as BrowserAsrTranscriber
+  try {
+    return (await pipeline('automatic-speech-recognition', runtime.settings.modelId, {
+      device: runtime.settings.executionProvider,
+      dtype: runtime.settings.dtype === 'auto' ? undefined : runtime.settings.dtype,
+      progress_callback: (data: unknown) => {
+        const progress = getDownloadProgress(data)
+        postProgress(
+          'downloading-model',
+          progress ? `Model download/cache progress: ${progress.message}` : 'Reading speech model files.',
+          progress?.progress,
+          getModelTechnicalDetails(model, runtime.settings),
+        )
+      },
+    })) as BrowserAsrTranscriber
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Could not load ${model.shortLabel} with ${runtime.settings.executionProvider}/${runtime.settings.dtype}. ${details}`,
+    )
+  }
 }
 
 function postRegenerationComplete(
@@ -618,7 +655,12 @@ function calculateRms(samples: Float32Array): number {
   return Math.sqrt(sum / Math.max(1, count))
 }
 
-function postProgress(stage: TranscriptionStage, message: string, progress?: number): void {
+function postProgress(
+  stage: TranscriptionStage,
+  message: string,
+  progress?: number,
+  technicalDetails?: string,
+): void {
   const overallProgress = getOverallProgress(stage, progress)
   post({
     type: 'progress',
@@ -626,6 +668,7 @@ function postProgress(stage: TranscriptionStage, message: string, progress?: num
       stage,
       message,
       progress: overallProgress,
+      technicalDetails,
     },
   })
   postTerminalLog({
@@ -634,6 +677,10 @@ function postProgress(stage: TranscriptionStage, message: string, progress?: num
     message,
     progress: overallProgress,
   })
+}
+
+function getModelTechnicalDetails(model: SpeechModelOption, settings: TranscriptionSettings): string {
+  return `${model.label} (${model.id}); ${model.highResource ? 'high-resource; ' : ''}engine ${settings.executionProvider}; dtype ${settings.dtype}`
 }
 
 function post(event: WorkerEvent): void {

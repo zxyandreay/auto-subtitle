@@ -2,6 +2,7 @@ import { sortAndRenumber } from './formatting'
 import { validateSubtitles } from './validation'
 import type { AutoSubtitleProject, FormattingPreferences, SubtitleEntry } from '../types/subtitles'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
+import { BASE_MODEL_ID, resolveCompatibleModelId } from '../transcription/models'
 import { formatSrtTimestamp, formatVttTimestamp } from '../utils/time'
 
 export function exportSrt(entries: SubtitleEntry[]): string {
@@ -67,22 +68,29 @@ export function exportProjectJson(project: AutoSubtitleProject): string {
   return `${JSON.stringify(project, null, 2)}\n`
 }
 
-export function parseProjectJson(content: string): { project?: AutoSubtitleProject; errors: string[] } {
+export function parseProjectJson(
+  content: string,
+): { project?: AutoSubtitleProject; errors: string[]; warnings: string[] } {
   try {
     const parsed = JSON.parse(content) as unknown
     return validateProject(parsed)
   } catch (error) {
     return {
       errors: [`Invalid JSON: ${error instanceof Error ? error.message : 'unknown parse error'}`],
+      warnings: [],
     }
   }
 }
 
-export function validateProject(value: unknown): { project?: AutoSubtitleProject; errors: string[] } {
+export function validateProject(value: unknown): {
+  project?: AutoSubtitleProject
+  errors: string[]
+  warnings: string[]
+} {
   const errors: string[] = []
 
   if (!isRecord(value)) {
-    return { errors: ['Project file must contain an object.'] }
+    return { errors: ['Project file must contain an object.'], warnings: [] }
   }
 
   const metadata = value.metadata
@@ -99,6 +107,7 @@ export function validateProject(value: unknown): { project?: AutoSubtitleProject
     : []
 
   const formatting = normalizeFormatting(value.formatting)
+  const normalizedTranscriptionSettings = normalizeProjectTranscriptionSettings(value.transcriptionSettings)
   const project: AutoSubtitleProject = {
     metadata: {
       appName: 'Auto Subtitle',
@@ -114,14 +123,18 @@ export function validateProject(value: unknown): { project?: AutoSubtitleProject
     },
     subtitles: sortAndRenumber(subtitles),
     formatting,
-    transcriptionSettings: isRecord(value.transcriptionSettings) ? value.transcriptionSettings : undefined,
+    transcriptionSettings: normalizedTranscriptionSettings.settings,
   }
 
   const validationErrors = validateSubtitles(project.subtitles, project.metadata.videoDuration)
     .filter((issue) => issue.level === 'error')
     .map((issue) => `Subtitle ${issue.entryId}: ${issue.message}`)
 
-  return { project: errors.length === 0 ? project : undefined, errors: [...errors, ...validationErrors] }
+  return {
+    project: errors.length === 0 ? project : undefined,
+    errors: [...errors, ...validationErrors],
+    warnings: normalizedTranscriptionSettings.reason ? [normalizedTranscriptionSettings.reason] : [],
+  }
 }
 
 function exportableEntries(entries: SubtitleEntry[]): SubtitleEntry[] {
@@ -183,6 +196,31 @@ function normalizeFormatting(value: unknown): FormattingPreferences {
       typeof value.useWordTimestamps === 'boolean'
         ? value.useWordTimestamps
         : DEFAULT_FORMATTING_PREFERENCES.useWordTimestamps,
+  }
+}
+
+function normalizeProjectTranscriptionSettings(value: unknown): {
+  settings?: Record<string, unknown>
+  reason?: string
+} {
+  if (!isRecord(value)) {
+    return {}
+  }
+
+  const modelId = typeof value.modelId === 'string' ? value.modelId : BASE_MODEL_ID
+  const language = typeof value.language === 'string' ? value.language : 'auto'
+  const task = value.task === 'translate' ? 'translate' : 'transcribe'
+  const executionProvider =
+    value.executionProvider === 'webgpu' ||
+    value.executionProvider === 'wasm' ||
+    value.executionProvider === 'cpu'
+      ? value.executionProvider
+      : 'auto'
+  const resolved = resolveCompatibleModelId({ modelId, language, task, executionProvider })
+
+  return {
+    settings: { ...value, modelId: resolved.modelId },
+    reason: resolved.reason,
   }
 }
 
