@@ -4,6 +4,7 @@ import {
   formatSubtitleText,
   formatTranscriptionSegments,
   makeSubtitleEntry,
+  makeSubtitleEntryAtTime,
   mergeEntries,
   type RawTranscriptionSegment,
   shiftEntries,
@@ -76,6 +77,28 @@ describe('subtitle import and export', () => {
 })
 
 describe('subtitle editing logic', () => {
+  it('creates a manual subtitle at the exact playhead time', () => {
+    const entry = makeSubtitleEntryAtTime(12.3456, 60)
+
+    expect(entry.startTime).toBe(12.346)
+    expect(entry.endTime).toBe(14.346)
+    expect(entry.text).toBe('New subtitle')
+  })
+
+  it('shortens a playhead subtitle to stay within the known video duration', () => {
+    const entry = makeSubtitleEntryAtTime(9.75, 10)
+
+    expect(entry.startTime).toBe(9.75)
+    expect(entry.endTime).toBe(10)
+  })
+
+  it('does not treat a zero metadata duration as a known video boundary', () => {
+    const entry = makeSubtitleEntryAtTime(12.5, 0)
+
+    expect(entry.startTime).toBe(12.5)
+    expect(entry.endTime).toBe(14.5)
+  })
+
   it('sorts and renumbers entries', () => {
     const entries = sortAndRenumber([
       makeSubtitleEntry({ startTime: 5, endTime: 6, text: 'second' }),

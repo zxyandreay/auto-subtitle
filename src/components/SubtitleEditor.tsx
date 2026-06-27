@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   formatSubtitleText,
   makeSubtitleEntry,
+  makeSubtitleEntryAtTime,
   mergeEntries,
   removeEmptyEntries,
   sortAndRenumber,
@@ -29,6 +30,7 @@ type SubtitleEditorProps = {
   formatting: FormattingPreferences
   autoScroll: boolean
   showOnlyErrors: boolean
+  capturePlayheadTime: () => number
   onAutoScrollChange: (enabled: boolean) => void
   onShowOnlyErrorsChange: (enabled: boolean) => void
   onChange: (entries: SubtitleEntry[]) => void
@@ -43,6 +45,7 @@ export function SubtitleEditor({
   formatting,
   autoScroll,
   showOnlyErrors,
+  capturePlayheadTime,
   onAutoScrollChange,
   onShowOnlyErrorsChange,
   onChange,
@@ -51,6 +54,7 @@ export function SubtitleEditor({
 }: SubtitleEditorProps) {
   const [query, setQuery] = useState('')
   const [matchIndex, setMatchIndex] = useState(0)
+  const [entryToFocusId, setEntryToFocusId] = useState<string>()
   const activeRef = useRef<HTMLDivElement | null>(null)
   const issues = useMemo(() => validateSubtitles(entries, duration), [duration, entries])
   const issueIds = useMemo(() => new Set(issues.map((issue) => issue.entryId)), [issues])
@@ -68,15 +72,28 @@ export function SubtitleEditor({
   }, [query])
 
   useEffect(() => {
-    if (autoScroll && activeRef.current) {
+    if (autoScroll && !entryToFocusId && activeRef.current) {
       activeRef.current.scrollIntoView({ block: 'nearest' })
     }
-  }, [activeEntryId, autoScroll])
+  }, [activeEntryId, autoScroll, entryToFocusId])
 
   const commit = (next: SubtitleEntry[]) => onChange(sortAndRenumber(next))
 
   const updateEntry = (id: string, patch: Partial<SubtitleEntry>) => {
     commit(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
+  }
+
+  const commitNewEntry = (nextEntries: SubtitleEntry[], entryId: string) => {
+    if (showOnlyErrors) {
+      onShowOnlyErrorsChange(false)
+    }
+    setEntryToFocusId(entryId)
+    commit(nextEntries)
+  }
+
+  const insertAtPlayhead = () => {
+    const next = makeSubtitleEntryAtTime(capturePlayheadTime(), duration)
+    commitNewEntry([...entries, next], next.id)
   }
 
   const insertAt = (index: number, placement: 'before' | 'after') => {
@@ -93,7 +110,7 @@ export function SubtitleEditor({
       : 2
     const next = makeSubtitleEntry({ startTime, endTime, text: 'New subtitle' })
     const position = placement === 'before' ? index : index + 1
-    commit([...entries.slice(0, position), next, ...entries.slice(position)])
+    commitNewEntry([...entries.slice(0, position), next, ...entries.slice(position)], next.id)
   }
 
   const jumpToMatch = (direction: 1 | -1) => {
@@ -118,7 +135,13 @@ export function SubtitleEditor({
             {issues.length ? `, ${issues.length} validation ${issues.length === 1 ? 'issue' : 'issues'}` : ', no issues'}
           </p>
         </div>
-        <button className="button button--soft" type="button" onClick={() => insertAt(entries.length - 1, 'after')}>
+        <button
+          aria-label="Add subtitle at current video time"
+          className="button button--soft"
+          title="Add subtitle at current video time"
+          type="button"
+          onClick={insertAtPlayhead}
+        >
           <Plus size={16} />
           Add
         </button>
@@ -181,8 +204,10 @@ export function SubtitleEditor({
                 issues={entryIssues}
                 isActive={isActive}
                 isMatch={isMatch}
+                focusText={entry.id === entryToFocusId}
                 onAddAfter={() => insertAt(index, 'after')}
                 onAddBefore={() => insertAt(index, 'before')}
+                onFocusHandled={() => setEntryToFocusId(undefined)}
                 onDelete={() => commit(entries.filter((item) => item.id !== entry.id))}
                 onDuplicate={() => {
                   const duplicate = makeSubtitleEntry({
@@ -235,7 +260,7 @@ export function SubtitleEditor({
         ) : (
           <div className="empty-editor">
             <p>No subtitles yet.</p>
-            <button className="button button--primary" type="button" onClick={() => insertAt(-1, 'after')}>
+            <button className="button button--primary" type="button" onClick={insertAtPlayhead}>
               <Plus size={16} />
               Create first subtitle
             </button>
@@ -260,12 +285,14 @@ type SubtitleRowProps = {
   formatting: FormattingPreferences
   isActive: boolean
   isMatch: boolean
+  focusText: boolean
   refCallback?: (element: HTMLDivElement | null) => void
   onUpdate: (patch: Partial<SubtitleEntry>) => void
   onSeek: () => void
   onPlayRange: () => void
   onAddBefore: () => void
   onAddAfter: () => void
+  onFocusHandled: () => void
   onDelete: () => void
   onSplit: () => void
   onMergePrevious: () => void
@@ -281,12 +308,14 @@ function SubtitleRow({
   formatting,
   isActive,
   isMatch,
+  focusText,
   refCallback,
   onUpdate,
   onSeek,
   onPlayRange,
   onAddBefore,
   onAddAfter,
+  onFocusHandled,
   onDelete,
   onSplit,
   onMergePrevious,
@@ -296,6 +325,18 @@ function SubtitleRow({
   onDuplicate,
 }: SubtitleRowProps) {
   const hasError = issues.some((issue) => issue.level === 'error')
+  const textRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    if (!focusText || !textRef.current) {
+      return
+    }
+
+    textRef.current.scrollIntoView({ block: 'nearest' })
+    textRef.current.focus()
+    textRef.current.select()
+    onFocusHandled()
+  }, [focusText, onFocusHandled])
 
   return (
     <div
@@ -346,6 +387,7 @@ function SubtitleRow({
       </div>
 
       <textarea
+        ref={textRef}
         aria-label={`Subtitle ${entry.index} text`}
         value={entry.text}
         onChange={(event) => onUpdate({ text: event.target.value })}

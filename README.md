@@ -11,10 +11,11 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
-- Subtitle editor with text and timestamp editing, immediate validation, active-row highlighting, search, add/delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
+- Subtitle editor with playhead-accurate manual insertion, immediate text focus, timestamp editing, validation, active-row highlighting, search, delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
+- Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
 - Keyboard shortcuts for playback, seeking, undo, and redo.
 
 ## Screenshots

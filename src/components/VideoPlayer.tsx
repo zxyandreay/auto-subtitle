@@ -1,5 +1,6 @@
 import { Captions, Maximize, Pause, Play, RotateCcw, Volume2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import type { SubtitleEntry } from '../types/subtitles'
 import { formatDuration } from '../utils/time'
 import { IconButton } from './IconButton'
@@ -8,6 +9,7 @@ type VideoPlayerProps = {
   src: string | null
   duration: number
   currentTime: number
+  videoRef: RefObject<HTMLVideoElement | null>
   subtitles: SubtitleEntry[]
   subtitlesVisible: boolean
   seekRequest?: { time: number; id: number }
@@ -22,6 +24,7 @@ export function VideoPlayer({
   src,
   duration,
   currentTime,
+  videoRef,
   subtitles,
   subtitlesVisible,
   seekRequest,
@@ -31,7 +34,6 @@ export function VideoPlayer({
   onTime,
   onToggleSubtitles,
 }: VideoPlayerProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null)
   const rangeEndRef = useRef<number | null>(null)
   const [playing, setPlaying] = useState(false)
   const [volume, setVolume] = useState(0.85)
@@ -47,7 +49,7 @@ export function VideoPlayer({
     }
     videoRef.current.currentTime = time
     onTime(time)
-  }, [onTime])
+  }, [onTime, videoRef])
 
   useEffect(() => {
     if (seekRequest) {
@@ -56,7 +58,12 @@ export function VideoPlayer({
   }, [seekRequest, seekTo])
 
   useEffect(() => {
-    if (!playRangeRequest || !videoRef.current) {
+    if (!playRangeRequest) {
+      rangeEndRef.current = null
+      return
+    }
+
+    if (!videoRef.current) {
       return
     }
 
@@ -64,7 +71,7 @@ export function VideoPlayer({
     videoRef.current.currentTime = playRangeRequest.startTime
     onTime(playRangeRequest.startTime)
     void videoRef.current.play()
-  }, [onTime, playRangeRequest])
+  }, [onTime, playRangeRequest, videoRef])
 
   useEffect(() => {
     if (!playToggleRequest || !videoRef.current) {
@@ -76,7 +83,7 @@ export function VideoPlayer({
     } else {
       videoRef.current.pause()
     }
-  }, [playToggleRequest])
+  }, [playToggleRequest, videoRef])
 
   return (
     <section className="video-panel" aria-label="Video preview">

@@ -158,6 +158,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | `seekRequest` | Imperative seek request sent to the video player. |
 | `playRangeRequest` | Imperative range-play request sent to the video player. |
 | `playToggleRequest` | Imperative keyboard play/pause toggle sent to the video player. |
+| `videoElementRef` | Direct reference used to capture the media element's exact playhead and pause it for manual subtitle insertion. |
 | `jobRef` | Current `TranscriptionJob` for cancellation. |
 | `useUndoableSubtitles()` | Subtitle history state: `past`, `present`, and `future`. |
 
@@ -207,13 +208,18 @@ flowchart TB
 
 | Component | File | Main responsibility |
 | --- | --- | --- |
-| `ProjectToolbar` | `src/components/ProjectToolbar.tsx` | Project-level actions: import, restore autosave, export, clear autosave, clear subtitles, and theme selection. |
+| `ProjectToolbar` | `src/components/ProjectToolbar.tsx` | Caption-symbol branding plus project-level import, restore, export, clearing, and theme actions. |
 | `FileDropZone` | `src/components/FileDropZone.tsx` | Drag/drop and file picker for video files, file facts, validation messages, and removal. |
 | `VideoPlayer` | `src/components/VideoPlayer.tsx` | HTML video preview, playback controls, range seek, volume, fullscreen, subtitle overlay, active subtitle lookup. |
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/chunk settings, capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
-| `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, validation issue display. |
+| `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
 | `IconButton` | `src/components/IconButton.tsx` | Shared accessible icon button with `aria-label` and `title`. |
+| `SubtitleLogo` | `src/components/SubtitleLogo.tsx` | Reusable letter-free SVG caption-bubble symbol displayed in the app header. |
+
+### Branding Assets
+
+Auto Subtitle uses a caption-bubble symbol with two subtitle lines instead of initials or letter-based branding. `SubtitleLogo` renders the scalable inline header mark using `currentColor`, so it follows the active theme. `public/favicon.svg` carries the same symbol on a solid accent background for the browser tab and other favicon surfaces. `index.html` declares that SVG as the any-size favicon.
 
 ## Primary User Flow: Video To Subtitles
 
@@ -970,17 +976,21 @@ The editor supports:
 2. Previous and next search match navigation.
 3. Filtering to rows with validation issues.
 4. Auto-scroll to active subtitle.
-5. Add before and add after.
-6. Delete.
-7. Duplicate.
-8. Split.
-9. Merge previous and merge next.
-10. Move up and move down.
-11. Play only the current subtitle range.
-12. Seek to the subtitle start.
-13. Inline timestamp editing.
-14. Inline text editing.
-15. Text reformatting on blur.
+5. Add a subtitle at the media element's exact current playhead position from the main Add button or empty-state action.
+6. Pause playback at insertion time so the frame and captured timestamp remain stable while editing.
+7. Insert the new entry chronologically with a two-second default duration, shortened at the known video end when needed.
+8. Reveal the new row, focus its text area, and select the placeholder for immediate replacement; error-only filtering is disabled so the row cannot remain hidden.
+9. Add before and add after relative to an existing row, with the new row focused immediately.
+10. Delete.
+11. Duplicate.
+12. Split.
+13. Merge previous and merge next.
+14. Move up and move down.
+15. Play only the current subtitle range.
+16. Seek to the subtitle start.
+17. Inline timestamp editing.
+18. Inline text editing.
+19. Text reformatting on blur.
 
 Timestamp input accepts:
 
@@ -1238,6 +1248,9 @@ They cover:
 33. Complete, contiguous core ownership across the full audio timeline.
 34. Full-size cores when overlap is disabled and conservative clamping when overlap is excessive.
 35. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
+36. Manual subtitle creation at the millisecond-rounded playhead time.
+37. Manual cue duration shortening at the known end of a video.
+38. Preservation of playhead timing while video metadata still reports an unknown zero duration.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window planning, subtitle utilities, timestamp normalization, and generated-caption post-processing. They do not currently run a full browser transcription because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 

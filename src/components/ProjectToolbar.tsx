@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react'
 import { useRef } from 'react'
 import type { ThemePreference } from '../theme'
 import { IconButton } from './IconButton'
+import { SubtitleLogo } from './SubtitleLogo'
 
 type ProjectToolbarProps = {
   theme: ThemePreference
@@ -40,7 +41,9 @@ export function ProjectToolbar({
   return (
     <header className="app-header">
       <div className="brand">
-        <div className="brand-mark">AS</div>
+        <div className="brand-mark" aria-hidden="true">
+          <SubtitleLogo />
+        </div>
         <div>
           <h1>Auto Subtitle</h1>
           <p>Local-first subtitle generation and editing</p>

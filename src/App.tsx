@@ -67,6 +67,7 @@ function App() {
   const [seekRequest, setSeekRequest] = useState<{ time: number; id: number }>()
   const [playRangeRequest, setPlayRangeRequest] = useState<{ startTime: number; endTime: number; id: number }>()
   const [playToggleRequest, setPlayToggleRequest] = useState(0)
+  const videoElementRef = useRef<HTMLVideoElement | null>(null)
   const jobRef = useRef<TranscriptionJob | null>(null)
   const { subtitles, canRedo, canUndo, clear, commit, preview, redo, replace, undo } = useUndoableSubtitles()
   const subtitlesRef = useRef<SubtitleEntry[]>(subtitles)
@@ -84,6 +85,14 @@ function App() {
     setSeekRequest({ time, id: Date.now() })
     setCurrentTime(time)
   }, [])
+
+  const capturePlayheadTime = useCallback(() => {
+    const exactTime = videoElementRef.current?.currentTime ?? currentTime
+    videoElementRef.current?.pause()
+    setPlayRangeRequest(undefined)
+    setCurrentTime(exactTime)
+    return exactTime
+  }, [currentTime])
 
   useEffect(() => {
     applyTheme(theme)
@@ -553,6 +562,7 @@ function App() {
             src={video?.objectUrl ?? null}
             subtitles={subtitles}
             subtitlesVisible={subtitlesVisible}
+            videoRef={videoElementRef}
             onDuration={handleDuration}
             onTime={setCurrentTime}
             onToggleSubtitles={() => setSubtitlesVisible((visible) => !visible)}
@@ -617,6 +627,7 @@ function App() {
             entries={subtitles}
             formatting={settings.formatting}
             showOnlyErrors={showOnlyErrors}
+            capturePlayheadTime={capturePlayheadTime}
             onAutoScrollChange={setAutoScroll}
             onChange={commitSubtitleChanges}
             onPlayRange={(startTime, endTime) => setPlayRangeRequest({ startTime, endTime, id: Date.now() })}

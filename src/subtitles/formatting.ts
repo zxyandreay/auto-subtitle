@@ -20,6 +20,7 @@ const TINY_GAP_SECONDS = 0.12
 const CHAINABLE_GAP_SECONDS = 0.5
 const MAX_EXTENSION_PAST_AUDIO_SECONDS = 0.5
 const MIN_GENERATED_CAPTION_DURATION = 0.25
+const DEFAULT_MANUAL_SUBTITLE_DURATION_SECONDS = 2
 
 export function normalizeSubtitleText(text: string): string {
   return text
@@ -89,6 +90,23 @@ export function makeSubtitleEntry(
     confidence: values.confidence,
     words: values.words,
   }
+}
+
+export function makeSubtitleEntryAtTime(startTime: number, duration?: number): SubtitleEntry {
+  const safeDuration = duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : undefined
+  const safeStartTime = Number.isFinite(startTime) ? Math.max(0, startTime) : 0
+  const boundedStartTime = roundTime(Math.min(safeStartTime, safeDuration ?? Number.POSITIVE_INFINITY))
+  const preferredEndTime = roundTime(boundedStartTime + DEFAULT_MANUAL_SUBTITLE_DURATION_SECONDS)
+  const boundedEndTime =
+    safeDuration !== undefined && safeDuration > boundedStartTime
+      ? Math.min(safeDuration, preferredEndTime)
+      : preferredEndTime
+
+  return makeSubtitleEntry({
+    startTime: boundedStartTime,
+    endTime: boundedEndTime,
+    text: 'New subtitle',
+  })
 }
 
 export function sortAndRenumber(entries: SubtitleEntry[]): SubtitleEntry[] {

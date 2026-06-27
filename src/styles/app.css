@@ -84,11 +84,13 @@ body {
   border-radius: 7px;
   color: var(--accent-strong);
   display: inline-flex;
-  font-size: 14px;
-  font-weight: 800;
   height: 38px;
   justify-content: center;
   width: 38px;
+}
+
+.brand-mark svg {
+  display: block;
 }
 
 .brand h1,
