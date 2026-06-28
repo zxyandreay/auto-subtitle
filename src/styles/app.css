@@ -260,6 +260,63 @@ body {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
+.global-video-drop {
+  align-items: center;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: clamp(16px, 5vw, 64px);
+  pointer-events: none;
+  position: fixed;
+  z-index: 150;
+}
+
+.global-video-drop::before {
+  border: 3px dashed color-mix(in srgb, var(--accent) 78%, transparent);
+  border-radius: 16px;
+  box-shadow: inset 0 0 64px color-mix(in srgb, var(--accent) 10%, transparent);
+  content: '';
+  inset: clamp(12px, 3vw, 32px);
+  position: absolute;
+}
+
+.global-video-drop--unsupported::before {
+  border-color: color-mix(in srgb, var(--danger) 80%, transparent);
+  box-shadow: inset 0 0 64px color-mix(in srgb, var(--danger) 9%, transparent);
+}
+
+.global-video-drop__message {
+  align-items: center;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
+  color: var(--accent-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 440px;
+  padding: clamp(22px, 5vw, 38px);
+  position: relative;
+  text-align: center;
+  width: 100%;
+}
+
+.global-video-drop--unsupported .global-video-drop__message {
+  color: var(--danger);
+}
+
+.global-video-drop__message strong {
+  color: var(--text);
+  font-size: clamp(18px, 3vw, 24px);
+}
+
+.global-video-drop__message span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .drop-zone__icon {
   align-items: center;
   background: var(--surface-muted);
@@ -539,13 +596,18 @@ body {
 }
 
 .subtitle-timeline__playhead {
-  background: var(--danger);
+  appearance: none;
+  background: transparent;
+  border: 0;
   bottom: 0;
+  cursor: ew-resize;
   left: 0;
-  pointer-events: none;
+  margin-left: -9px;
+  padding: 0;
   position: absolute;
   top: 0;
-  width: 2px;
+  touch-action: none;
+  width: 18px;
   z-index: 4;
 }
 
@@ -553,11 +615,65 @@ body {
   background: var(--danger);
   clip-path: polygon(0 0, 100% 0, 50% 100%);
   content: '';
-  height: 7px;
-  left: -4px;
+  height: 9px;
+  left: 3px;
   position: absolute;
   top: 0;
-  width: 10px;
+  width: 12px;
+}
+
+.subtitle-timeline__playhead::after {
+  background: var(--danger);
+  bottom: 0;
+  content: '';
+  left: 8px;
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.subtitle-timeline__playhead:hover::after,
+.subtitle-timeline__playhead:focus-visible::after,
+.subtitle-timeline__playhead--dragging::after {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+  width: 3px;
+}
+
+.subtitle-timeline__playhead--dragging {
+  cursor: grabbing;
+  z-index: 7;
+}
+
+.subtitle-timeline__playhead--snap-target::before,
+.subtitle-timeline__playhead--snap-target::after {
+  background: var(--blue);
+}
+
+.subtitle-timeline__playhead-time,
+.subtitle-timeline__snap-guide > span {
+  background: color-mix(in srgb, var(--blue) 88%, #0b1320);
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  left: 13px;
+  line-height: 1;
+  padding: 5px 6px;
+  position: absolute;
+  top: 4px;
+  white-space: nowrap;
+}
+
+.subtitle-timeline__snap-guide {
+  background: var(--blue);
+  bottom: 0;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 2px;
+  z-index: 6;
 }
 
 .subtitle-timeline__cue {
@@ -654,6 +770,11 @@ body {
   inset: 8px 10px;
   opacity: 0.65;
   position: absolute;
+}
+
+.subtitle-timeline__handle--snap-target {
+  background: color-mix(in srgb, var(--blue) 40%, transparent);
+  box-shadow: inset 0 0 0 2px var(--blue);
 }
 
 .player-subtitle-editor {
@@ -917,6 +1038,22 @@ progress {
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .drop-zone,
+  .subtitle-timeline__cue,
+  .subtitle-timeline__handle,
+  .subtitle-timeline__playhead::after {
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      box-shadow 140ms ease,
+      opacity 140ms ease,
+      transform 140ms ease;
+  }
+
+  .global-video-drop__message {
+    animation: drop-overlay-reveal 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
   .indeterminate {
     animation: slide-progress 1.2s infinite linear;
   }
@@ -1468,5 +1605,17 @@ progress {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes drop-overlay-reveal {
+  from {
+    opacity: 0;
+    transform: scale(0.98) translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
   }
 }

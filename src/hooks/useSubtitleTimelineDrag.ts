@@ -1,6 +1,11 @@
 import { useCallback, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
-import { calculateTimelineEdit, type TimelineDragMode } from '../subtitles/timeline'
+import {
+  buildTimelineSnapTargets,
+  calculateTimelineEditWithSnap,
+  type TimelineDragMode,
+  type TimelineSnapMatch,
+} from '../subtitles/timeline'
 import type { SubtitleEntry } from '../types/subtitles'
 
 type DragState = {
@@ -9,12 +14,11 @@ type DragState = {
   pointerId: number
   startClientX: number
   captureElement: HTMLElement
-  previous?: SubtitleEntry
-  next?: SubtitleEntry
   moved: boolean
 }
 
 type UseSubtitleTimelineDragOptions = {
+  entries: SubtitleEntry[]
   duration?: number
   minDuration: number
   pixelsPerSecond: number
@@ -23,6 +27,7 @@ type UseSubtitleTimelineDragOptions = {
 }
 
 export function useSubtitleTimelineDrag({
+  entries,
   duration,
   minDuration,
   pixelsPerSecond,
@@ -33,33 +38,32 @@ export function useSubtitleTimelineDrag({
   const suppressClickIdRef = useRef<string | undefined>(undefined)
   const playheadRef = useRef(playhead)
   const [preview, setPreview] = useState<SubtitleEntry>()
+  const [activeSnap, setActiveSnap] = useState<TimelineSnapMatch>()
   playheadRef.current = playhead
 
   const calculate = useCallback(
-    (drag: DragState, clientX: number) => {
-      return calculateTimelineEdit({
+    (drag: DragState, clientX: number, snappingDisabled: boolean) => {
+      return calculateTimelineEditWithSnap({
         entry: drag.entry,
         mode: drag.mode,
-        deltaTime: (clientX - drag.startClientX) / Math.max(1, pixelsPerSecond),
+        deltaTime: (clientX - drag.startClientX) / Math.max(0.01, pixelsPerSecond),
         duration,
         minDuration,
         pixelsPerSecond,
-        playhead: playheadRef.current,
-        previous: drag.previous,
-        next: drag.next,
+        snapTargets: buildTimelineSnapTargets({
+          entries,
+          movingSubtitleId: drag.entry.id,
+          playhead: playheadRef.current,
+          duration,
+        }),
+        snappingDisabled,
       })
     },
-    [duration, minDuration, pixelsPerSecond],
+    [duration, entries, minDuration, pixelsPerSecond],
   )
 
   const beginDrag = useCallback(
-    (
-      event: ReactPointerEvent<HTMLElement>,
-      entry: SubtitleEntry,
-      mode: TimelineDragMode,
-      previous?: SubtitleEntry,
-      next?: SubtitleEntry,
-    ) => {
+    (event: ReactPointerEvent<HTMLElement>, entry: SubtitleEntry, mode: TimelineDragMode) => {
       if (event.button !== 0) {
         return
       }
@@ -71,11 +75,10 @@ export function useSubtitleTimelineDrag({
         pointerId: event.pointerId,
         startClientX: event.clientX,
         captureElement: event.currentTarget,
-        previous,
-        next,
         moved: false,
       }
       setPreview(entry)
+      setActiveSnap(undefined)
     },
     [],
   )
@@ -86,9 +89,11 @@ export function useSubtitleTimelineDrag({
       if (!drag || drag.pointerId !== event.pointerId) {
         return
       }
-      const timing = calculate(drag, event.clientX)
+      event.preventDefault()
+      const result = calculate(drag, event.clientX, event.altKey)
       drag.moved ||= Math.abs(event.clientX - drag.startClientX) >= 3
-      setPreview({ ...drag.entry, ...timing })
+      setPreview({ ...drag.entry, ...result.timing })
+      setActiveSnap(result.snap)
     },
     [calculate],
   )
@@ -99,22 +104,23 @@ export function useSubtitleTimelineDrag({
       if (!drag || drag.pointerId !== event.pointerId) {
         return
       }
-      const timing = calculate(drag, event.clientX)
+      const result = calculate(drag, event.clientX, event.altKey)
       if (drag.moved) {
         suppressClickIdRef.current = drag.entry.id
       }
       dragRef.current = null
       setPreview(undefined)
+      setActiveSnap(undefined)
       try {
         drag.captureElement.releasePointerCapture(event.pointerId)
       } catch {
         // Pointer capture may already be released by the browser.
       }
       if (
-        timing.startTime !== drag.entry.startTime ||
-        timing.endTime !== drag.entry.endTime
+        result.timing.startTime !== drag.entry.startTime ||
+        result.timing.endTime !== drag.entry.endTime
       ) {
-        onUpdate(drag.entry.id, timing)
+        onUpdate(drag.entry.id, result.timing)
       }
     },
     [calculate, onUpdate],
@@ -127,6 +133,7 @@ export function useSubtitleTimelineDrag({
     }
     dragRef.current = null
     setPreview(undefined)
+    setActiveSnap(undefined)
     try {
       drag.captureElement.releasePointerCapture(event.pointerId)
     } catch {
@@ -142,5 +149,5 @@ export function useSubtitleTimelineDrag({
     return true
   }, [])
 
-  return { beginDrag, cancelDrag, endDrag, moveDrag, preview, shouldSuppressClick }
+  return { activeSnap, beginDrag, cancelDrag, endDrag, moveDrag, preview, shouldSuppressClick }
 }

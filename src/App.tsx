@@ -1,6 +1,7 @@
-import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, RotateCcw, SlidersHorizontal } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, RotateCcw, RotateCw, SlidersHorizontal } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FileDropZone } from './components/FileDropZone'
+import { GlobalVideoDropOverlay } from './components/GlobalVideoDropOverlay'
 import { FormattingPanel } from './components/FormattingPanel'
 import { ProjectToolbar } from './components/ProjectToolbar'
 import { RegenerationDialog, type FormattedRegenerationCandidate } from './components/RegenerationDialog'
@@ -10,7 +11,7 @@ import { VideoPlayer } from './components/VideoPlayer'
 import { summarizeSegments } from './diagnostics/asrDiagnostics'
 import { getDiagnosticLog, recordDiagnosticEvent } from './diagnostics/diagnosticLog'
 import { useUndoableSubtitles } from './hooks/useUndoableSubtitles'
-import { getDurationWarning, validateVideoFile, type VideoFileState } from './media/video'
+import { findFirstValidVideoFile, getDurationWarning, validateVideoFile, type VideoFileState } from './media/video'
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
 import { deleteSubtitleEntry, duplicateSubtitleEntry, updateSubtitleEntry } from './subtitles/editing'
 import {
@@ -50,6 +51,7 @@ import type {
 import { DEFAULT_TRANSCRIPTION_SETTINGS, normalizeTranscriptionSettings } from './transcription/types'
 import type { SubtitleEntry } from './types/subtitles'
 import { baseName, downloadTextFile } from './utils/format'
+import { getHistoryShortcut, isEditableShortcutTarget } from './utils/keyboard'
 import './styles/app.css'
 
 const FILE_SIZE_WARNING_MB = 500
@@ -221,14 +223,18 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null
-      const isEditing =
-        target?.tagName === 'INPUT' ||
-        target?.tagName === 'TEXTAREA' ||
-        target?.tagName === 'SELECT' ||
-        target?.isContentEditable
+      if (isEditableShortcutTarget(event.target)) {
+        return
+      }
 
-      if (isEditing) {
+      const historyShortcut = getHistoryShortcut(event)
+      if (historyShortcut) {
+        event.preventDefault()
+        if (historyShortcut === 'undo') {
+          undo()
+        } else {
+          redo()
+        }
         return
       }
 
@@ -247,18 +253,6 @@ function App() {
         requestSeek(Math.min(video?.duration ?? currentTime + 5, currentTime + 5))
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
-        event.preventDefault()
-        undo()
-      }
-
-      if (
-        ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') ||
-        ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'z')
-      ) {
-        event.preventDefault()
-        redo()
-      }
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -819,6 +813,29 @@ function App() {
     }
   }
 
+  const handleGlobalVideoDrop = (files: File[]) => {
+    const result = findFirstValidVideoFile(files, {
+      fileSizeWarningMb: FILE_SIZE_WARNING_MB,
+      durationWarningMinutes: DURATION_WARNING_MINUTES,
+    })
+    if (!result.file) {
+      if (files[0]) {
+        handleSelectVideo(files[0])
+      }
+      setNotice({ tone: 'warning', message: 'No supported video was found in the dropped files.' })
+      return
+    }
+
+    handleSelectVideo(result.file)
+    if (files.length > 1) {
+      setNotice({
+        tone: 'warning',
+        message: `Loaded ${result.file.name} and ignored ${files.length - 1} other dropped file${files.length === 2 ? '' : 's'}.`,
+        details: result.rejectedCount ? `${result.rejectedCount} file${result.rejectedCount === 1 ? ' was' : 's were'} not a supported video.` : undefined,
+      })
+    }
+  }
+
   const handleExportDiagnostics = () => {
     recordDiagnosticEvent({
       source: 'app',
@@ -892,6 +909,7 @@ function App() {
 
   return (
     <main className="app-shell">
+      <GlobalVideoDropOverlay onDropFiles={handleGlobalVideoDrop} />
       <ProjectToolbar
         entryCount={subtitles.length}
         hasAutosave={Boolean(autosave)}
@@ -1124,11 +1142,26 @@ function GlobalTools({
       </div>
 
       <div className="tool-row tool-row--wrap">
-        <button className="button button--soft" disabled={!canUndo} type="button" onClick={onUndo}>
+        <button
+          aria-label="Undo subtitle edit"
+          className="button button--soft"
+          disabled={!canUndo}
+          title="Undo (Ctrl+Z)"
+          type="button"
+          onClick={onUndo}
+        >
           <RotateCcw size={15} />
           Undo
         </button>
-        <button className="button button--soft" disabled={!canRedo} type="button" onClick={onRedo}>
+        <button
+          aria-label="Redo subtitle edit"
+          className="button button--soft"
+          disabled={!canRedo}
+          title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+          type="button"
+          onClick={onRedo}
+        >
+          <RotateCw size={15} />
           Redo
         </button>
         <button className="button button--soft" type="button" onClick={onNormalize}>

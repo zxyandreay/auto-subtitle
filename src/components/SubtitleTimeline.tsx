@@ -2,7 +2,14 @@ import { LocateFixed, Maximize2, ZoomIn, ZoomOut } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSubtitleTimelineDrag } from '../hooks/useSubtitleTimelineDrag'
-import { calculateTimelineEdit, type TimelineDragMode } from '../subtitles/timeline'
+import {
+  buildTimelineSnapTargets,
+  calculateTimelineEdit,
+  snapTimelineTime,
+  type TimelineDragMode,
+  type TimelineSnapMatch,
+  type TimelineSnapTarget,
+} from '../subtitles/timeline'
 import { validateSubtitles } from '../subtitles/validation'
 import type { SubtitleEntry, ValidationIssue } from '../types/subtitles'
 import { formatTimestamp } from '../utils/time'
@@ -37,10 +44,14 @@ export function SubtitleTimeline({
   onSeek,
 }: SubtitleTimelineProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
+  const trackRef = useRef<HTMLDivElement | null>(null)
+  const playheadDragRef = useRef<{ pointerId: number; captureElement: HTMLElement } | null>(null)
   const [viewportWidth, setViewportWidth] = useState(FALLBACK_VIEWPORT_WIDTH)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
   const [fit, setFit] = useState(false)
   const [followPlayhead, setFollowPlayhead] = useState(true)
+  const [playheadDragTime, setPlayheadDragTime] = useState<number>()
+  const [playheadSnap, setPlayheadSnap] = useState<TimelineSnapMatch>()
   const timelineDuration = Math.max(duration ?? 0, entries.at(-1)?.endTime ?? 0, 30)
   const effectivePixelsPerSecond = fit
     ? Math.max(0.01, viewportWidth / Math.max(1, timelineDuration))
@@ -49,7 +60,8 @@ export function SubtitleTimeline({
   const issues = useMemo(() => validateSubtitles(entries, duration), [duration, entries])
   const issuesById = useMemo(() => groupIssues(issues), [issues])
 
-  const { beginDrag, cancelDrag, endDrag, moveDrag, preview, shouldSuppressClick } = useSubtitleTimelineDrag({
+  const { activeSnap: cueSnap, beginDrag, cancelDrag, endDrag, moveDrag, preview, shouldSuppressClick } = useSubtitleTimelineDrag({
+    entries,
     duration,
     minDuration,
     pixelsPerSecond: effectivePixelsPerSecond,
@@ -104,11 +116,9 @@ export function SubtitleTimeline({
       event: ReactPointerEvent<HTMLElement>,
       entry: SubtitleEntry,
       mode: TimelineDragMode,
-      previous?: SubtitleEntry,
-      next?: SubtitleEntry,
     ) => {
       onSelect(entry.id)
-      beginDrag(event, entry, mode, previous, next)
+      beginDrag(event, entry, mode)
     },
     [beginDrag, onSelect],
   )
@@ -146,12 +156,112 @@ export function SubtitleTimeline({
     [onSeek, onSelect, shouldSuppressClick],
   )
 
+  const calculatePlayheadDrag = useCallback(
+    (clientX: number, snappingDisabled: boolean) => {
+      const trackLeft = trackRef.current?.getBoundingClientRect().left ?? 0
+      const maximum = duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : timelineDuration
+      const proposedTime = Math.max(0, Math.min(maximum, (clientX - trackLeft) / effectivePixelsPerSecond))
+      return snapTimelineTime(
+        proposedTime,
+        buildTimelineSnapTargets({ entries, duration }),
+        effectivePixelsPerSecond,
+        snappingDisabled,
+      )
+    },
+    [duration, effectivePixelsPerSecond, entries, timelineDuration],
+  )
+
+  const beginPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    playheadDragRef.current = { pointerId: event.pointerId, captureElement: event.currentTarget }
+    setPlayheadDragTime(currentTime)
+    setPlayheadSnap(undefined)
+  }, [currentTime])
+
+  const movePlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (playheadDragRef.current?.pointerId !== event.pointerId) {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    const result = calculatePlayheadDrag(event.clientX, event.altKey)
+    setPlayheadDragTime(result.time)
+    setPlayheadSnap(result.snap)
+    onSeek(result.time)
+  }, [calculatePlayheadDrag, onSeek])
+
+  const finishPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = playheadDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return
+    }
+    const result = calculatePlayheadDrag(event.clientX, event.altKey)
+    playheadDragRef.current = null
+    setPlayheadDragTime(undefined)
+    setPlayheadSnap(undefined)
+    onSeek(result.time)
+    try {
+      drag.captureElement.releasePointerCapture(event.pointerId)
+    } catch {
+      // Pointer capture may already be released by the browser.
+    }
+  }, [calculatePlayheadDrag, onSeek])
+
+  const cancelPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = playheadDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return
+    }
+    playheadDragRef.current = null
+    setPlayheadDragTime(undefined)
+    setPlayheadSnap(undefined)
+    try {
+      drag.captureElement.releasePointerCapture(event.pointerId)
+    } catch {
+      // Pointer capture may already be released by the browser.
+    }
+  }, [])
+
+  const handlePlayheadKeyboard = useCallback((event: KeyboardEvent<HTMLButtonElement>) => {
+    let proposedTime: number | undefined
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const direction = event.key === 'ArrowRight' ? 1 : -1
+      proposedTime = currentTime + direction * (event.shiftKey ? 0.5 : 0.1)
+    } else if (event.key === 'Home') {
+      proposedTime = 0
+    } else if (event.key === 'End' && duration !== undefined) {
+      proposedTime = duration
+    }
+    if (proposedTime === undefined) {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    const maximum = duration !== undefined && duration > 0 ? duration : timelineDuration
+    const result = snapTimelineTime(
+      Math.max(0, Math.min(maximum, proposedTime)),
+      buildTimelineSnapTargets({ entries, duration }),
+      effectivePixelsPerSecond,
+      event.altKey,
+    )
+    onSeek(result.time)
+  }, [currentTime, duration, effectivePixelsPerSecond, entries, onSeek, timelineDuration])
+
   const changeZoom = (direction: -1 | 1) => {
     const currentIndex = ZOOM_LEVELS.indexOf(pixelsPerSecond)
     const nextIndex = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, currentIndex + direction))
     setFit(false)
     setPixelsPerSecond(ZOOM_LEVELS[nextIndex])
   }
+
+  const renderedPlayheadTime = playheadDragTime ?? currentTime
+  const activeSnap = playheadSnap ?? cueSnap
+  const snapTarget = activeSnap?.target
 
   return (
     <section className="subtitle-timeline" aria-label="Interactive subtitle timeline">
@@ -179,13 +289,38 @@ export function SubtitleTimeline({
       </div>
 
       <div ref={viewportRef} className="subtitle-timeline__viewport" tabIndex={0}>
-        <div className="subtitle-timeline__track" style={{ width: trackWidth }}>
-          <div
-            className="subtitle-timeline__playhead"
-            aria-hidden="true"
-            style={{ transform: `translateX(${currentTime * effectivePixelsPerSecond}px)` }}
-          />
-          {entries.map((entry, index) => {
+        <div ref={trackRef} className="subtitle-timeline__track" style={{ width: trackWidth }}>
+          {activeSnap ? (
+            <div
+              className="subtitle-timeline__snap-guide"
+              style={{ transform: `translateX(${activeSnap.target.time * effectivePixelsPerSecond}px)` }}
+            >
+              <span>{`Snap: ${activeSnap.target.label} ${formatTimestamp(activeSnap.target.time, { alwaysHours: true })}`}</span>
+            </div>
+          ) : null}
+          <button
+            aria-label="Timeline playhead"
+            aria-valuemax={duration || timelineDuration}
+            aria-valuemin={0}
+            aria-valuenow={renderedPlayheadTime}
+            aria-valuetext={formatTimestamp(renderedPlayheadTime, { alwaysHours: true })}
+            className={`subtitle-timeline__playhead ${playheadDragTime !== undefined ? 'subtitle-timeline__playhead--dragging' : ''} ${cueSnap?.target.kind === 'playhead' ? 'subtitle-timeline__playhead--snap-target' : ''}`}
+            role="slider"
+            type="button"
+            style={{ transform: `translateX(${renderedPlayheadTime * effectivePixelsPerSecond}px)` }}
+            onKeyDown={handlePlayheadKeyboard}
+            onPointerCancel={cancelPlayheadDrag}
+            onPointerDown={beginPlayheadDrag}
+            onPointerMove={movePlayheadDrag}
+            onPointerUp={finishPlayheadDrag}
+          >
+            {playheadDragTime !== undefined ? (
+              <span className="subtitle-timeline__playhead-time">
+                {formatTimestamp(renderedPlayheadTime, { alwaysHours: true })}
+              </span>
+            ) : null}
+          </button>
+          {entries.map((entry) => {
             const renderedEntry = preview?.id === entry.id ? preview : entry
             return (
               <SubtitleTimelineCue
@@ -194,10 +329,9 @@ export function SubtitleTimeline({
                 entry={renderedEntry}
                 issues={issuesById.get(entry.id) ?? EMPTY_ISSUES}
                 key={entry.id}
-                next={entries[index + 1]}
                 pixelsPerSecond={effectivePixelsPerSecond}
-                previous={entries[index - 1]}
                 selected={entry.id === selectedId}
+                snapTarget={snapTarget}
                 onActivate={activateCue}
                 onCancelDrag={cancelDrag}
                 onEndDrag={endDrag}
@@ -220,15 +354,12 @@ type SubtitleTimelineCueProps = {
   dragging: boolean
   selected: boolean
   issues: ValidationIssue[]
-  previous?: SubtitleEntry
-  next?: SubtitleEntry
+  snapTarget?: TimelineSnapTarget
   onActivate: (entry: SubtitleEntry) => void
   onPointerDown: (
     event: ReactPointerEvent<HTMLElement>,
     entry: SubtitleEntry,
     mode: TimelineDragMode,
-    previous?: SubtitleEntry,
-    next?: SubtitleEntry,
   ) => void
   onMoveDrag: (event: ReactPointerEvent<HTMLElement>) => void
   onEndDrag: (event: ReactPointerEvent<HTMLElement>) => void
@@ -243,8 +374,7 @@ const SubtitleTimelineCue = memo(function SubtitleTimelineCue({
   dragging,
   selected,
   issues,
-  previous,
-  next,
+  snapTarget,
   onActivate,
   onPointerDown,
   onMoveDrag,
@@ -265,6 +395,8 @@ const SubtitleTimelineCue = memo(function SubtitleTimelineCue({
     .filter(Boolean)
     .join(' ')
   const label = `Subtitle ${entry.index}, ${formatTimestamp(entry.startTime)} to ${formatTimestamp(entry.endTime)}: ${entry.text}`
+  const startIsSnapTarget = snapTarget?.subtitleId === entry.id && snapTarget.kind === 'subtitle-start'
+  const endIsSnapTarget = snapTarget?.subtitleId === entry.id && snapTarget.kind === 'subtitle-end'
 
   return (
     <div
@@ -276,14 +408,14 @@ const SubtitleTimelineCue = memo(function SubtitleTimelineCue({
     >
       <button
         aria-label={`Adjust start time for subtitle ${entry.index}`}
-        className="subtitle-timeline__handle subtitle-timeline__handle--start"
+        className={`subtitle-timeline__handle subtitle-timeline__handle--start ${startIsSnapTarget ? 'subtitle-timeline__handle--snap-target' : ''}`}
         type="button"
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => onKeyboardEdit(event, entry, 'start')}
         onPointerCancel={onCancelDrag}
         onPointerDown={(event) => {
           event.stopPropagation()
-          onPointerDown(event, entry, 'start', previous, next)
+          onPointerDown(event, entry, 'start')
         }}
         onPointerMove={onMoveDrag}
         onPointerUp={onEndDrag}
@@ -298,7 +430,7 @@ const SubtitleTimelineCue = memo(function SubtitleTimelineCue({
         onClick={() => onActivate(entry)}
         onKeyDown={(event) => onKeyboardEdit(event, entry, 'move')}
         onPointerCancel={onCancelDrag}
-        onPointerDown={(event) => onPointerDown(event, entry, 'move', previous, next)}
+        onPointerDown={(event) => onPointerDown(event, entry, 'move')}
         onPointerMove={onMoveDrag}
         onPointerUp={onEndDrag}
       >
@@ -308,14 +440,14 @@ const SubtitleTimelineCue = memo(function SubtitleTimelineCue({
       </button>
       <button
         aria-label={`Adjust end time for subtitle ${entry.index}`}
-        className="subtitle-timeline__handle subtitle-timeline__handle--end"
+        className={`subtitle-timeline__handle subtitle-timeline__handle--end ${endIsSnapTarget ? 'subtitle-timeline__handle--snap-target' : ''}`}
         type="button"
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => onKeyboardEdit(event, entry, 'end')}
         onPointerCancel={onCancelDrag}
         onPointerDown={(event) => {
           event.stopPropagation()
-          onPointerDown(event, entry, 'end', previous, next)
+          onPointerDown(event, entry, 'end')
         }}
         onPointerMove={onMoveDrag}
         onPointerUp={onEndDrag}

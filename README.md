@@ -6,8 +6,8 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 
 ## Features
 
-- Drag-and-drop video import with local privacy messaging, file metadata, size warnings, duration warnings, and validation.
-- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a zoomable subtitle timeline.
+- Page-wide drag-and-drop video import with a responsive supported-file overlay, local privacy messaging, file metadata, size warnings, duration warnings, and validation.
+- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a zoomable magnetic subtitle timeline with a draggable playhead.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
@@ -178,14 +178,20 @@ When importing project JSON, the app validates the schema, normalizes saved mode
 - Arrow Left or Arrow Right on a timeline cue: move it by 0.1 seconds
 - Arrow Left or Arrow Right on a focused timeline handle: adjust that start or end boundary by 0.1 seconds
 - Hold Shift with a timeline Arrow key: use a 0.5-second adjustment
+- Arrow Left or Arrow Right on the focused timeline playhead: seek by 0.1 seconds; Home/End seek to timeline boundaries
+- Hold Alt/Option while dragging a cue edge, cue body, or playhead: temporarily disable magnetic snapping
 
 ## Player Subtitle Editing
 
-The video player includes a horizontally scrollable subtitle timeline. Cue blocks show their text, timing, active/selected state, and existing validation severity. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. Timing snaps gently to the playhead, adjacent cue boundaries, and nearby half-second marks; overlaps remain visible as validation errors instead of being silently removed.
+The video player includes a horizontally scrollable subtitle timeline. Cue blocks show their text, timing, active/selected state, and existing validation severity. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. A 10-pixel magnetic threshold snaps either moving edge to any other subtitle boundary, the media playhead, timeline start, known video end, or a lower-priority half-second grid. A guide and target accent show the active snap; hold Alt/Option to bypass it. Overlaps remain visible as validation errors instead of being silently removed.
+
+The timeline playhead is directly draggable and keyboard accessible. It seeks the media responsively, snaps to subtitle boundaries, shows a timestamp while dragging, works in fullscreen and at every zoom/fit level, and never adds subtitle undo history. Cue timing previews remain local and commit once on pointer release, so one completed gesture is one undo step.
 
 Selecting a cue opens the player subtitle editor for text, timestamp, navigation, range playback, duplication, and deletion. **Add subtitle** pauses playback and inserts a focused cue at the exact playhead. Player changes and the main subtitle list share the same undoable subtitle state and synchronize selection immediately.
 
 Fullscreen targets the whole editing workspace rather than only the video, keeping the timeline, editor, add/delete actions, playback controls, volume, and subtitle visibility available. Tablet layouts stack these tools; narrow layouts use a horizontally scrolling timeline and a collapsible sticky editor panel with touch-sized actions.
+
+Video files can also be dropped anywhere over the app. The page-level overlay accepts the first valid MP4, WebM, MOV, or MKV from a mixed drop, prevents browser navigation, ignores internal/non-file drags, and keeps the file in the existing browser-only object URL flow.
 
 ## Architecture
 

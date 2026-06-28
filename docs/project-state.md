@@ -218,8 +218,9 @@ flowchart TB
 | --- | --- | --- |
 | `ProjectToolbar` | `src/components/ProjectToolbar.tsx` | Caption-symbol branding plus project-level import, restore, export, clearing, and theme actions. |
 | `FileDropZone` | `src/components/FileDropZone.tsx` | Drag/drop and file picker for video files, file facts, validation messages, and removal. |
+| `GlobalVideoDropOverlay` | `src/components/GlobalVideoDropOverlay.tsx` | Window-level external-file drag detection, supported/unsupported feedback, and page-wide video dropping without intercepting internal drags. |
 | `VideoPlayer` | `src/components/VideoPlayer.tsx` | Controlled media/fullscreen workspace containing video, overlay, playback controls, timeline, and player subtitle editor. |
-| `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Zoomable/scrollable cue track, playhead follow, selection, validation styling, pointer-captured timing edits, and keyboard nudging. |
+| `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Zoomable/scrollable cue track, draggable playhead, magnetic snap feedback, playhead follow, selection, validation styling, pointer-captured timing edits, and keyboard nudging. |
 | `PlayerSubtitleEditor` | `src/components/PlayerSubtitleEditor.tsx` | Selected-cue text/timestamp editing, navigation, seek, range playback, duplicate, and delete actions. |
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
@@ -258,7 +259,7 @@ flowchart TD
     Export -->|JSON| Json["Download .auto-subtitle.json"]
 ```
 
-The selected video remains a browser `File`. The app creates a temporary object URL for playback and revokes it when the video is replaced, removed, or the app unmounts.
+The selected video remains a browser `File`. The app creates a temporary object URL for playback and revokes it when the video is replaced, removed, or the app unmounts. External video files can be dropped anywhere over the page; a fixed responsive overlay previews supported or unsupported state, and mixed drops choose the first valid video through the same validator. Non-file and internal timeline drags are not intercepted.
 
 ## Import, Edit, Preview, Export Flow
 
@@ -378,7 +379,7 @@ The live preview merge keeps user changes stable while the worker continues:
 
 ### 1. Video Selection
 
-`FileDropZone` accepts file picker input and drag/drop input. The accepted extensions and MIME types are defined in `src/media/video.ts`:
+`FileDropZone` accepts file picker input and drag/drop input. `GlobalVideoDropOverlay` adds equivalent video selection anywhere on the page, uses nested dragenter/dragleave counting to avoid flicker, and prevents the browser from navigating to a dropped media file. The accepted extensions and MIME types are defined in `src/media/video.ts`:
 
 | Accepted extension | Accepted MIME type |
 | --- | --- |
@@ -1078,7 +1079,7 @@ Actions:
 | `redo` | Moves the first future state into present and pushes current present into past. |
 | `clear` | Resets all history and entries. |
 
-Editor operations call `commit`, while imports and transcription call `replace`.
+Editor operations call `commit`, while imports and transcription call `replace`. Cue drag/resize previews stay local and call the commit path once on pointer release, so one gesture creates one history entry. Playhead dragging only seeks media and never mutates subtitle history. Visible Undo and Redo buttons reflect `canUndo`/`canRedo`, include shortcut tooltips, and disable when their action is unavailable. History shortcuts are ignored inside input, textarea, select, and contenteditable fields.
 
 ## Subtitle Editor Behavior
 
@@ -1108,7 +1109,9 @@ The editor supports:
 22. Inline text editing.
 23. Text reformatting on blur.
 
-The player uses the same `SubtitleEntry[]` and `commitSubtitleChanges` path. Its timeline positions cues by media time, provides 12/24/48/96 pixels-per-second zoom plus fit and follow modes, and renders active, selected, warning, and error states. Pointer-captured dragging previews locally and commits once on release; start/end handles enforce a positive range and prefer the configured minimum duration, while cue-body dragging preserves duration. Soft snapping prefers the playhead and neighboring boundaries before half-second marks, and unresolved overlaps remain ordinary validation issues.
+The player uses the same `SubtitleEntry[]` and `commitSubtitleChanges` path. Its timeline positions cues by media time, provides 12/24/48/96 pixels-per-second zoom plus fit and follow modes, and renders active, selected, warning, and error states. Pointer-captured dragging previews locally and commits once on release; start/end handles enforce a positive range and prefer the configured minimum duration, while cue-body dragging preserves duration. Magnetic snapping uses a 10-pixel threshold at the active zoom and considers every other cue start/end, the media playhead, timeline start, known video end, and a lower-priority half-second grid. Whole-cue movement can snap either edge without changing duration. A vertical guide, label, and target accent show the active lock, and holding Alt/Option temporarily bypasses snapping.
+
+The timeline playhead is a pointer-draggable, keyboard-focusable slider. Dragging seeks the media element directly, uses the same subtitle-edge and boundary targets, shows its current timestamp, and never commits subtitle history. Pointer capture and `touch-action: none` keep cue and playhead gestures distinct on mouse, trackpad, pen, and touch surfaces. The same timeline remains mounted in fullscreen, so snapping, seeking, zoom, fit, follow, and horizontal scrolling behave consistently there.
 
 Player insertion pauses the media element, captures its exact `currentTime`, creates the existing two-second manual cue (shortened at the known video end), reveals it if error filtering was active, selects it in both editors, and focuses player text. Fullscreen is requested on the entire player workspace so video, overlay, playback controls, timeline, editing panel, and mutation actions remain available. Narrow layouts keep the timeline horizontally scrollable and use a collapsible sticky editing panel.
 
@@ -1404,6 +1407,10 @@ They cover:
 62. Timeline movement, resizing, minimum ranges, boundary clamping, snapping precedence, and overlap visibility.
 63. Player timestamp editing, text formatting, navigation, duplication, deletion, and exact-playhead insertion callbacks.
 64. Player/main-editor selection synchronization and mocked fullscreen entry, exit, and denial handling.
+65. All-cue snap targets, self-edge exclusion, pixel-distance priority, Alt/Option bypass, duration-preserving body snapping, minimum-duration resize constraints, and fit-mode drag scaling.
+66. Draggable playhead seeking, snap guide feedback, direct media-time updates, and isolation from subtitle history commits.
+67. Full-page video drop acceptance, browser-navigation prevention, mixed-file first-valid selection, child-safe dragleave handling, and rejection of non-file/internal drags.
+68. Cross-platform undo/redo shortcut recognition and form/contenteditable focus guards.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1420,6 +1427,8 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 | Enter or Space on a timeline cue | Select the cue and seek to its start. |
 | Arrow Left or Arrow Right on a timeline cue | Move the cue by 0.1 seconds; hold Shift for 0.5 seconds. |
 | Arrow Left or Arrow Right on a focused timeline handle | Adjust its start or end boundary by 0.1 seconds; hold Shift for 0.5 seconds. |
+| Arrow Left or Arrow Right on the focused timeline playhead | Seek by 0.1 seconds; hold Shift for 0.5 seconds. Home seeks to zero and End seeks to known video duration. |
+| Alt/Option during a cue or playhead pointer drag | Temporarily disable magnetic snapping. |
 
 ## Known Limitations
 

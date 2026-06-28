@@ -289,7 +289,7 @@ export function VideoPlayer({
         minDuration={formatting.minDuration}
         playing={playing}
         selectedId={selectedSubtitleId}
-        onSeek={onSeek}
+        onSeek={seekTo}
         onSelect={onSelectSubtitle}
         onUpdate={onUpdateSubtitle}
       />

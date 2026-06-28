@@ -14,19 +14,44 @@ type FileDropZoneProps = {
 
 export function FileDropZone({ video, warnings, errors, onSelectFile, onRemoveVideo }: FileDropZoneProps) {
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepthRef = useRef(0)
   const [dragging, setDragging] = useState(false)
 
   return (
     <section
       className={`drop-zone ${dragging ? 'drop-zone--dragging' : ''}`}
       onDragEnter={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) {
+          return
+        }
         event.preventDefault()
+        event.stopPropagation()
+        dragDepthRef.current += 1
         setDragging(true)
       }}
-      onDragOver={(event) => event.preventDefault()}
-      onDragLeave={() => setDragging(false)}
-      onDrop={(event) => {
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) {
+          return
+        }
         event.preventDefault()
+        event.stopPropagation()
+      }}
+      onDragLeave={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) {
+          return
+        }
+        event.stopPropagation()
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+        if (dragDepthRef.current === 0) {
+          setDragging(false)
+        }
+      }}
+      onDrop={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) {
+          return
+        }
+        event.preventDefault()
+        dragDepthRef.current = 0
         setDragging(false)
         const file = event.dataTransfer.files.item(0)
         if (file) {

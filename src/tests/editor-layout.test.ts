@@ -19,6 +19,15 @@ describe('desktop subtitle editor layout', () => {
     expect(appStyles).toMatch(/\.subtitle-timeline__viewport\s*{[^}]*overflow-x:\s*auto;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__cue\s*{[^}]*touch-action:\s*none;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__handle\s*{[^}]*min-width:\s*24px;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__playhead\s*{[^}]*touch-action:\s*none;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__snap-guide\s*{[^}]*pointer-events:\s*none;/)
+  })
+
+  it('keeps the global file overlay fixed, non-blocking, and motion-aware', () => {
+    expect(appStyles).toMatch(/\.global-video-drop\s*{[^}]*inset:\s*0;[^}]*pointer-events:\s*none;[^}]*position:\s*fixed;/)
+    expect(appStyles).toMatch(
+      /@media \(prefers-reduced-motion: no-preference\)[\s\S]*?\.global-video-drop__message\s*{[^}]*animation:/,
+    )
   })
 
   it('keeps the whole subtitle workspace readable in fullscreen with safe-area padding', () => {

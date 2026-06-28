@@ -86,6 +86,21 @@ describe('VideoPlayer subtitle workspace', () => {
     expect(onSelectSubtitle).toHaveBeenCalledWith('second')
   })
 
+  it('seeks the media element directly while dragging the timeline playhead', () => {
+    const onTime = vi.fn()
+    const onUpdateSubtitle = vi.fn()
+    renderPlayer({ onTime, onUpdateSubtitle })
+    const playhead = button('Timeline playhead')
+    const video = container.querySelector('video')!
+
+    pointer(playhead, 'pointerdown', 12, 0)
+    pointer(playhead, 'pointermove', 12, 72)
+
+    expect(video.currentTime).toBe(3)
+    expect(onTime).toHaveBeenLastCalledWith(3)
+    expect(onUpdateSubtitle).not.toHaveBeenCalled()
+  })
+
   it('enters and exits fullscreen on the whole player workspace', async () => {
     renderPlayer()
     const workspace = container.querySelector('.video-panel') as HTMLElement
@@ -151,4 +166,14 @@ describe('VideoPlayer subtitle workspace', () => {
 
 function click(element: HTMLElement): void {
   act(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+}
+
+function pointer(element: HTMLElement, type: string, pointerId: number, clientX: number): void {
+  const event = new Event(type, { bubbles: true })
+  Object.defineProperties(event, {
+    button: { value: 0 },
+    clientX: { value: clientX },
+    pointerId: { value: pointerId },
+  })
+  act(() => element.dispatchEvent(event))
 }
