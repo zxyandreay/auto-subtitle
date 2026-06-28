@@ -2,6 +2,8 @@ import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile } from '@ffmpeg/util'
 import coreUrl from '@ffmpeg/core?url'
 import wasmUrl from '@ffmpeg/core/wasm?url'
+import { summarizeAsrResult, summarizeSegments } from '../diagnostics/asrDiagnostics'
+import type { DiagnosticLevel } from '../diagnostics/types'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import { constrainSegmentsToRange } from '../subtitles/regeneration'
 import { buildAudioExtractionArgs, type AudioExtractionRange } from '../transcription/audioExtraction'
@@ -118,12 +120,20 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
 
   if (request.type === 'cancel') {
     cancelled = true
+    postDiagnostic('job-cancelled', 'The worker received a cancellation request.', undefined, 'warning')
     return
   }
 
   cancelled = false
   terminalJobId = createJobId()
   lastOverallProgress = 0
+  postDiagnostic('job-requested', 'A local transcription worker job was requested.', {
+    jobKind: request.type === 'regenerate' ? 'regeneration' : 'transcription',
+    file: { name: request.file.name, size: request.file.size, type: request.file.type },
+    settings: request.settings,
+    range: request.type === 'regenerate' ? request.range : undefined,
+    videoDuration: request.type === 'regenerate' ? request.videoDuration : undefined,
+  })
   const task =
     request.type === 'regenerate'
       ? regenerate(
@@ -135,6 +145,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
       : transcribe(request.file, normalizeTranscriptionSettings(request.settings).settings)
 
   task.catch((error: unknown) => {
+    postDiagnostic('job-failed', 'The worker job failed.', { error: serializeError(error) }, 'error')
     postTerminalLog({
       type: 'error',
       message: error instanceof Error ? error.message : 'Transcription failed.',
@@ -162,6 +173,12 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   const runtime = resolveSpeechModelRuntimeSettings(settings)
   const effectiveSettings = runtime.settings
   const model = getSpeechModelOption(effectiveSettings.modelId)
+  postDiagnostic('runtime-settings', 'Resolved transcription model and runtime settings.', {
+    requestedSettings: settings,
+    effectiveSettings,
+    resolutionReason: runtime.reason,
+    model,
+  })
   assertNotCancelled()
   postTerminalLog({
     type: 'start',
@@ -177,14 +194,26 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   assertNotCancelled()
   postProgress('preparing-video', 'Preparing the selected video file.')
   const audio = await extractAudio(file)
+  const audioRms = calculateRms(audio.samples)
+  postDiagnostic('decoded-audio', 'Decoded mono PCM audio for transcription.', {
+    sampleRate: audio.sampleRate,
+    sampleCount: audio.samples.length,
+    durationSeconds: audio.samples.length / audio.sampleRate,
+    rms: audioRms,
+  })
 
-  if (calculateRms(audio.samples) < 0.0008) {
+  if (audioRms < 0.0008) {
     throw new Error('The extracted audio appears to be empty or silent.')
   }
 
   assertNotCancelled()
   postProgress('analyzing-speech', 'Analyzing speech activity locally.')
   const speechRegions = analyzeSpeechActivity(audio, effectiveSettings)
+  postDiagnostic('speech-activity', 'Completed local speech activity analysis.', {
+    regionCount: speechRegions.length,
+    regions: speechRegions,
+    vadEnabled: effectiveSettings.vadEnabled,
+  })
 
   assertNotCancelled()
   postProgress(
@@ -206,6 +235,10 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
     assertNotCancelled()
     postProgress('transcribing', 'Transcribing speech locally with Whisper.')
     const result = await transcribeInWindows(transcriber, audio, effectiveSettings, speechRegions)
+    postDiagnostic('transcription-result', 'Completed the worker transcription pipeline.', {
+      text: result.text,
+      segments: summarizeSegments(result.segments),
+    })
 
     assertNotCancelled()
     postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
@@ -239,6 +272,14 @@ async function regenerate(
   const runtime = resolveSpeechModelRuntimeSettings(settings)
   const effectiveSettings = runtime.settings
   const model = getSpeechModelOption(effectiveSettings.modelId)
+  postDiagnostic('runtime-settings', 'Resolved regeneration model and runtime settings.', {
+    requestedSettings: settings,
+    effectiveSettings,
+    resolutionReason: runtime.reason,
+    model,
+    range,
+    videoDuration,
+  })
   const validationError = validateRegenerationRange(range, videoDuration)
   if (validationError) {
     throw new Error(validationError)
@@ -264,8 +305,20 @@ async function regenerate(
     startTime: extractionRange.extractionStartTime,
     endTime: extractionRange.extractionEndTime,
   })
+  const audioRms = calculateRms(audio.samples)
+  postDiagnostic('decoded-audio', 'Decoded the selected regeneration audio range.', {
+    extractionRange,
+    sampleRate: audio.sampleRate,
+    sampleCount: audio.samples.length,
+    durationSeconds: audio.samples.length / audio.sampleRate,
+    rms: audioRms,
+  })
 
-  if (calculateRms(audio.samples) < 0.0008) {
+  if (audioRms < 0.0008) {
+    postDiagnostic('silent-range', 'The regeneration range was below the audio RMS threshold.', {
+      rms: audioRms,
+      threshold: 0.0008,
+    }, 'warning')
     postRegenerationComplete(range, [], effectiveSettings.modelId)
     return
   }
@@ -276,6 +329,10 @@ async function regenerate(
     startTime: region.startTime + extractionRange.extractionStartTime,
     endTime: region.endTime + extractionRange.extractionStartTime,
   }))
+  postDiagnostic('speech-activity', 'Completed speech analysis for the regeneration range.', {
+    regionCount: speechRegions.length,
+    regions: speechRegions,
+  })
 
   assertNotCancelled()
   postProgress(
@@ -298,6 +355,8 @@ async function regenerate(
         profileIndex / REGENERATION_DECODING_PROFILES.length,
       )
 
+      const requestedTimestampMode = timestampMode
+      const asrStartedAt = performance.now()
       const attempt = await transcribeWindowWithTimestampFallback(
         transcriber,
         audio.samples,
@@ -321,6 +380,15 @@ async function regenerate(
         range,
       )
       const text = segments.map((segment) => segment.text).join(' ').replace(/\s+/g, ' ').trim()
+      postDiagnostic('regeneration-asr-result', 'Captured a regeneration decoding result.', {
+        profile,
+        requestedTimestampMode,
+        actualTimestampMode: attempt.timestampMode,
+        durationMs: Math.round(performance.now() - asrStartedAt),
+        rawResult: summarizeAsrResult(attempt.result),
+        normalizedSegments: summarizeSegments(normalized.segments),
+        constrainedSegments: summarizeSegments(segments),
+      })
 
       if (text) {
         candidates.push({ id: profile.id, segments, text })
@@ -383,6 +451,16 @@ function postRegenerationComplete(
   candidates: RegenerationCandidate[],
   modelId: string,
 ): void {
+  postDiagnostic('regeneration-result', 'Completed bounded regeneration attempts.', {
+    range,
+    modelId,
+    candidateCount: candidates.length,
+    candidates: candidates.map((candidate) => ({
+      id: candidate.id,
+      text: candidate.text,
+      segments: summarizeSegments(candidate.segments),
+    })),
+  })
   postProgress('formatting-subtitles', 'Preparing regenerated subtitle alternatives.')
   postTerminalLog({
     type: 'complete',
@@ -403,6 +481,16 @@ async function transcribeInWindows(
   speechRegions: SpeechRegion[],
 ): Promise<NormalizedAsrResult> {
   const windows = createTranscriptionWindows(audio, settings, speechRegions)
+  postDiagnostic('window-plan', 'Planned model-safe transcription windows.', {
+    audioDurationSeconds: audio.samples.length / audio.sampleRate,
+    sampleRate: audio.sampleRate,
+    speechRegionCount: speechRegions.length,
+    windows: windows.map(({ samples, ...window }) => ({
+      ...window,
+      sampleCount: samples.length,
+      durationSeconds: samples.length / audio.sampleRate,
+    })),
+  })
   let allSegments: RawTranscriptionSegment[] = []
   const textParts: string[] = []
   let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
@@ -415,6 +503,8 @@ async function transcribeInWindows(
       window.index / window.total,
     )
 
+    const requestedTimestampMode = timestampMode
+    const asrStartedAt = performance.now()
     const attempt = await transcribeWindowWithTimestampFallback(transcriber, window.samples, settings, timestampMode)
     timestampMode = attempt.timestampMode
 
@@ -429,6 +519,7 @@ async function transcribeInWindows(
       textParts.push(normalized.text)
     }
 
+    const beforeReconciliation = allSegments.length
     allSegments = reconcileBoundarySegments(
       allSegments,
       normalized.segments,
@@ -438,6 +529,27 @@ async function transcribeInWindows(
         hardMaxCps: settings.formatting.hardMaxCps,
       },
     )
+    postDiagnostic('asr-window-result', 'Captured raw and normalized ASR output for a transcription window.', {
+      window: {
+        index: window.index,
+        total: window.total,
+        sliceStartTime: window.sliceStartTime,
+        coreStartTime: window.coreStartTime,
+        coreEndTime: window.coreEndTime,
+        sampleCount: window.samples.length,
+        durationSeconds: window.samples.length / audio.sampleRate,
+      },
+      requestedTimestampMode,
+      actualTimestampMode: attempt.timestampMode,
+      durationMs: Math.round(performance.now() - asrStartedAt),
+      rawResult: summarizeAsrResult(attempt.result),
+      normalized: summarizeSegments(normalized.segments),
+      reconciliation: {
+        priorSegmentCount: beforeReconciliation,
+        resultingSegmentCount: allSegments.length,
+        boundaryTime: window.coreStartTime,
+      },
+    })
     postPartialResult(allSegments, textParts, settings.modelId)
     postCaptionSegments(normalized.segments)
     postProgress(
@@ -450,6 +562,12 @@ async function transcribeInWindows(
   assertNotCancelled()
   postProgress('checking-coverage', 'Checking subtitle coverage against detected speech.')
   const uncoveredRanges = findUncoveredSpeechRanges(speechRegions, allSegments)
+  postDiagnostic('coverage-check', 'Compared normalized subtitles with detected speech coverage.', {
+    speechRegionCount: speechRegions.length,
+    segmentCount: allSegments.length,
+    uncoveredRangeCount: uncoveredRanges.length,
+    uncoveredRanges,
+  }, uncoveredRanges.length ? 'warning' : 'info')
 
   if (settings.repairEnabled && uncoveredRanges.length) {
     const repairWindows = createRepairWindowPlans(uncoveredRanges, audio.samples.length / audio.sampleRate, {
@@ -457,6 +575,10 @@ async function transcribeInWindows(
       maxModelInputSeconds: settings.maxModelInputSeconds,
       maxRepairRanges: settings.maxRepairRanges,
       minimumSubtitleGapSeconds: settings.formatting.gapBetweenSubtitles,
+    })
+    postDiagnostic('repair-plan', 'Planned one bounded repair pass for uncovered speech.', {
+      repairWindowCount: repairWindows.length,
+      repairWindows,
     })
 
     for (const [repairIndex, repairWindow] of repairWindows.entries()) {
@@ -473,6 +595,8 @@ async function transcribeInWindows(
       )
       const maximumSamples = Math.max(1, Math.floor(settings.maxModelInputSeconds * audio.sampleRate))
       const endSample = Math.min(audio.samples.length, requestedEndSample, startSample + maximumSamples)
+      const requestedTimestampMode = timestampMode
+      const asrStartedAt = performance.now()
       const attempt = await transcribeWindowWithTimestampFallback(
         transcriber,
         audio.samples.subarray(startSample, endSample),
@@ -490,6 +614,17 @@ async function transcribeInWindows(
       const recovered = selectRepairSegments(allSegments, normalized.segments, gap, {
         minimumSubtitleGapSeconds: settings.formatting.gapBetweenSubtitles,
       })
+      postDiagnostic('repair-result', 'Captured a missed-speech repair result.', {
+        repairIndex,
+        repairWindow,
+        gap,
+        requestedTimestampMode,
+        actualTimestampMode: attempt.timestampMode,
+        durationMs: Math.round(performance.now() - asrStartedAt),
+        rawResult: summarizeAsrResult(attempt.result),
+        normalized: summarizeSegments(normalized.segments),
+        accepted: summarizeSegments(recovered),
+      }, recovered.length ? 'info' : 'warning')
       if (recovered.length) {
         allSegments = [...allSegments, ...recovered].sort(
           (first, second) => first.startTime - second.startTime || first.endTime - second.endTime,
@@ -507,10 +642,15 @@ async function transcribeInWindows(
 
   assertNotCancelled()
   postProgress('refining-timing', 'Refining subtitle timing around speech boundaries.')
+  const beforeRefinement = allSegments
   allSegments = refineSegmentsToSpeechBoundaries(allSegments, speechRegions, {
     leadInSeconds: settings.formatting.subtitleLeadIn,
     tailPaddingSeconds: settings.formatting.subtitleTailPadding,
     minimumGapSeconds: settings.formatting.gapBetweenSubtitles,
+  })
+  postDiagnostic('timing-refinement', 'Applied final speech-boundary timing refinement.', {
+    before: summarizeSegments(beforeRefinement),
+    after: summarizeSegments(allSegments),
   })
   postPartialResult(allSegments, textParts, settings.modelId)
 
@@ -536,6 +676,7 @@ async function transcribeWindowWithTimestampFallback(
     }
   } catch (error) {
     if (timestampMode !== 'word' || !isWordTimestampUnsupportedError(error)) {
+      postDiagnostic('asr-call-failed', 'An ASR model call failed.', { error: serializeError(error) }, 'error')
       throw error
     }
 
@@ -543,6 +684,12 @@ async function transcribeWindowWithTimestampFallback(
     postProgress(
       'transcribing',
       'Word timestamps are not available for this model export. Retrying with segment timestamps.',
+    )
+    postDiagnostic(
+      'word-timestamp-fallback',
+      'Word timestamps were unsupported; this session switched to segment timestamps.',
+      { error: serializeError(error) },
+      'warning',
     )
 
     return {
@@ -821,6 +968,32 @@ function getModelTechnicalDetails(model: SpeechModelOption, settings: Transcript
 
 function post(event: WorkerEvent): void {
   self.postMessage(event)
+}
+
+function postDiagnostic(
+  category: string,
+  message: string,
+  data?: unknown,
+  level: DiagnosticLevel = 'info',
+): void {
+  post({
+    type: 'diagnostic',
+    event: {
+      timestamp: new Date().toISOString(),
+      source: 'transcription-worker',
+      category,
+      message,
+      level,
+      jobId: terminalJobId || undefined,
+      data,
+    },
+  })
+}
+
+function serializeError(error: unknown): { name?: string; message: string; stack?: string } {
+  return error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack }
+    : { message: String(error) }
 }
 
 function postTerminalLog(event: TerminalLogEvent): void {

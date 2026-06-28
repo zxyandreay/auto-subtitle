@@ -1,5 +1,6 @@
 import type { FormattingPreferences } from '../types/subtitles'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
+import type { DiagnosticEventInput } from '../diagnostics/types'
 import { resolveCompatibleModelId, TINY_MODEL_ID, type SpeechModelId } from './models'
 
 export type TranscriptionStage =
@@ -216,11 +217,17 @@ export type WorkerErrorEvent = {
   }
 }
 
+export type WorkerDiagnosticEvent = {
+  type: 'diagnostic'
+  event: DiagnosticEventInput
+}
+
 export type WorkerEvent =
   | WorkerProgressEvent
   | WorkerPartialEvent
   | WorkerCompleteEvent
   | WorkerRegenerationCompleteEvent
+  | WorkerDiagnosticEvent
   | WorkerErrorEvent
 
 export function normalizeFormattingPreferences(

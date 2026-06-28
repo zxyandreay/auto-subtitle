@@ -98,6 +98,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | Range regeneration | `src/transcription/regeneration.ts`, `src/subtitles/regeneration.ts` | Validates ranges, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
 | Speech activity and windowing | `src/transcription/speechActivity.ts`, `src/transcription/windowing.ts` | Detects padded speech regions locally and plans silence-preferred ownership windows within a 29-second model budget. |
 | Coverage and timing recovery | `src/transcription/coverage.ts`, `src/transcription/repair.ts`, `src/transcription/reconciliation.ts`, `src/transcription/timingRefinement.ts` | Finds likely missed speech, plans one bounded repair pass, reconciles overlap words, and snaps generated cues to safe speech boundaries. |
+| Local diagnostics | `src/diagnostics/*`, worker diagnostic events, provider bridge, toolbar export | Persists bounded structured evidence for model output, timing decisions, recovery, formatting, environment, and errors without storing media bytes. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
 | Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes full or bounded audio, loads the ASR model, transcribes windows or sequential regeneration profiles, and posts typed results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
@@ -875,6 +876,22 @@ flowchart LR
     Render -->|error| ErrorLine["Print failure message"]
 ```
 
+## Browser Diagnostic Reports
+
+`DiagnosticLog` keeps a versioned, browser-local event stream in `localStorage`. It retains at most 1,000 recent events and trims toward an approximately 2 MB serialized budget. Storage failures are non-fatal: the active in-memory log continues even when local storage is disabled or full. Strings, arrays, object depth, chunks, and segment samples are bounded; truncated strings retain their original length plus head/tail samples.
+
+The worker emits structured diagnostic events through the existing typed worker bridge. A full transcription report can include:
+
+1. File metadata, requested settings, resolved model/runtime settings, and browser capabilities.
+2. Decoded sample rate, sample count, duration, and RMS—never PCM samples or media bytes.
+3. VAD speech regions and the exact sample-derived window plan.
+4. Per-window timestamp mode, raw ASR text/chunk summaries, repetition evidence, normalized segments, and reconciliation counts.
+5. Coverage gaps, repair plans, raw repair output, and accepted/rejected repair segments.
+6. Timing before/after speech-boundary refinement and final formatted editor entries.
+7. Regeneration profiles/candidates, cancellation, failures, and stack traces where available.
+
+The top-toolbar **Debug log** action adds the current video metadata, settings, progress, subtitle count, and current subtitle summaries, then downloads a JSON report. Recognized text is intentionally included because it is needed to distinguish model hallucination from window reconciliation, repair, or formatting behavior. The UI and report both state that recognized text may be sensitive and that no audio/video bytes are included.
+
 Terminal logging is dev-only:
 
 1. `postTerminalLog` returns immediately unless `import.meta.env.DEV` is true.
@@ -1371,6 +1388,9 @@ They cover:
 56. Adjacent-window duplicate removal and unique suffix/prefix word preservation.
 57. Accurate-local defaults and schema-v1 missing-field normalization.
 58. Valid export of low-confidence fallback cues while invalid entries remain omitted.
+59. Bounded diagnostic persistence, oversized-text sampling, storage-failure fallback, and report metadata.
+60. Raw ASR repetition/chunk summaries and normalized segment evidence.
+61. Non-terminal worker diagnostic routing and the top-toolbar debug export action.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 

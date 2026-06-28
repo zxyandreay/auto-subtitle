@@ -10,6 +10,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Custom video preview with play/pause, seek, volume, fullscreen, subtitle visibility, and active subtitle overlay.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
+- Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
 - Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
 - Subtitle editor with playhead-accurate manual insertion, immediate text focus, timestamp editing, validation, active-row highlighting, search, delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
@@ -42,6 +43,8 @@ Auto Subtitle is designed to keep media local:
 Model files are downloaded by Transformers.js on first use and cached by the browser when supported. That download goes to the model host, but your video and extracted audio are not uploaded by this app.
 
 When the app is started through `local-launch.bat`, transcription progress and generated caption text are also sent to the local Vite dev server so the launcher terminal can show live progress. This stays on `127.0.0.1`.
+
+Diagnostic events are stored only in this browser's local storage. They may include file metadata, transcription settings, recognized text, speech regions, window timing, coverage/repair decisions, errors, and final subtitle entries, but never audio or video bytes. Use the **Debug log** button in the top toolbar after reproducing a problem to export a JSON report for investigation. The history is bounded to the most recent 1,000 events and approximately 2 MB; oversized text is sampled with its original length retained.
 
 ## System Requirements
 
@@ -210,6 +213,7 @@ The transcription provider boundary is intentionally small so another local engi
 - Video cannot be decoded: try MP4/H.264 or WebM/VP9. MOV and MKV support depends heavily on codecs.
 - Empty or silent audio: confirm the source video has an audio track.
 - Browser becomes slow: use a shorter file, the faster model, or close other memory-heavy apps.
+- Intermittent repeated or silent-area subtitles: reproduce the issue, click **Debug log**, and keep the exported JSON with the affected video timestamp. The report contains recognized text, so review it before sharing.
 
 ## Dependency And License Notes
 

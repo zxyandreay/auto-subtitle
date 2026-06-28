@@ -7,10 +7,12 @@ import type {
   WorkerEvent,
   WorkerRequest,
 } from './types'
+import type { DiagnosticEventInput } from '../diagnostics/types'
 
 export type TranscriptionCallbacks = {
   onProgress: (progress: TranscriptionProgress) => void
   onPartial?: (result: TranscriptionResult) => void
+  onDiagnostic?: (event: DiagnosticEventInput) => void
 }
 
 export type TranscriptionJob = {
@@ -48,6 +50,11 @@ export function startBrowserWhisperTranscription(
 
       if (data.type === 'partial') {
         callbacks.onPartial?.(data.result)
+        return
+      }
+
+      if (data.type === 'diagnostic') {
+        callbacks.onDiagnostic?.(data.event)
         return
       }
 
@@ -100,7 +107,7 @@ export function startBrowserWhisperRegeneration(
   settings: TranscriptionSettings,
   range: RegenerationRange,
   videoDuration: number | undefined,
-  callbacks: Pick<TranscriptionCallbacks, 'onProgress'>,
+  callbacks: Pick<TranscriptionCallbacks, 'onProgress' | 'onDiagnostic'>,
 ): RegenerationJob {
   const worker = new Worker(new URL('../workers/transcription.worker.ts', import.meta.url), {
     type: 'module',
@@ -119,6 +126,11 @@ export function startBrowserWhisperRegeneration(
       }
 
       if (data.type === 'partial') {
+        return
+      }
+
+      if (data.type === 'diagnostic') {
+        callbacks.onDiagnostic?.(data.event)
         return
       }
 

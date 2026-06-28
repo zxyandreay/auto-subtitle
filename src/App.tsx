@@ -7,6 +7,8 @@ import { RegenerationDialog, type FormattedRegenerationCandidate } from './compo
 import { SubtitleEditor } from './components/SubtitleEditor'
 import { TranscriptionPanel } from './components/TranscriptionPanel'
 import { VideoPlayer } from './components/VideoPlayer'
+import { summarizeSegments } from './diagnostics/asrDiagnostics'
+import { getDiagnosticLog, recordDiagnosticEvent } from './diagnostics/diagnosticLog'
 import { useUndoableSubtitles } from './hooks/useUndoableSubtitles'
 import { getDurationWarning, validateVideoFile, type VideoFileState } from './media/video'
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
@@ -110,6 +112,12 @@ function App() {
 
   const handleSettingsChange = useCallback((nextSettings: TranscriptionSettings) => {
     const resolved = resolveCompatibleModelId(nextSettings)
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'settings-changed',
+      message: 'Transcription settings changed.',
+      data: { requestedSettings: nextSettings, resolvedModel: resolved },
+    })
     setSettings({ ...nextSettings, modelId: resolved.modelId })
     if (resolved.changed && resolved.reason) {
       setNotice({ tone: 'warning', message: resolved.reason })
@@ -119,6 +127,15 @@ function App() {
   useEffect(() => {
     subtitlesRef.current = subtitles
   }, [subtitles])
+
+  useEffect(() => {
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'app-session',
+      message: 'Started an Auto Subtitle browser session.',
+      data: { capabilities, capabilityWarnings },
+    })
+  }, [capabilities, capabilityWarnings])
 
   const requestSeek = useCallback((time: number) => {
     setSeekRequest({ time, id: Date.now() })
@@ -244,6 +261,16 @@ function App() {
     })
     setVideoErrors(validation.errors)
     setVideoWarnings(validation.warnings)
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'video-selected',
+      message: validation.errors.length ? 'Video selection failed validation.' : 'Selected a local video.',
+      level: validation.errors.length ? 'warning' : 'info',
+      data: {
+        file: { name: file.name, size: file.size, type: file.type, lastModified: file.lastModified },
+        validation,
+      },
+    })
 
     if (validation.errors.length) {
       return
@@ -341,6 +368,19 @@ function App() {
 
       subtitlesRef.current = nextEntries
       if (final) {
+        recordDiagnosticEvent({
+          source: 'app',
+          category: 'formatted-transcription',
+          message: 'Converted the final worker result into editor subtitle entries.',
+          data: {
+            modelId: result.modelId,
+            workerSegments: summarizeSegments(result.segments),
+            formattedEntries: summarizeSegments(generatedEntries),
+            mergedEditorEntries: summarizeSegments(nextEntries),
+            formatting: transcriptionSettings.formatting,
+            videoDuration,
+          },
+        })
         replace(nextEntries)
       } else {
         preview(nextEntries)
@@ -362,6 +402,17 @@ function App() {
       setSettings(transcriptionSettings)
     }
     const videoDuration = video.duration || undefined
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'transcription-started',
+      message: 'Started a local full transcription.',
+      data: {
+        file: { name: video.file.name, size: video.file.size, type: video.file.type },
+        videoDuration,
+        settings: transcriptionSettings,
+        existingSubtitleCount: subtitlesRef.current.length,
+      },
+    })
     livePreviewStateRef.current = createLiveTranscriptionPreviewState(subtitlesRef.current)
     setNotice(resolvedModel.reason ? { tone: 'warning', message: resolvedModel.reason } : null)
     setBusy(true)
@@ -375,6 +426,7 @@ function App() {
       onProgress: setProgress,
       onPartial: (partial) =>
         applyLiveTranscriptionPreview(partial, transcriptionSettings, videoDuration, false),
+      onDiagnostic: recordDiagnosticEvent,
     })
     jobRef.current = job
 
@@ -389,6 +441,12 @@ function App() {
       setNotice({
         tone: 'success',
         message: `Transcription complete. Review ${nextEntries.length} generated subtitle entries before export.`,
+      })
+      recordDiagnosticEvent({
+        source: 'app',
+        category: 'transcription-completed',
+        message: 'Full transcription completed and settled in the editor.',
+        data: { modelId: result.modelId, subtitleCount: nextEntries.length },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -406,6 +464,13 @@ function App() {
           : 'Transcription failed. The subtitle editor remains available.',
         details: message,
       })
+      recordDiagnosticEvent({
+        source: 'app',
+        category: cancelled ? 'transcription-cancelled' : 'transcription-failed',
+        message: cancelled ? 'Full transcription was cancelled.' : 'Full transcription failed.',
+        level: cancelled ? 'warning' : 'error',
+        data: { error: serializeAppError(error) },
+      })
     } finally {
       setBusy(false)
       jobRef.current = null
@@ -414,6 +479,12 @@ function App() {
   }
 
   const handleCancelTranscription = () => {
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'transcription-cancel-requested',
+      message: 'The user requested transcription cancellation.',
+      level: 'warning',
+    })
     jobRef.current?.cancel()
     jobRef.current = null
     livePreviewStateRef.current = null
@@ -470,6 +541,17 @@ function App() {
     const originalEntries = subtitlesRef.current.filter(
       (entry) => entry.endTime > range.startTime && entry.startTime < range.endTime,
     )
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'regeneration-started',
+      message: 'Started local subtitle range regeneration.',
+      data: {
+        range,
+        videoDuration,
+        settings: transcriptionSettings,
+        originalEntries: summarizeSegments(originalEntries),
+      },
+    })
     setRegenerationDialog({ range, originalEntries })
     setRegenerationCandidates([])
     setRegenerationPreviewEntries(null)
@@ -486,7 +568,7 @@ function App() {
       transcriptionSettings,
       range,
       videoDuration,
-      { onProgress: setRegenerationProgress },
+      { onProgress: setRegenerationProgress, onDiagnostic: recordDiagnosticEvent },
     )
     regenerationJobRef.current = job
 
@@ -518,6 +600,19 @@ function App() {
       if (!candidates.length) {
         setRegenerationError('No distinct timestamped speech was found. The current subtitles are unchanged.')
       }
+      recordDiagnosticEvent({
+        source: 'app',
+        category: 'regeneration-completed',
+        message: 'Range regeneration completed.',
+        data: {
+          range: result.range,
+          modelId: result.modelId,
+          candidates: candidates.map((candidate) => ({
+            id: candidate.id,
+            entries: summarizeSegments(candidate.entries),
+          })),
+        },
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('cancelled')) {
@@ -528,6 +623,13 @@ function App() {
           technicalDetails: message,
         })
       }
+      recordDiagnosticEvent({
+        source: 'app',
+        category: message.toLowerCase().includes('cancelled') ? 'regeneration-cancelled' : 'regeneration-failed',
+        message: 'Range regeneration did not complete normally.',
+        level: message.toLowerCase().includes('cancelled') ? 'warning' : 'error',
+        data: { range, error: serializeAppError(error) },
+      })
     } finally {
       setRegenerationBusy(false)
       regenerationJobRef.current = null
@@ -548,6 +650,12 @@ function App() {
   }
 
   const applyRegenerationCandidate = (entries: SubtitleEntry[] | null, range: RegenerationRange) => {
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'regeneration-applied',
+      message: entries ? 'Applied a regenerated subtitle alternative.' : 'Kept the original subtitles.',
+      data: { range, entries: entries ? summarizeSegments(entries) : undefined },
+    })
     if (entries) {
       commitSubtitleChanges(
         replaceEntriesInRange(
@@ -657,6 +765,35 @@ function App() {
     }
   }
 
+  const handleExportDiagnostics = () => {
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'diagnostic-export',
+      message: 'The user exported a local diagnostic report.',
+      data: { subtitleCount: subtitlesRef.current.length },
+    })
+    const report = getDiagnosticLog().createReport({
+      subtitleCount: subtitlesRef.current.length,
+      subtitles: summarizeSegments(subtitlesRef.current),
+      video: video
+        ? { name: video.file.name, size: video.file.size, type: video.file.type, duration: video.duration }
+        : undefined,
+      settings,
+      progress,
+      regenerationProgress,
+    })
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+    downloadTextFile(
+      `${baseName(video?.file.name ?? 'auto-subtitle')}-debug-${timestamp}.json`,
+      `${JSON.stringify(report, null, 2)}\n`,
+      'application/json;charset=utf-8',
+    )
+    setNotice({
+      tone: 'success',
+      message: 'Exported the local debug log. It contains recognized subtitle text but no media bytes.',
+    })
+  }
+
   const jumpSubtitle = (direction: 1 | -1) => {
     if (!subtitles.length) {
       return
@@ -730,6 +867,7 @@ function App() {
           }
         }}
         onExport={handleExport}
+        onExportDiagnostics={handleExportDiagnostics}
         onImportFile={(file) => void handleImportFile(file)}
         onRestoreAutosave={restoreAutosave}
         onThemeChange={setTheme}
@@ -987,6 +1125,12 @@ function buildProjectImportMessage(videoFileName?: string, videoDuration?: numbe
 
   const durationNote = videoDuration ? ` The saved duration was ${Math.round(videoDuration)} seconds.` : ''
   return `Project restored. Select the original video again: ${videoFileName}.${durationNote}`
+}
+
+function serializeAppError(error: unknown): { name?: string; message: string; stack?: string } {
+  return error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack }
+    : { message: String(error) }
 }
 
 export default App

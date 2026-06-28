@@ -1,4 +1,4 @@
-import { FileDown, FileJson, FileText, FolderOpen, Moon, Sun, Trash2, Upload } from 'lucide-react'
+import { Bug, FileDown, FileJson, FileText, FolderOpen, Moon, Sun, Trash2, Upload } from 'lucide-react'
 import type { ChangeEvent } from 'react'
 import { useRef } from 'react'
 import type { ThemePreference } from '../theme'
@@ -14,6 +14,7 @@ type ProjectToolbarProps = {
   onRestoreAutosave: () => void
   onClearAutosave: () => void
   onExport: (kind: 'srt' | 'vtt' | 'txt' | 'json') => void
+  onExportDiagnostics: () => void
   onClearSubtitles: () => void
 }
 
@@ -26,6 +27,7 @@ export function ProjectToolbar({
   onRestoreAutosave,
   onClearAutosave,
   onExport,
+  onExportDiagnostics,
   onClearSubtitles,
 }: ProjectToolbarProps) {
   const importRef = useRef<HTMLInputElement | null>(null)
@@ -91,6 +93,10 @@ export function ProjectToolbar({
         <IconButton label="Clear subtitles" disabled={!entryCount} onClick={onClearSubtitles}>
           <Trash2 size={16} />
         </IconButton>
+        <button aria-label="Export debug log" className="button button--ghost" type="button" onClick={onExportDiagnostics}>
+          <Bug size={16} />
+          Debug log
+        </button>
         <select
           aria-label="Theme"
           className="theme-select"
