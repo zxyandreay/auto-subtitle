@@ -21,12 +21,13 @@ import {
 } from '../subtitles/formatting'
 import { getIssuesForEntry, validateSubtitles } from '../subtitles/validation'
 import type { FormattingPreferences, SubtitleEntry, ValidationIssue } from '../types/subtitles'
-import { formatTimestamp, parseTimestamp } from '../utils/time'
 import { IconButton } from './IconButton'
+import { SubtitleTimestampInput } from './SubtitleTimestampInput'
 
 type SubtitleEditorProps = {
   entries: SubtitleEntry[]
   activeEntryId?: string
+  selectedEntryId?: string
   duration?: number
   formatting: FormattingPreferences
   autoScroll: boolean
@@ -37,6 +38,7 @@ type SubtitleEditorProps = {
   onShowOnlyErrorsChange: (enabled: boolean) => void
   onChange: (entries: SubtitleEntry[]) => void
   onSeek: (time: number) => void
+  onSelectEntry: (id: string) => void
   onPlayRange: (startTime: number, endTime: number) => void
   onRegenerate: (entry: SubtitleEntry) => void
 }
@@ -44,6 +46,7 @@ type SubtitleEditorProps = {
 export function SubtitleEditor({
   entries,
   activeEntryId,
+  selectedEntryId,
   duration,
   formatting,
   autoScroll,
@@ -54,6 +57,7 @@ export function SubtitleEditor({
   onShowOnlyErrorsChange,
   onChange,
   onSeek,
+  onSelectEntry,
   onPlayRange,
   onRegenerate,
 }: SubtitleEditorProps) {
@@ -93,6 +97,7 @@ export function SubtitleEditor({
       onShowOnlyErrorsChange(false)
     }
     setEntryToFocusId(entryId)
+    onSelectEntry(entryId)
     commit(nextEntries)
   }
 
@@ -198,6 +203,7 @@ export function SubtitleEditor({
             const index = entries.findIndex((item) => item.id === entry.id)
             const entryIssues = getIssuesForEntry(entry.id, entries, duration)
             const isActive = entry.id === activeEntryId
+            const isSelected = entry.id === selectedEntryId
             const isMatch = matches[matchIndex] === entry.id
 
             return (
@@ -208,6 +214,7 @@ export function SubtitleEditor({
                 formatting={formatting}
                 issues={entryIssues}
                 isActive={isActive}
+                isSelected={isSelected}
                 isMatch={isMatch}
                 focusText={entry.id === entryToFocusId}
                 onAddAfter={() => insertAt(index, 'after')}
@@ -255,6 +262,7 @@ export function SubtitleEditor({
                 onPlayRange={() => onPlayRange(entry.startTime, entry.endTime)}
                 onRegenerate={() => onRegenerate(entry)}
                 onSeek={() => onSeek(entry.startTime)}
+                onSelect={() => onSelectEntry(entry.id)}
                 onSplit={() => {
                   const [first, second] = splitEntry(entry)
                   commit([...entries.slice(0, index), first, second, ...entries.slice(index + 1)])
@@ -291,11 +299,13 @@ type SubtitleRowProps = {
   issues: ValidationIssue[]
   formatting: FormattingPreferences
   isActive: boolean
+  isSelected: boolean
   isMatch: boolean
   focusText: boolean
   refCallback?: (element: HTMLDivElement | null) => void
   onUpdate: (patch: Partial<SubtitleEntry>) => void
   onSeek: () => void
+  onSelect: () => void
   onPlayRange: () => void
   onRegenerate: () => void
   onAddBefore: () => void
@@ -316,11 +326,13 @@ function SubtitleRow({
   issues,
   formatting,
   isActive,
+  isSelected,
   isMatch,
   focusText,
   refCallback,
   onUpdate,
   onSeek,
+  onSelect,
   onPlayRange,
   onRegenerate,
   onAddBefore,
@@ -352,9 +364,11 @@ function SubtitleRow({
   return (
     <div
       ref={refCallback}
-      className={`subtitle-row ${isActive ? 'subtitle-row--active' : ''} ${isMatch ? 'subtitle-row--match' : ''} ${hasError ? 'subtitle-row--error' : ''}`}
+      className={`subtitle-row ${isActive ? 'subtitle-row--active' : ''} ${isSelected ? 'subtitle-row--selected' : ''} ${isMatch ? 'subtitle-row--match' : ''} ${hasError ? 'subtitle-row--error' : ''}`}
+      data-editor-subtitle-id={entry.id}
       role="listitem"
       tabIndex={0}
+      onFocusCapture={onSelect}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && event.target === event.currentTarget) {
           onSeek()
@@ -365,12 +379,12 @@ function SubtitleRow({
         <button className="row-index" type="button" onClick={onSeek}>
           {entry.index}
         </button>
-        <TimestampInput
+        <SubtitleTimestampInput
           label={`Start time for subtitle ${entry.index}`}
           value={entry.startTime}
           onCommit={(value) => onUpdate({ startTime: value })}
         />
-        <TimestampInput
+        <SubtitleTimestampInput
           label={`End time for subtitle ${entry.index}`}
           value={entry.endTime}
           onCommit={(value) => onUpdate({ endTime: value })}
@@ -433,50 +447,5 @@ function SubtitleRow({
         </ul>
       ) : null}
     </div>
-  )
-}
-
-type TimestampInputProps = {
-  label: string
-  value: number
-  onCommit: (value: number) => void
-}
-
-function TimestampInput({ label, value, onCommit }: TimestampInputProps) {
-  const [draft, setDraft] = useState(formatTimestamp(value, { alwaysHours: true }))
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    setDraft(formatTimestamp(value, { alwaysHours: true }))
-    setError('')
-  }, [value])
-
-  return (
-    <label className={`timestamp-field ${error ? 'timestamp-field--error' : ''}`}>
-      <span className="sr-only">{label}</span>
-      <input
-        aria-invalid={Boolean(error)}
-        aria-label={label}
-        value={draft}
-        onBlur={() => {
-          const parsed = parseTimestamp(draft)
-          if (parsed === null) {
-            setError('Use HH:MM:SS.mmm, MM:SS.mmm, or seconds.')
-            return
-          }
-          setError('')
-          onCommit(parsed)
-        }}
-        onChange={(event) => {
-          setDraft(event.target.value)
-          if (parseTimestamp(event.target.value) === null) {
-            setError('Invalid time')
-          } else {
-            setError('')
-          }
-        }}
-      />
-      {error ? <span className="timestamp-error">{error}</span> : null}
-    </label>
   )
 }

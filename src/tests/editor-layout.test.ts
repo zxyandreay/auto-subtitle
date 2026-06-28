@@ -14,4 +14,25 @@ describe('desktop subtitle editor layout', () => {
     )
     expect(appStyles).toMatch(/\.subtitle-list\s*{[^}]*overflow:\s*auto;/)
   })
+
+  it('keeps the subtitle timeline horizontally scrollable with touch-safe drag handles', () => {
+    expect(appStyles).toMatch(/\.subtitle-timeline__viewport\s*{[^}]*overflow-x:\s*auto;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__cue\s*{[^}]*touch-action:\s*none;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__handle\s*{[^}]*min-width:\s*24px;/)
+  })
+
+  it('keeps the whole subtitle workspace readable in fullscreen with safe-area padding', () => {
+    expect(appStyles).toMatch(/\.video-panel:fullscreen\s*{[^}]*padding:[^;]*env\(safe-area-inset-top\)/)
+    expect(appStyles).toMatch(/\.video-panel:fullscreen\s*{[^}]*overflow-y:\s*auto;/)
+    expect(appStyles).toMatch(/\.video-panel:fullscreen[\s\S]*?\.player-controls\s*{[^}]*position:\s*sticky;/)
+  })
+
+  it('uses a collapsible sticky player editor on narrow screens', () => {
+    expect(appStyles).toMatch(
+      /@media \(max-width: 820px\)[\s\S]*?\.player-subtitle-editor\s*{[^}]*position:\s*sticky;/,
+    )
+    expect(appStyles).toMatch(
+      /@media \(max-width: 820px\)[\s\S]*?\.player-subtitle-editor__actions \.icon-button\s*{[^}]*min-height:\s*44px;/,
+    )
+  })
 })

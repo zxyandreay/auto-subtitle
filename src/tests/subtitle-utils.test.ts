@@ -102,6 +102,13 @@ describe('subtitle editing logic', () => {
     expect(entry.endTime).toBe(10)
   })
 
+  it('creates the smallest valid manual subtitle when the playhead is at the video end', () => {
+    const entry = makeSubtitleEntryAtTime(10, 10)
+
+    expect(entry.startTime).toBe(9.9)
+    expect(entry.endTime).toBe(10)
+  })
+
   it('does not treat a zero metadata duration as a known video boundary', () => {
     const entry = makeSubtitleEntryAtTime(12.5, 0)
 

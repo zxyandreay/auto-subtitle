@@ -1,9 +1,11 @@
-import { Captions, Maximize, Pause, Play, RotateCcw, Volume2 } from 'lucide-react'
+import { Captions, Maximize, Minimize, Pause, Play, Plus, RotateCcw, Volume2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
-import type { SubtitleEntry } from '../types/subtitles'
+import type { FormattingPreferences, SubtitleEntry } from '../types/subtitles'
 import { formatDuration } from '../utils/time'
 import { IconButton } from './IconButton'
+import { PlayerSubtitleEditor } from './PlayerSubtitleEditor'
+import { SubtitleTimeline } from './SubtitleTimeline'
 
 type VideoPlayerProps = {
   src: string | null
@@ -11,6 +13,10 @@ type VideoPlayerProps = {
   currentTime: number
   videoRef: RefObject<HTMLVideoElement | null>
   subtitles: SubtitleEntry[]
+  overlaySubtitles?: SubtitleEntry[]
+  formatting: FormattingPreferences
+  selectedSubtitleId?: string
+  focusSubtitleRequest?: number
   subtitlesVisible: boolean
   seekRequest?: { time: number; id: number }
   playRangeRequest?: { startTime: number; endTime: number; id: number }
@@ -19,6 +25,13 @@ type VideoPlayerProps = {
   onTime: (time: number) => void
   onRangePlaybackEnd?: () => void
   onToggleSubtitles: () => void
+  onUpdateSubtitle: (id: string, patch: Partial<SubtitleEntry>) => void
+  onDeleteSubtitle: (id: string) => void
+  onDuplicateSubtitle: (id: string) => void
+  onAddSubtitleAt: (time: number) => void
+  onSelectSubtitle: (id: string) => void
+  onPlayRange: (startTime: number, endTime: number) => void
+  onSeek: (time: number) => void
 }
 
 export function VideoPlayer({
@@ -27,6 +40,10 @@ export function VideoPlayer({
   currentTime,
   videoRef,
   subtitles,
+  overlaySubtitles,
+  formatting,
+  selectedSubtitleId,
+  focusSubtitleRequest,
   subtitlesVisible,
   seekRequest,
   playRangeRequest,
@@ -35,23 +52,41 @@ export function VideoPlayer({
   onTime,
   onRangePlaybackEnd,
   onToggleSubtitles,
+  onUpdateSubtitle,
+  onDeleteSubtitle,
+  onDuplicateSubtitle,
+  onAddSubtitleAt,
+  onSelectSubtitle,
+  onPlayRange,
+  onSeek,
 }: VideoPlayerProps) {
+  const workspaceRef = useRef<HTMLElement | null>(null)
   const rangeEndRef = useRef<number | null>(null)
   const [playing, setPlaying] = useState(false)
   const [volume, setVolume] = useState(0.85)
+  const [fullscreen, setFullscreen] = useState(false)
+  const [fullscreenError, setFullscreenError] = useState('')
 
+  const visibleOverlaySubtitles = overlaySubtitles ?? subtitles
   const activeSubtitle = useMemo(
-    () => subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime),
-    [currentTime, subtitles],
+    () => visibleOverlaySubtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime),
+    [currentTime, visibleOverlaySubtitles],
+  )
+  const selectedSubtitle = useMemo(
+    () => subtitles.find((entry) => entry.id === selectedSubtitleId),
+    [selectedSubtitleId, subtitles],
   )
 
-  const seekTo = useCallback((time: number) => {
-    if (!videoRef.current) {
-      return
-    }
-    videoRef.current.currentTime = time
-    onTime(time)
-  }, [onTime, videoRef])
+  const seekTo = useCallback(
+    (time: number) => {
+      if (!videoRef.current) {
+        return
+      }
+      videoRef.current.currentTime = time
+      onTime(time)
+    },
+    [onTime, videoRef],
+  )
 
   useEffect(() => {
     if (seekRequest) {
@@ -64,11 +99,9 @@ export function VideoPlayer({
       rangeEndRef.current = null
       return
     }
-
     if (!videoRef.current) {
       return
     }
-
     rangeEndRef.current = playRangeRequest.endTime
     videoRef.current.currentTime = playRangeRequest.startTime
     onTime(playRangeRequest.startTime)
@@ -79,7 +112,6 @@ export function VideoPlayer({
     if (!playToggleRequest || !videoRef.current) {
       return
     }
-
     if (videoRef.current.paused) {
       void videoRef.current.play()
     } else {
@@ -87,8 +119,36 @@ export function VideoPlayer({
     }
   }, [playToggleRequest, videoRef])
 
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setFullscreen(document.fullscreenElement === workspaceRef.current)
+      setFullscreenError('')
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  const toggleFullscreen = async () => {
+    setFullscreenError('')
+    try {
+      if (document.fullscreenElement === workspaceRef.current) {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen()
+        }
+        return
+      }
+      if (!workspaceRef.current?.requestFullscreen) {
+        throw new Error('Fullscreen unavailable')
+      }
+      await workspaceRef.current.requestFullscreen()
+    } catch {
+      setFullscreen(false)
+      setFullscreenError('Fullscreen is unavailable or was denied.')
+    }
+  }
+
   return (
-    <section className="video-panel" aria-label="Video preview">
+    <section ref={workspaceRef} className="video-panel" aria-label="Video and subtitle editing workspace">
       <div className="video-frame">
         {src ? (
           <video
@@ -174,14 +234,30 @@ export function VideoPlayer({
             type="range"
             value={volume}
             onChange={(event) => {
-              const next = Number(event.target.value)
-              setVolume(next)
+              const nextVolume = Number(event.target.value)
+              setVolume(nextVolume)
               if (videoRef.current) {
-                videoRef.current.volume = next
+                videoRef.current.volume = nextVolume
               }
             }}
           />
         </label>
+
+        <button
+          aria-label="Add subtitle at current video time"
+          className="button button--soft player-add-subtitle"
+          disabled={!src}
+          type="button"
+          onClick={() => {
+            const exactTime = videoRef.current?.currentTime ?? currentTime
+            videoRef.current?.pause()
+            rangeEndRef.current = null
+            onAddSubtitleAt(exactTime)
+          }}
+        >
+          <Plus size={16} />
+          Add subtitle
+        </button>
 
         <IconButton
           label={subtitlesVisible ? 'Hide subtitles' : 'Show subtitles'}
@@ -192,17 +268,45 @@ export function VideoPlayer({
         </IconButton>
 
         <IconButton
-          label="Fullscreen"
+          label={fullscreen ? 'Exit fullscreen subtitle workspace' : 'Enter fullscreen subtitle workspace'}
           disabled={!src}
-          onClick={() => {
-            if (videoRef.current?.parentElement?.requestFullscreen) {
-              void videoRef.current.parentElement.requestFullscreen()
-            }
-          }}
+          onClick={() => void toggleFullscreen()}
         >
-          <Maximize size={17} />
+          {fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
         </IconButton>
       </div>
+
+      {fullscreenError ? (
+        <p className="player-fullscreen-error" role="status">
+          {fullscreenError}
+        </p>
+      ) : null}
+
+      <SubtitleTimeline
+        currentTime={currentTime}
+        duration={duration || undefined}
+        entries={subtitles}
+        minDuration={formatting.minDuration}
+        playing={playing}
+        selectedId={selectedSubtitleId}
+        onSeek={onSeek}
+        onSelect={onSelectSubtitle}
+        onUpdate={onUpdateSubtitle}
+      />
+
+      <PlayerSubtitleEditor
+        duration={duration || undefined}
+        entries={subtitles}
+        entry={selectedSubtitle}
+        focusRequest={focusSubtitleRequest}
+        formatting={formatting}
+        onDelete={onDeleteSubtitle}
+        onDuplicate={onDuplicateSubtitle}
+        onPlayRange={onPlayRange}
+        onSeek={onSeek}
+        onSelect={onSelectSubtitle}
+        onUpdate={onUpdateSubtitle}
+      />
     </section>
   )
 }

@@ -17,6 +17,7 @@ const TINY_GAP_SECONDS = 0.12
 const MAX_EXTENSION_PAST_AUDIO_SECONDS = 0.5
 const MIN_GENERATED_CAPTION_DURATION = 0.25
 const DEFAULT_MANUAL_SUBTITLE_DURATION_SECONDS = 2
+const MIN_MANUAL_SUBTITLE_DURATION_SECONDS = 0.1
 
 export function normalizeSubtitleText(text: string): string {
   return text
@@ -92,6 +93,13 @@ export function makeSubtitleEntryAtTime(startTime: number, duration?: number): S
   const safeDuration = duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : undefined
   const safeStartTime = Number.isFinite(startTime) ? Math.max(0, startTime) : 0
   const boundedStartTime = roundTime(Math.min(safeStartTime, safeDuration ?? Number.POSITIVE_INFINITY))
+  if (safeDuration !== undefined && boundedStartTime >= safeDuration) {
+    return makeSubtitleEntry({
+      startTime: Math.max(0, safeDuration - Math.min(MIN_MANUAL_SUBTITLE_DURATION_SECONDS, safeDuration)),
+      endTime: safeDuration,
+      text: 'New subtitle',
+    })
+  }
   const preferredEndTime = roundTime(boundedStartTime + DEFAULT_MANUAL_SUBTITLE_DURATION_SECONDS)
   const boundedEndTime =
     safeDuration !== undefined && safeDuration > boundedStartTime

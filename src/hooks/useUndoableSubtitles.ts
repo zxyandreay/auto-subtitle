@@ -66,6 +66,9 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
   switch (action.type) {
     case 'commit': {
       const next = sortAndRenumber(action.entries)
+      if (sameSubtitleEntries(state.present, next)) {
+        return state
+      }
       return {
         past: [...state.past, state.present].slice(-80),
         present: next,
@@ -111,4 +114,42 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
       }
     }
   }
+}
+
+function sameSubtitleEntries(first: SubtitleEntry[], second: SubtitleEntry[]): boolean {
+  return (
+    first.length === second.length &&
+    first.every((entry, index) => {
+      const other = second[index]
+      return (
+        entry.id === other.id &&
+        entry.index === other.index &&
+        entry.startTime === other.startTime &&
+        entry.endTime === other.endTime &&
+        entry.text === other.text &&
+        entry.confidence === other.confidence &&
+        sameSubtitleWords(entry.words, other.words)
+      )
+    })
+  )
+}
+
+function sameSubtitleWords(first: SubtitleEntry['words'], second: SubtitleEntry['words']): boolean {
+  if (first === second) {
+    return true
+  }
+  return (
+    first?.length === second?.length &&
+    Boolean(
+      first?.every((word, index) => {
+        const other = second?.[index]
+        return (
+          word.text === other?.text &&
+          word.startTime === other.startTime &&
+          word.endTime === other.endTime &&
+          word.confidence === other.confidence
+        )
+      }),
+    )
+  )
 }

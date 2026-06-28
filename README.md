@@ -7,19 +7,19 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 ## Features
 
 - Drag-and-drop video import with local privacy messaging, file metadata, size warnings, duration warnings, and validation.
-- Custom video preview with play/pause, seek, volume, fullscreen, subtitle visibility, and active subtitle overlay.
+- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a zoomable subtitle timeline.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
 - Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
-- Subtitle editor with playhead-accurate manual insertion, immediate text focus, timestamp editing, validation, active-row highlighting, search, delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
+- Synchronized player and list editors with playhead-accurate insertion, text and timestamp editing, timeline dragging, validation, search, delete, split, merge, duplicate, move, range playback, undo, and redo.
 - Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus as many as three distinct Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
 - Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
-- Keyboard shortcuts for playback, seeking, undo, and redo.
+- Keyboard shortcuts for playback, seeking, subtitle timeline nudging, undo, and redo.
 
 ## Screenshots
 
@@ -27,6 +27,8 @@ Screenshots are not committed yet. Run the app locally and capture:
 
 - Empty import state
 - Video preview with subtitle overlay
+- Interactive subtitle timeline and player editing panel
+- Fullscreen subtitle editing workspace
 - Subtitle editor with validation issues
 - Transcription failure or progress state
 
@@ -172,6 +174,18 @@ When importing project JSON, the app validates the schema, normalizes saved mode
 - Ctrl+Z: undo subtitle edits
 - Ctrl+Shift+Z or Ctrl+Y: redo subtitle edits
 - Enter on a subtitle row: seek to that subtitle start
+- Enter or Space on a timeline cue: select the cue and seek to its start
+- Arrow Left or Arrow Right on a timeline cue: move it by 0.1 seconds
+- Arrow Left or Arrow Right on a focused timeline handle: adjust that start or end boundary by 0.1 seconds
+- Hold Shift with a timeline Arrow key: use a 0.5-second adjustment
+
+## Player Subtitle Editing
+
+The video player includes a horizontally scrollable subtitle timeline. Cue blocks show their text, timing, active/selected state, and existing validation severity. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. Timing snaps gently to the playhead, adjacent cue boundaries, and nearby half-second marks; overlaps remain visible as validation errors instead of being silently removed.
+
+Selecting a cue opens the player subtitle editor for text, timestamp, navigation, range playback, duplication, and deletion. **Add subtitle** pauses playback and inserts a focused cue at the exact playhead. Player changes and the main subtitle list share the same undoable subtitle state and synchronize selection immediately.
+
+Fullscreen targets the whole editing workspace rather than only the video, keeping the timeline, editor, add/delete actions, playback controls, volume, and subtitle visibility available. Tablet layouts stack these tools; narrow layouts use a horizontally scrolling timeline and a collapsible sticky editor panel with touch-sized actions.
 
 ## Architecture
 

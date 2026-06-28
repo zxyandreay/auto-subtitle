@@ -12,10 +12,12 @@ import { getDiagnosticLog, recordDiagnosticEvent } from './diagnostics/diagnosti
 import { useUndoableSubtitles } from './hooks/useUndoableSubtitles'
 import { getDurationWarning, validateVideoFile, type VideoFileState } from './media/video'
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
+import { deleteSubtitleEntry, duplicateSubtitleEntry, updateSubtitleEntry } from './subtitles/editing'
 import {
   formatSubtitleText,
   formatTranscriptionSegments,
   makeSubtitleEntry,
+  makeSubtitleEntryAtTime,
   normalizeOverlaps,
   removeEmptyEntries,
   shiftEntries,
@@ -99,6 +101,8 @@ function App() {
   const [seekRequest, setSeekRequest] = useState<{ time: number; id: number }>()
   const [playRangeRequest, setPlayRangeRequest] = useState<{ startTime: number; endTime: number; id: number }>()
   const [playToggleRequest, setPlayToggleRequest] = useState(0)
+  const [selectedSubtitleId, setSelectedSubtitleId] = useState<string>()
+  const [focusSubtitleRequest, setFocusSubtitleRequest] = useState(0)
   const videoElementRef = useRef<HTMLVideoElement | null>(null)
   const jobRef = useRef<TranscriptionJob | null>(null)
   const regenerationJobRef = useRef<RegenerationJob | null>(null)
@@ -109,6 +113,13 @@ function App() {
   const capabilities = useMemo(() => detectBrowserCapabilities(), [])
   const capabilityWarnings = useMemo(() => getCapabilityWarnings(capabilities), [capabilities])
   const activeSubtitle = subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime)
+
+  useEffect(() => {
+    if (selectedSubtitleId && subtitles.some((entry) => entry.id === selectedSubtitleId)) {
+      return
+    }
+    setSelectedSubtitleId(activeSubtitle?.id ?? subtitles[0]?.id)
+  }, [activeSubtitle?.id, selectedSubtitleId, subtitles])
 
   const handleSettingsChange = useCallback((nextSettings: TranscriptionSettings) => {
     const resolved = resolveCompatibleModelId(nextSettings)
@@ -334,6 +345,49 @@ function App() {
     },
     [commit],
   )
+
+  const updateSubtitleFromPlayer = useCallback(
+    (id: string, patch: Partial<SubtitleEntry>) => {
+      commitSubtitleChanges(updateSubtitleEntry(subtitlesRef.current, id, patch))
+    },
+    [commitSubtitleChanges],
+  )
+
+  const deleteSubtitleFromPlayer = useCallback(
+    (id: string) => {
+      const result = deleteSubtitleEntry(subtitlesRef.current, id)
+      commitSubtitleChanges(result.entries)
+      setSelectedSubtitleId(result.selectedId)
+    },
+    [commitSubtitleChanges],
+  )
+
+  const duplicateSubtitleFromPlayer = useCallback(
+    (id: string) => {
+      const result = duplicateSubtitleEntry(subtitlesRef.current, id)
+      commitSubtitleChanges(result.entries)
+      setSelectedSubtitleId(result.selectedId)
+      setFocusSubtitleRequest((value) => value + 1)
+    },
+    [commitSubtitleChanges],
+  )
+
+  const addSubtitleFromPlayer = useCallback(
+    (time: number) => {
+      const next = makeSubtitleEntryAtTime(time, video?.duration || undefined)
+      setPlayRangeRequest(undefined)
+      requestSeek(next.startTime)
+      setShowOnlyErrors(false)
+      setSelectedSubtitleId(next.id)
+      setFocusSubtitleRequest((value) => value + 1)
+      commitSubtitleChanges([...subtitlesRef.current, next])
+    },
+    [commitSubtitleChanges, requestSeek, video?.duration],
+  )
+
+  const playSubtitleRange = useCallback((startTime: number, endTime: number) => {
+    setPlayRangeRequest({ startTime, endTime, id: Date.now() })
+  }, [])
 
   const replaceSubtitleEntries = useCallback(
     (entries: SubtitleEntry[]) => {
@@ -888,17 +942,28 @@ function App() {
           <VideoPlayer
             currentTime={currentTime}
             duration={video?.duration ?? 0}
+            focusSubtitleRequest={focusSubtitleRequest}
+            formatting={settings.formatting}
+            overlaySubtitles={regenerationPreviewEntries ?? undefined}
             playRangeRequest={playRangeRequest}
             playToggleRequest={playToggleRequest}
+            selectedSubtitleId={selectedSubtitleId}
             seekRequest={seekRequest}
             src={video?.objectUrl ?? null}
-            subtitles={regenerationPreviewEntries ?? subtitles}
+            subtitles={subtitles}
             subtitlesVisible={subtitlesVisible}
             videoRef={videoElementRef}
+            onAddSubtitleAt={addSubtitleFromPlayer}
+            onDeleteSubtitle={deleteSubtitleFromPlayer}
             onDuration={handleDuration}
+            onDuplicateSubtitle={duplicateSubtitleFromPlayer}
+            onPlayRange={playSubtitleRange}
             onTime={setCurrentTime}
             onRangePlaybackEnd={() => setRegenerationPreviewEntries(null)}
+            onSeek={requestSeek}
+            onSelectSubtitle={setSelectedSubtitleId}
             onToggleSubtitles={() => setSubtitlesVisible((visible) => !visible)}
+            onUpdateSubtitle={updateSubtitleFromPlayer}
           />
 
           <div className="utility-grid">
@@ -960,14 +1025,16 @@ function App() {
             duration={video?.duration}
             entries={subtitles}
             formatting={settings.formatting}
+            selectedEntryId={selectedSubtitleId}
             showOnlyErrors={showOnlyErrors}
             canRegenerate={Boolean(video) && !busy && !regenerationBusy}
             capturePlayheadTime={capturePlayheadTime}
             onAutoScrollChange={setAutoScroll}
             onChange={commitSubtitleChanges}
-            onPlayRange={(startTime, endTime) => setPlayRangeRequest({ startTime, endTime, id: Date.now() })}
+            onPlayRange={playSubtitleRange}
             onRegenerate={openRegenerationDialog}
             onSeek={requestSeek}
+            onSelectEntry={setSelectedSubtitleId}
             onShowOnlyErrorsChange={setShowOnlyErrors}
           />
         </div>

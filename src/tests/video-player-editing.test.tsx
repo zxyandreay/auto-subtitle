@@ -1,0 +1,154 @@
+import { act, createRef } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { VideoPlayer } from '../components/VideoPlayer'
+import { makeSubtitleEntry, sortAndRenumber } from '../subtitles/formatting'
+import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
+
+const subtitles = sortAndRenumber([
+  makeSubtitleEntry({ id: 'first', startTime: 1, endTime: 3, text: 'Canonical subtitle' }),
+  makeSubtitleEntry({ id: 'second', startTime: 4, endTime: 6, text: 'Second subtitle' }),
+])
+
+;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+describe('VideoPlayer subtitle workspace', () => {
+  let container: HTMLDivElement
+  let root: Root
+  let fullscreenElement: Element | null
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    fullscreenElement = null
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve())
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      get: () => fullscreenElement,
+    })
+    Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', {
+      configurable: true,
+      value: vi.fn(() => {
+        fullscreenElement = container.querySelector('.video-panel')
+        document.dispatchEvent(new Event('fullscreenchange'))
+        return Promise.resolve()
+      }),
+    })
+    Object.defineProperty(document, 'exitFullscreen', {
+      configurable: true,
+      value: vi.fn(() => {
+        fullscreenElement = null
+        document.dispatchEvent(new Event('fullscreenchange'))
+        return Promise.resolve()
+      }),
+    })
+    Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', { configurable: true, value: vi.fn() })
+    Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', { configurable: true, value: vi.fn() })
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    container.remove()
+    vi.restoreAllMocks()
+  })
+
+  it('pauses and adds a subtitle at the media element exact playhead', () => {
+    const onAddSubtitleAt = vi.fn()
+    const videoRef = createRef<HTMLVideoElement>()
+    renderPlayer({ onAddSubtitleAt, videoRef })
+    const video = container.querySelector('video')!
+    video.currentTime = 12.345
+
+    click(button('Add subtitle at current video time'))
+
+    expect(video.pause).toHaveBeenCalled()
+    expect(onAddSubtitleAt).toHaveBeenCalledWith(12.345)
+  })
+
+  it('uses preview subtitles only for the video overlay', () => {
+    const preview = [makeSubtitleEntry({ id: 'preview', startTime: 1, endTime: 3, text: 'Preview subtitle' })]
+    renderPlayer({ currentTime: 2, overlaySubtitles: preview, selectedSubtitleId: 'first' })
+
+    expect(container.querySelector('.subtitle-overlay')?.textContent).toContain('Preview subtitle')
+    expect((container.querySelector('textarea[aria-label="Subtitle 1 text"]') as HTMLTextAreaElement).value).toBe(
+      'Canonical subtitle',
+    )
+  })
+
+  it('selects a timeline subtitle through the controlled callback', () => {
+    const onSelectSubtitle = vi.fn()
+    renderPlayer({ onSelectSubtitle })
+
+    click(container.querySelector('[data-subtitle-id="second"]') as HTMLElement)
+
+    expect(onSelectSubtitle).toHaveBeenCalledWith('second')
+  })
+
+  it('enters and exits fullscreen on the whole player workspace', async () => {
+    renderPlayer()
+    const workspace = container.querySelector('.video-panel') as HTMLElement
+
+    click(button('Enter fullscreen subtitle workspace'))
+    await act(async () => Promise.resolve())
+
+    expect(workspace.requestFullscreen).toHaveBeenCalled()
+    expect(button('Exit fullscreen subtitle workspace')).not.toBeNull()
+
+    click(button('Exit fullscreen subtitle workspace'))
+    await act(async () => Promise.resolve())
+
+    expect(document.exitFullscreen).toHaveBeenCalled()
+    expect(button('Enter fullscreen subtitle workspace')).not.toBeNull()
+  })
+
+  it('recovers when fullscreen is denied', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', {
+      configurable: true,
+      value: vi.fn(() => Promise.reject(new Error('Denied'))),
+    })
+    renderPlayer()
+
+    click(button('Enter fullscreen subtitle workspace'))
+    await act(async () => Promise.resolve())
+
+    expect(container.textContent).toContain('Fullscreen is unavailable or was denied.')
+    expect(button('Enter fullscreen subtitle workspace')).not.toBeNull()
+  })
+
+  function renderPlayer(overrides: Partial<React.ComponentProps<typeof VideoPlayer>> = {}) {
+    act(() => {
+      root.render(
+        <VideoPlayer
+          currentTime={0}
+          duration={20}
+          formatting={DEFAULT_FORMATTING_PREFERENCES}
+          src="blob:test-video"
+          subtitles={subtitles}
+          subtitlesVisible
+          videoRef={createRef<HTMLVideoElement>()}
+          onAddSubtitleAt={() => undefined}
+          onDeleteSubtitle={() => undefined}
+          onDuplicateSubtitle={() => undefined}
+          onDuration={() => undefined}
+          onPlayRange={() => undefined}
+          onSeek={() => undefined}
+          onSelectSubtitle={() => undefined}
+          onTime={() => undefined}
+          onToggleSubtitles={() => undefined}
+          onUpdateSubtitle={() => undefined}
+          {...overrides}
+        />,
+      )
+    })
+  }
+
+  function button(label: string): HTMLButtonElement {
+    return container.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement
+  }
+})
+
+function click(element: HTMLElement): void {
+  act(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+}

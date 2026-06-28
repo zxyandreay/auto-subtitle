@@ -156,6 +156,8 @@ The core design is a single-page app with a worker-backed transcription provider
 | `autosave` | Loaded autosave metadata and project contents. |
 | `autoScroll` | Whether the editor scrolls the active subtitle into view. |
 | `showOnlyErrors` | Whether the editor filters rows to entries with validation issues. |
+| `selectedSubtitleId` | Shared selection for the player timeline, player editor, and main subtitle editor. |
+| `focusSubtitleRequest` | Monotonic request used to focus newly added or duplicated text in the player editor. |
 | `shiftMilliseconds` | Global timing shift amount. |
 | `includeTranscriptTimestamps` | Whether TXT export includes timestamps. |
 | `seekRequest` | Imperative seek request sent to the video player. |
@@ -201,6 +203,8 @@ flowchart TB
     Toolbar --> Export["Export SRT, VTT, TXT, JSON"]
     DropZone --> VideoFile["Selected video File"]
     VideoPlayer --> Overlay["Active subtitle overlay"]
+    VideoPlayer --> Timeline["Interactive subtitle timeline"]
+    VideoPlayer --> PlayerEditor["Selected subtitle editor"]
     TranscriptionPanel --> WorkerJob["Transcription job"]
     FormattingPanel --> Preferences["Formatting preferences"]
     GlobalTools --> BatchOps["Shift, normalize, clean, jump, undo, redo"]
@@ -214,7 +218,9 @@ flowchart TB
 | --- | --- | --- |
 | `ProjectToolbar` | `src/components/ProjectToolbar.tsx` | Caption-symbol branding plus project-level import, restore, export, clearing, and theme actions. |
 | `FileDropZone` | `src/components/FileDropZone.tsx` | Drag/drop and file picker for video files, file facts, validation messages, and removal. |
-| `VideoPlayer` | `src/components/VideoPlayer.tsx` | HTML video preview, playback controls, range seek, volume, fullscreen, subtitle overlay, active subtitle lookup. |
+| `VideoPlayer` | `src/components/VideoPlayer.tsx` | Controlled media/fullscreen workspace containing video, overlay, playback controls, timeline, and player subtitle editor. |
+| `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Zoomable/scrollable cue track, playhead follow, selection, validation styling, pointer-captured timing edits, and keyboard nudging. |
+| `PlayerSubtitleEditor` | `src/components/PlayerSubtitleEditor.tsx` | Selected-cue text/timestamp editing, navigation, seek, range playback, duplicate, and delete actions. |
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
@@ -1102,6 +1108,10 @@ The editor supports:
 22. Inline text editing.
 23. Text reformatting on blur.
 
+The player uses the same `SubtitleEntry[]` and `commitSubtitleChanges` path. Its timeline positions cues by media time, provides 12/24/48/96 pixels-per-second zoom plus fit and follow modes, and renders active, selected, warning, and error states. Pointer-captured dragging previews locally and commits once on release; start/end handles enforce a positive range and prefer the configured minimum duration, while cue-body dragging preserves duration. Soft snapping prefers the playhead and neighboring boundaries before half-second marks, and unresolved overlaps remain ordinary validation issues.
+
+Player insertion pauses the media element, captures its exact `currentTime`, creates the existing two-second manual cue (shortened at the known video end), reveals it if error filtering was active, selects it in both editors, and focuses player text. Fullscreen is requested on the entire player workspace so video, overlay, playback controls, timeline, editing panel, and mutation actions remain available. Narrow layouts keep the timeline horizontally scrollable and use a collapsible sticky editing panel.
+
 Timestamp input accepts:
 
 1. `HH:MM:SS.mmm`
@@ -1391,6 +1401,9 @@ They cover:
 59. Bounded diagnostic persistence, oversized-text sampling, storage-failure fallback, and report metadata.
 60. Raw ASR repetition/chunk summaries and normalized segment evidence.
 61. Non-terminal worker diagnostic routing and the top-toolbar debug export action.
+62. Timeline movement, resizing, minimum ranges, boundary clamping, snapping precedence, and overlap visibility.
+63. Player timestamp editing, text formatting, navigation, duplication, deletion, and exact-playhead insertion callbacks.
+64. Player/main-editor selection synchronization and mocked fullscreen entry, exit, and denial handling.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1404,6 +1417,9 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 | Ctrl+Z or Cmd+Z | Undo subtitle edit. |
 | Ctrl+Shift+Z, Cmd+Shift+Z, Ctrl+Y, or Cmd+Y | Redo subtitle edit. |
 | Enter on a subtitle row | Seek to that subtitle's start time. |
+| Enter or Space on a timeline cue | Select the cue and seek to its start. |
+| Arrow Left or Arrow Right on a timeline cue | Move the cue by 0.1 seconds; hold Shift for 0.5 seconds. |
+| Arrow Left or Arrow Right on a focused timeline handle | Adjust its start or end boundary by 0.1 seconds; hold Shift for 0.5 seconds. |
 
 ## Known Limitations
 
