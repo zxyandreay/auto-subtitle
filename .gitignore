@@ -19,6 +19,7 @@ lerna-debug.log*
 .env
 .env.*
 *.local
+commit-and-push.bat
 
 # Local media and generated output
 *.mp4
