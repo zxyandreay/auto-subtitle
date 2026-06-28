@@ -31,6 +31,11 @@ export type FormattingPreferences = {
   maxDuration: number
   gapBetweenSubtitles: number
   useWordTimestamps: boolean
+  subtitleLeadIn: number
+  subtitleTailPadding: number
+  targetMaxCps: number
+  hardMaxCps: number
+  closeGapsBelow: number
 }
 
 export const DEFAULT_FORMATTING_PREFERENCES: FormattingPreferences = {
@@ -38,8 +43,13 @@ export const DEFAULT_FORMATTING_PREFERENCES: FormattingPreferences = {
   maxCharsPerSubtitle: 84,
   minDuration: 1.1,
   maxDuration: 6,
-  gapBetweenSubtitles: 0.04,
-  useWordTimestamps: false,
+  gapBetweenSubtitles: 0.08,
+  useWordTimestamps: true,
+  subtitleLeadIn: 0.08,
+  subtitleTailPadding: 0.18,
+  targetMaxCps: 20,
+  hardMaxCps: 21,
+  closeGapsBelow: 0.5,
 }
 
 export type ProjectMetadata = {

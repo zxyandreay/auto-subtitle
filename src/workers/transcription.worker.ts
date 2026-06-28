@@ -5,6 +5,9 @@ import wasmUrl from '@ffmpeg/core/wasm?url'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import { constrainSegmentsToRange } from '../subtitles/regeneration'
 import { buildAudioExtractionArgs, type AudioExtractionRange } from '../transcription/audioExtraction'
+import { findUncoveredSpeechRanges } from '../transcription/coverage'
+import { reconcileBoundarySegments } from '../transcription/reconciliation'
+import { createRepairWindowPlans, selectRepairSegments } from '../transcription/repair'
 import {
   getSpeechModelOption,
   resolveSpeechModelRuntimeSettings,
@@ -19,6 +22,10 @@ import {
   type RegenerationDecodingProfile,
 } from '../transcription/regeneration'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
+import { isWordTimestampUnsupportedError } from '../transcription/timestampSupport'
+import { safelyDetectSpeechRegions, type SpeechRegion } from '../transcription/speechActivity'
+import { refineSegmentsToSpeechBoundaries } from '../transcription/timingRefinement'
+import { normalizeTranscriptionSettings } from '../transcription/types'
 import type {
   RegenerationCandidate,
   RegenerationRange,
@@ -27,7 +34,10 @@ import type {
   WorkerEvent,
   WorkerRequest,
 } from '../transcription/types'
-import { createTranscriptionWindowPlan } from '../transcription/windowing'
+import {
+  createSpeechAwareTranscriptionWindowPlan,
+  createTranscriptionWindowPlan,
+} from '../transcription/windowing'
 
 let cancelled = false
 
@@ -116,8 +126,13 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   lastOverallProgress = 0
   const task =
     request.type === 'regenerate'
-      ? regenerate(request.file, request.settings, request.range, request.videoDuration)
-      : transcribe(request.file, request.settings)
+      ? regenerate(
+          request.file,
+          normalizeTranscriptionSettings(request.settings).settings,
+          request.range,
+          request.videoDuration,
+        )
+      : transcribe(request.file, normalizeTranscriptionSettings(request.settings).settings)
 
   task.catch((error: unknown) => {
     postTerminalLog({
@@ -168,6 +183,16 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   }
 
   assertNotCancelled()
+  postProgress('analyzing-speech', 'Analyzing speech activity locally.')
+  const speechRegions = analyzeSpeechActivity(audio, effectiveSettings)
+
+  assertNotCancelled()
+  postProgress(
+    'planning-windows',
+    speechRegions.length ? 'Planning speech-aware transcription windows.' : 'Planning safe fallback windows.',
+  )
+
+  assertNotCancelled()
   postProgress(
     'downloading-model',
     `Loading ${model.shortLabel} from the browser cache or model repository.`,
@@ -180,7 +205,7 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
   try {
     assertNotCancelled()
     postProgress('transcribing', 'Transcribing speech locally with Whisper.')
-    const result = await transcribeInWindows(transcriber, audio, effectiveSettings)
+    const result = await transcribeInWindows(transcriber, audio, effectiveSettings, speechRegions)
 
     assertNotCancelled()
     postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
@@ -245,6 +270,13 @@ async function regenerate(
     return
   }
 
+  postProgress('analyzing-speech', 'Analyzing speech activity in the selected range.')
+  const speechRegions = analyzeSpeechActivity(audio, effectiveSettings).map((region) => ({
+    ...region,
+    startTime: region.startTime + extractionRange.extractionStartTime,
+    endTime: region.endTime + extractionRange.extractionStartTime,
+  }))
+
   assertNotCancelled()
   postProgress(
     'downloading-model',
@@ -278,8 +310,16 @@ async function regenerate(
         offsetSeconds: extractionRange.extractionStartTime,
         coreStartTime: range.startTime,
         coreEndTime: range.endTime,
+        speechRegions,
       })
-      const segments = constrainSegmentsToRange(normalized.segments, range)
+      const segments = constrainSegmentsToRange(
+        refineSegmentsToSpeechBoundaries(normalized.segments, speechRegions, {
+          leadInSeconds: effectiveSettings.formatting.subtitleLeadIn,
+          tailPaddingSeconds: effectiveSettings.formatting.subtitleTailPadding,
+          minimumGapSeconds: effectiveSettings.formatting.gapBetweenSubtitles,
+        }),
+        range,
+      )
       const text = segments.map((segment) => segment.text).join(' ').replace(/\s+/g, ' ').trim()
 
       if (text) {
@@ -360,9 +400,10 @@ async function transcribeInWindows(
   transcriber: BrowserAsrTranscriber,
   audio: DecodedAudio,
   settings: TranscriptionSettings,
+  speechRegions: SpeechRegion[],
 ): Promise<NormalizedAsrResult> {
-  const windows = createTranscriptionWindows(audio, settings)
-  const allSegments: RawTranscriptionSegment[] = []
+  const windows = createTranscriptionWindows(audio, settings, speechRegions)
+  let allSegments: RawTranscriptionSegment[] = []
   const textParts: string[] = []
   let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
 
@@ -381,13 +422,22 @@ async function transcribeInWindows(
       offsetSeconds: window.sliceStartTime,
       coreStartTime: window.coreStartTime,
       coreEndTime: window.coreEndTime,
+      speechRegions,
     })
 
     if (normalized.text) {
       textParts.push(normalized.text)
     }
 
-    allSegments.push(...normalized.segments)
+    allSegments = reconcileBoundarySegments(
+      allSegments,
+      normalized.segments,
+      window.coreStartTime,
+      {
+        maxSubtitleDuration: settings.formatting.maxDuration,
+        hardMaxCps: settings.formatting.hardMaxCps,
+      },
+    )
     postPartialResult(allSegments, textParts, settings.modelId)
     postCaptionSegments(normalized.segments)
     postProgress(
@@ -397,9 +447,76 @@ async function transcribeInWindows(
     )
   }
 
+  assertNotCancelled()
+  postProgress('checking-coverage', 'Checking subtitle coverage against detected speech.')
+  const uncoveredRanges = findUncoveredSpeechRanges(speechRegions, allSegments)
+
+  if (settings.repairEnabled && uncoveredRanges.length) {
+    const repairWindows = createRepairWindowPlans(uncoveredRanges, audio.samples.length / audio.sampleRate, {
+      contextSeconds: settings.repairContextSeconds,
+      maxModelInputSeconds: settings.maxModelInputSeconds,
+      maxRepairRanges: settings.maxRepairRanges,
+      minimumSubtitleGapSeconds: settings.formatting.gapBetweenSubtitles,
+    })
+
+    for (const [repairIndex, repairWindow] of repairWindows.entries()) {
+      assertNotCancelled()
+      postProgress(
+        'repairing-coverage',
+        `Recovering missed speech ${repairIndex + 1} of ${repairWindows.length}.`,
+        repairIndex / repairWindows.length,
+      )
+      const startSample = Math.floor(repairWindow.sliceStartTime * audio.sampleRate)
+      const requestedEndSample = Math.max(
+        startSample + 1,
+        Math.ceil(repairWindow.sliceEndTime * audio.sampleRate),
+      )
+      const maximumSamples = Math.max(1, Math.floor(settings.maxModelInputSeconds * audio.sampleRate))
+      const endSample = Math.min(audio.samples.length, requestedEndSample, startSample + maximumSamples)
+      const attempt = await transcribeWindowWithTimestampFallback(
+        transcriber,
+        audio.samples.subarray(startSample, endSample),
+        settings,
+        timestampMode,
+      )
+      timestampMode = attempt.timestampMode
+      const normalized = normalizeAsrResult(attempt.result, {
+        offsetSeconds: startSample / audio.sampleRate,
+        fallbackStartTime: repairWindow.gapStartTime,
+        fallbackEndTime: repairWindow.gapEndTime,
+        speechRegions,
+      })
+      const gap = { startTime: repairWindow.gapStartTime, endTime: repairWindow.gapEndTime }
+      const recovered = selectRepairSegments(allSegments, normalized.segments, gap, {
+        minimumSubtitleGapSeconds: settings.formatting.gapBetweenSubtitles,
+      })
+      if (recovered.length) {
+        allSegments = [...allSegments, ...recovered].sort(
+          (first, second) => first.startTime - second.startTime || first.endTime - second.endTime,
+        )
+        postCaptionSegments(recovered)
+        postPartialResult(allSegments, textParts, settings.modelId)
+      }
+      postProgress(
+        'repairing-coverage',
+        `Completed missed-speech recovery ${repairIndex + 1} of ${repairWindows.length}.`,
+        (repairIndex + 1) / repairWindows.length,
+      )
+    }
+  }
+
+  assertNotCancelled()
+  postProgress('refining-timing', 'Refining subtitle timing around speech boundaries.')
+  allSegments = refineSegmentsToSpeechBoundaries(allSegments, speechRegions, {
+    leadInSeconds: settings.formatting.subtitleLeadIn,
+    tailPaddingSeconds: settings.formatting.subtitleTailPadding,
+    minimumGapSeconds: settings.formatting.gapBetweenSubtitles,
+  })
+  postPartialResult(allSegments, textParts, settings.modelId)
+
   return {
     segments: allSegments,
-    text: textParts.join(' ').replace(/\s+/g, ' ').trim(),
+    text: allSegments.map((segment) => segment.text).join(' ').replace(/\s+/g, ' ').trim(),
   }
 }
 
@@ -456,13 +573,25 @@ function createAsrCallOptions(
   }
 }
 
-function createTranscriptionWindows(audio: DecodedAudio, settings: TranscriptionSettings): TranscriptionWindow[] {
+function createTranscriptionWindows(
+  audio: DecodedAudio,
+  settings: TranscriptionSettings,
+  speechRegions: SpeechRegion[],
+): TranscriptionWindow[] {
   const duration = audio.samples.length / audio.sampleRate
-  const plan = createTranscriptionWindowPlan(
-    duration,
-    settings.chunkLengthSeconds,
-    settings.strideLengthSeconds,
-  )
+  const maximumInputSeconds = Math.min(settings.maxModelInputSeconds, settings.chunkLengthSeconds)
+  const speechAwarePlan = speechRegions.length
+    ? createSpeechAwareTranscriptionWindowPlan(duration, speechRegions, {
+        maxModelInputSeconds: maximumInputSeconds,
+        targetChunkSeconds: Math.min(settings.targetChunkSeconds, maximumInputSeconds),
+        overlapSeconds: settings.speechAwareOverlapSeconds,
+        hardMinWindowSeconds: settings.hardMinWindowSeconds,
+      })
+    : null
+  const plan =
+    speechAwarePlan?.windows.length
+      ? speechAwarePlan
+      : createTranscriptionWindowPlan(duration, maximumInputSeconds, settings.fallbackOverlapSeconds)
   const maxWindowSamples = Math.max(1, Math.floor(plan.windowSeconds * audio.sampleRate))
 
   return plan.windows.map((timing, index) => {
@@ -481,13 +610,20 @@ function createTranscriptionWindows(audio: DecodedAudio, settings: Transcription
   })
 }
 
-function isWordTimestampUnsupportedError(error: unknown): boolean {
-  const message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error)
-  return (
-    message.includes('Model outputs must contain cross attentions to extract timestamps') ||
-    message.includes('token-level timestamps not available') ||
-    message.includes('output_attentions=True')
-  )
+function analyzeSpeechActivity(audio: DecodedAudio, settings: TranscriptionSettings): SpeechRegion[] {
+  if (!settings.vadEnabled) {
+    return []
+  }
+  return safelyDetectSpeechRegions(audio.samples, audio.sampleRate, {
+    frameMs: settings.vadFrameMs,
+    hopMs: settings.vadHopMs,
+    minSpeechMs: settings.vadMinSpeechMs,
+    mergeGapMs: settings.vadMergeGapMs,
+    prePaddingMs: settings.vadPrePaddingMs,
+    postPaddingMs: settings.vadPostPaddingMs,
+    noiseFloorMultiplier: settings.vadNoiseFloorMultiplier,
+    minimumRmsFloor: settings.vadMinimumRmsFloor,
+  })
 }
 
 async function extractAudio(
@@ -720,15 +856,35 @@ function getOverallProgress(stage: TranscriptionStage, progress = 0): number {
     }
 
     if (stage === 'downloading-model') {
-      return 0.3 + stageProgress * 0.25
+      return 0.34 + stageProgress * 0.18
+    }
+
+    if (stage === 'analyzing-speech') {
+      return 0.31
+    }
+
+    if (stage === 'planning-windows') {
+      return 0.33
     }
 
     if (stage === 'transcribing') {
-      return 0.55 + stageProgress * 0.4
+      return 0.52 + stageProgress * 0.34
+    }
+
+    if (stage === 'checking-coverage') {
+      return 0.88
+    }
+
+    if (stage === 'repairing-coverage') {
+      return 0.89 + stageProgress * 0.06
+    }
+
+    if (stage === 'refining-timing') {
+      return 0.96
     }
 
     if (stage === 'formatting-subtitles') {
-      return 0.97
+      return 0.98
     }
 
     if (stage === 'complete') {

@@ -11,14 +11,14 @@ import type { RegenerationCandidate, RegenerationRange } from '../transcription/
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
 
 describe('regeneration ranges', () => {
-  it('accepts a positive range no longer than 30 seconds', () => {
-    expect(validateRegenerationRange({ startTime: 12, endTime: 42 }, 60)).toBeNull()
+  it('accepts a positive range no longer than the safe 29-second model budget', () => {
+    expect(validateRegenerationRange({ startTime: 12, endTime: 41 }, 60)).toBeNull()
   })
 
   it('rejects invalid, excessive, and out-of-video ranges', () => {
     expect(validateRegenerationRange({ startTime: 4, endTime: 4 }, 60)).toBe('End time must be after start time.')
-    expect(validateRegenerationRange({ startTime: 0, endTime: 30.001 }, 60)).toBe(
-      'Regeneration ranges cannot exceed 30 seconds.',
+    expect(validateRegenerationRange({ startTime: 0, endTime: 29.001 }, 60)).toBe(
+      'Regeneration ranges cannot exceed 29 seconds.',
     )
     expect(validateRegenerationRange({ startTime: 55, endTime: 61 }, 60)).toBe(
       'The regeneration range must stay within the video duration.',
@@ -30,13 +30,13 @@ describe('regeneration ranges', () => {
       extractionStartTime: 8,
       extractionEndTime: 22,
     })
-    expect(planRegenerationAudioRange({ startTime: 10, endTime: 39 }, 60)).toEqual({
+    expect(planRegenerationAudioRange({ startTime: 10, endTime: 38 }, 60)).toEqual({
       extractionStartTime: 9.5,
-      extractionEndTime: 39.5,
+      extractionEndTime: 38.5,
     })
-    expect(planRegenerationAudioRange({ startTime: 0, endTime: 30 }, 60)).toEqual({
+    expect(planRegenerationAudioRange({ startTime: 0, endTime: 29 }, 60)).toEqual({
       extractionStartTime: 0,
-      extractionEndTime: 30,
+      extractionEndTime: 29,
     })
   })
 })
@@ -108,7 +108,7 @@ describe('regenerated subtitle replacement', () => {
     )
 
     expect(result.map(({ id }) => id)).toEqual(['before', 'new', 'after'])
-    expect(result[1]).toMatchObject({ startTime: 10.04, endTime: 14.96, text: 'Replacement' })
+    expect(result[1]).toMatchObject({ startTime: 10.08, endTime: 14.92, text: 'Replacement' })
     expect(result.map(({ index }) => index)).toEqual([1, 2, 3])
   })
 

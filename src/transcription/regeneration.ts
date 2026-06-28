@@ -1,7 +1,7 @@
 import { normalizeForDuplicateComparison } from '../subtitles/formatting'
 import type { RegenerationCandidate, RegenerationRange } from './types'
 
-export const MAX_REGENERATION_RANGE_SECONDS = 30
+export const MAX_REGENERATION_RANGE_SECONDS = 29
 export const MAX_REGENERATION_CONTEXT_SECONDS = 2
 export const MAX_REGENERATION_CANDIDATES = 3
 

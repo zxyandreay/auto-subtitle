@@ -131,14 +131,15 @@ export function TranscriptionPanel({
           Chunk length
           <input
             min={15}
-            max={60}
-            step={5}
+            max={29}
+            step={1}
             type="number"
             value={settings.chunkLengthSeconds}
             onChange={(event) =>
               onSettingsChange({
                 ...settings,
-                chunkLengthSeconds: Number(event.target.value),
+                chunkLengthSeconds: Math.min(29, Number(event.target.value)),
+                maxModelInputSeconds: Math.min(29, Number(event.target.value)),
               })
             }
           />
@@ -156,6 +157,7 @@ export function TranscriptionPanel({
               onSettingsChange({
                 ...settings,
                 strideLengthSeconds: Number(event.target.value),
+                fallbackOverlapSeconds: Number(event.target.value),
               })
             }
           />
@@ -241,7 +243,12 @@ function stageLabel(stage: TranscriptionProgress['stage']): string {
     'downloading-model': 'Loading speech model',
     'preparing-video': 'Preparing video',
     'extracting-audio': 'Extracting audio',
+    'analyzing-speech': 'Analyzing speech activity',
+    'planning-windows': 'Planning speech-aware windows',
     transcribing: 'Transcribing',
+    'checking-coverage': 'Checking subtitle coverage',
+    'repairing-coverage': 'Recovering missed speech',
+    'refining-timing': 'Refining subtitle timing',
     'formatting-subtitles': 'Formatting subtitles',
     complete: 'Complete',
     cancelled: 'Cancelled',

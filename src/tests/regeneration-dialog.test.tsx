@@ -34,11 +34,11 @@ describe('RegenerationDialog', () => {
     expect(container.querySelector('[role="dialog"]')).not.toBeNull()
   })
 
-  it('blocks generation when the edited range exceeds 30 seconds', () => {
+  it('blocks generation when the edited range exceeds 29 seconds', () => {
     renderDialog()
     changeInput(input('Regeneration end time'), '00:00:43.000')
 
-    expect(container.textContent).toContain('Regeneration ranges cannot exceed 30 seconds.')
+    expect(container.textContent).toContain('Regeneration ranges cannot exceed 29 seconds.')
     expect(button('Generate alternatives').disabled).toBe(true)
   })
 

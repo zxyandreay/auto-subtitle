@@ -2,7 +2,11 @@ import { sortAndRenumber } from './formatting'
 import { validateSubtitles } from './validation'
 import type { AutoSubtitleProject, FormattingPreferences, SubtitleEntry } from '../types/subtitles'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
-import { BASE_MODEL_ID, resolveCompatibleModelId } from '../transcription/models'
+import {
+  DEFAULT_TRANSCRIPTION_SETTINGS,
+  normalizeFormattingPreferences,
+  normalizeTranscriptionSettings,
+} from '../transcription/types'
 import { formatSrtTimestamp, formatVttTimestamp } from '../utils/time'
 
 export function exportSrt(entries: SubtitleEntry[]): string {
@@ -106,8 +110,13 @@ export function validateProject(value: unknown): {
     ? value.subtitles.flatMap((entry, index) => normalizeProjectEntry(entry, index, errors))
     : []
 
-  const formatting = normalizeFormatting(value.formatting)
-  const normalizedTranscriptionSettings = normalizeProjectTranscriptionSettings(value.transcriptionSettings)
+  const formatting = normalizeFormattingPreferences(value.formatting, DEFAULT_FORMATTING_PREFERENCES)
+  const normalizedTranscriptionSettings = isRecord(value.transcriptionSettings)
+    ? normalizeTranscriptionSettings(value.transcriptionSettings, {
+        ...DEFAULT_TRANSCRIPTION_SETTINGS,
+        formatting,
+      })
+    : undefined
   const project: AutoSubtitleProject = {
     metadata: {
       appName: 'Auto Subtitle',
@@ -123,7 +132,9 @@ export function validateProject(value: unknown): {
     },
     subtitles: sortAndRenumber(subtitles),
     formatting,
-    transcriptionSettings: normalizedTranscriptionSettings.settings,
+    transcriptionSettings: normalizedTranscriptionSettings
+      ? { ...normalizedTranscriptionSettings.settings, formatting }
+      : undefined,
   }
 
   const validationErrors = validateSubtitles(project.subtitles, project.metadata.videoDuration)
@@ -133,7 +144,7 @@ export function validateProject(value: unknown): {
   return {
     project: errors.length === 0 ? project : undefined,
     errors: [...errors, ...validationErrors],
-    warnings: normalizedTranscriptionSettings.reason ? [normalizedTranscriptionSettings.reason] : [],
+    warnings: normalizedTranscriptionSettings?.reason ? [normalizedTranscriptionSettings.reason] : [],
   }
 }
 
@@ -173,59 +184,6 @@ function normalizeProjectEntry(entry: unknown, index: number, errors: string[]):
       words: Array.isArray(entry.words) ? entry.words.filter(isWord) : undefined,
     },
   ]
-}
-
-function normalizeFormatting(value: unknown): FormattingPreferences {
-  if (!isRecord(value)) {
-    return DEFAULT_FORMATTING_PREFERENCES
-  }
-
-  return {
-    maxCharsPerLine: numberOrDefault(value.maxCharsPerLine, DEFAULT_FORMATTING_PREFERENCES.maxCharsPerLine),
-    maxCharsPerSubtitle: numberOrDefault(
-      value.maxCharsPerSubtitle,
-      DEFAULT_FORMATTING_PREFERENCES.maxCharsPerSubtitle,
-    ),
-    minDuration: numberOrDefault(value.minDuration, DEFAULT_FORMATTING_PREFERENCES.minDuration),
-    maxDuration: numberOrDefault(value.maxDuration, DEFAULT_FORMATTING_PREFERENCES.maxDuration),
-    gapBetweenSubtitles: numberOrDefault(
-      value.gapBetweenSubtitles,
-      DEFAULT_FORMATTING_PREFERENCES.gapBetweenSubtitles,
-    ),
-    useWordTimestamps:
-      typeof value.useWordTimestamps === 'boolean'
-        ? value.useWordTimestamps
-        : DEFAULT_FORMATTING_PREFERENCES.useWordTimestamps,
-  }
-}
-
-function normalizeProjectTranscriptionSettings(value: unknown): {
-  settings?: Record<string, unknown>
-  reason?: string
-} {
-  if (!isRecord(value)) {
-    return {}
-  }
-
-  const modelId = typeof value.modelId === 'string' ? value.modelId : BASE_MODEL_ID
-  const language = typeof value.language === 'string' ? value.language : 'auto'
-  const task = value.task === 'translate' ? 'translate' : 'transcribe'
-  const executionProvider =
-    value.executionProvider === 'webgpu' ||
-    value.executionProvider === 'wasm' ||
-    value.executionProvider === 'cpu'
-      ? value.executionProvider
-      : 'auto'
-  const resolved = resolveCompatibleModelId({ modelId, language, task, executionProvider })
-
-  return {
-    settings: { ...value, modelId: resolved.modelId },
-    reason: resolved.reason,
-  }
-}
-
-function numberOrDefault(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

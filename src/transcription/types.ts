@@ -8,7 +8,12 @@ export type TranscriptionStage =
   | 'downloading-model'
   | 'preparing-video'
   | 'extracting-audio'
+  | 'analyzing-speech'
+  | 'planning-windows'
   | 'transcribing'
+  | 'checking-coverage'
+  | 'repairing-coverage'
+  | 'refining-timing'
   | 'formatting-subtitles'
   | 'complete'
   | 'cancelled'
@@ -24,6 +29,23 @@ export type TranscriptionSettings = {
   chunkLengthSeconds: number
   strideLengthSeconds: number
   dtype: 'auto' | 'q8' | 'fp32'
+  maxModelInputSeconds: number
+  targetChunkSeconds: number
+  speechAwareOverlapSeconds: number
+  fallbackOverlapSeconds: number
+  hardMinWindowSeconds: number
+  vadEnabled: boolean
+  vadFrameMs: number
+  vadHopMs: number
+  vadMinSpeechMs: number
+  vadMergeGapMs: number
+  vadPrePaddingMs: number
+  vadPostPaddingMs: number
+  vadNoiseFloorMultiplier: number
+  vadMinimumRmsFloor: number
+  repairEnabled: boolean
+  repairContextSeconds: number
+  maxRepairRanges: number
   formatting: FormattingPreferences
 }
 
@@ -32,16 +54,38 @@ export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionSettings = {
   task: 'transcribe',
   modelId: TINY_MODEL_ID,
   executionProvider: 'auto',
-  chunkLengthSeconds: 30,
-  strideLengthSeconds: 5,
-  dtype: 'auto',
+  chunkLengthSeconds: 29,
+  strideLengthSeconds: 4,
+  dtype: 'q8',
+  maxModelInputSeconds: 29,
+  targetChunkSeconds: 26,
+  speechAwareOverlapSeconds: 1.5,
+  fallbackOverlapSeconds: 4,
+  hardMinWindowSeconds: 5,
+  vadEnabled: true,
+  vadFrameMs: 30,
+  vadHopMs: 10,
+  vadMinSpeechMs: 250,
+  vadMergeGapMs: 350,
+  vadPrePaddingMs: 200,
+  vadPostPaddingMs: 300,
+  vadNoiseFloorMultiplier: 2.5,
+  vadMinimumRmsFloor: 0.003,
+  repairEnabled: true,
+  repairContextSeconds: 0.75,
+  maxRepairRanges: 20,
   formatting: {
     maxCharsPerLine: 42,
     maxCharsPerSubtitle: 84,
     minDuration: 1.1,
     maxDuration: 6,
-    gapBetweenSubtitles: 0.04,
-    useWordTimestamps: false,
+    gapBetweenSubtitles: 0.08,
+    useWordTimestamps: true,
+    subtitleLeadIn: 0.08,
+    subtitleTailPadding: 0.18,
+    targetMaxCps: 20,
+    hardMaxCps: 21,
+    closeGapsBelow: 0.5,
   },
 }
 
@@ -57,10 +101,33 @@ export function normalizeTranscriptionSettings(
     executionProvider: isExecutionProvider(record.executionProvider)
       ? record.executionProvider
       : fallback.executionProvider,
-    chunkLengthSeconds: finiteNumberOrDefault(record.chunkLengthSeconds, fallback.chunkLengthSeconds),
+    chunkLengthSeconds: clampNumber(record.chunkLengthSeconds, 5, 29, fallback.chunkLengthSeconds),
     strideLengthSeconds: finiteNumberOrDefault(record.strideLengthSeconds, fallback.strideLengthSeconds),
     dtype: record.dtype === 'q8' || record.dtype === 'fp32' || record.dtype === 'auto' ? record.dtype : fallback.dtype,
-    formatting: normalizeStoredFormatting(record.formatting, fallback.formatting),
+    maxModelInputSeconds: clampNumber(record.maxModelInputSeconds, 5, 29, fallback.maxModelInputSeconds),
+    targetChunkSeconds: clampNumber(record.targetChunkSeconds, 5, 29, fallback.targetChunkSeconds),
+    speechAwareOverlapSeconds: finiteNumberOrDefault(
+      record.speechAwareOverlapSeconds,
+      fallback.speechAwareOverlapSeconds,
+    ),
+    fallbackOverlapSeconds: finiteNumberOrDefault(record.fallbackOverlapSeconds, fallback.fallbackOverlapSeconds),
+    hardMinWindowSeconds: finiteNumberOrDefault(record.hardMinWindowSeconds, fallback.hardMinWindowSeconds),
+    vadEnabled: booleanOrDefault(record.vadEnabled, fallback.vadEnabled),
+    vadFrameMs: finiteNumberOrDefault(record.vadFrameMs, fallback.vadFrameMs),
+    vadHopMs: finiteNumberOrDefault(record.vadHopMs, fallback.vadHopMs),
+    vadMinSpeechMs: finiteNumberOrDefault(record.vadMinSpeechMs, fallback.vadMinSpeechMs),
+    vadMergeGapMs: finiteNumberOrDefault(record.vadMergeGapMs, fallback.vadMergeGapMs),
+    vadPrePaddingMs: finiteNumberOrDefault(record.vadPrePaddingMs, fallback.vadPrePaddingMs),
+    vadPostPaddingMs: finiteNumberOrDefault(record.vadPostPaddingMs, fallback.vadPostPaddingMs),
+    vadNoiseFloorMultiplier: finiteNumberOrDefault(
+      record.vadNoiseFloorMultiplier,
+      fallback.vadNoiseFloorMultiplier,
+    ),
+    vadMinimumRmsFloor: finiteNumberOrDefault(record.vadMinimumRmsFloor, fallback.vadMinimumRmsFloor),
+    repairEnabled: booleanOrDefault(record.repairEnabled, fallback.repairEnabled),
+    repairContextSeconds: finiteNumberOrDefault(record.repairContextSeconds, fallback.repairContextSeconds),
+    maxRepairRanges: finiteNumberOrDefault(record.maxRepairRanges, fallback.maxRepairRanges),
+    formatting: normalizeFormattingPreferences(record.formatting, fallback.formatting),
   }
   const resolved = resolveCompatibleModelId(settings)
 
@@ -156,7 +223,10 @@ export type WorkerEvent =
   | WorkerRegenerationCompleteEvent
   | WorkerErrorEvent
 
-function normalizeStoredFormatting(value: unknown, fallback: FormattingPreferences): FormattingPreferences {
+export function normalizeFormattingPreferences(
+  value: unknown,
+  fallback: FormattingPreferences,
+): FormattingPreferences {
   if (!isRecord(value)) {
     return fallback
   }
@@ -169,6 +239,11 @@ function normalizeStoredFormatting(value: unknown, fallback: FormattingPreferenc
     gapBetweenSubtitles: finiteNumberOrDefault(value.gapBetweenSubtitles, fallback.gapBetweenSubtitles),
     useWordTimestamps:
       typeof value.useWordTimestamps === 'boolean' ? value.useWordTimestamps : fallback.useWordTimestamps,
+    subtitleLeadIn: finiteNumberOrDefault(value.subtitleLeadIn, fallback.subtitleLeadIn),
+    subtitleTailPadding: finiteNumberOrDefault(value.subtitleTailPadding, fallback.subtitleTailPadding),
+    targetMaxCps: finiteNumberOrDefault(value.targetMaxCps, fallback.targetMaxCps),
+    hardMaxCps: finiteNumberOrDefault(value.hardMaxCps, fallback.hardMaxCps),
+    closeGapsBelow: finiteNumberOrDefault(value.closeGapsBelow, fallback.closeGapsBelow),
   }
 }
 
@@ -178,6 +253,14 @@ function isExecutionProvider(value: unknown): value is ExecutionProvider {
 
 function finiteNumberOrDefault(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function booleanOrDefault(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  return Math.min(maximum, Math.max(minimum, finiteNumberOrDefault(value, fallback)))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

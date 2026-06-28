@@ -60,6 +60,16 @@ describe('subtitle import and export', () => {
     expect(vtt).toContain('00:00:01.200 --> 00:00:03.850')
   })
 
+  it('exports generated low-confidence fallback segments and omits invalid entries', () => {
+    const valid = makeSubtitleEntry({ startTime: 1, endTime: 2.5, text: 'Recovered locally', confidence: 0.35 })
+    const invalid = makeSubtitleEntry({ startTime: 4, endTime: 3, text: 'Invalid timing' })
+
+    const srt = exportSrt([valid, invalid])
+
+    expect(srt).toContain('Recovered locally')
+    expect(srt).not.toContain('Invalid timing')
+  })
+
   it('parses SRT and preserves line breaks', () => {
     const result = parseSrt('1\n00:00:01,000 --> 00:00:02,000\nHello\nworld\n')
 

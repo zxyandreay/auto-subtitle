@@ -10,9 +10,10 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Custom video preview with play/pause, seek, volume, fullscreen, subtitle visibility, and active subtitle overlay.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
+- Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
 - Subtitle editor with playhead-accurate manual insertion, immediate text focus, timestamp editing, validation, active-row highlighting, search, delete, split, merge, duplicate, move, jump, range playback, undo, and redo.
-- Local subtitle regeneration for editable ranges up to 30 seconds, with the original plus as many as three distinct Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
+- Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus as many as three distinct Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
@@ -103,23 +104,29 @@ The first use of a model can download its files from Hugging Face. Transformers.
 2. The app creates a temporary object URL for preview.
 3. A Web Worker loads FFmpeg.wasm and Transformers.js.
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
-5. The compatibility resolver validates the selected model, language, and task, then Transformers.js loads the resolved model from browser cache or the model repository.
-6. The worker creates model-safe audio windows no longer than Whisper's 30-second input budget, with overlap reserved inside each window instead of appended beyond it.
-7. The ASR pipeline requests timestamped output for each window.
-8. Raw model chunks are normalized onto the video timeline, assigned to the window where speech begins, and omitted from subtitle output when reliable timestamps are unavailable.
-9. After each completed audio window, partial generated subtitles are formatted and shown immediately in the subtitle editor.
-10. The user can preview, seek, and edit those live subtitles while transcription continues.
-11. A deterministic generated-caption pass removes overlap-window duplicates, uses word timestamps when available, improves readable duration, smooths abrupt cuts, chains short safe gaps, splits long captions, and applies two-line wrapping.
-12. The final formatted results settle into editable subtitle entries.
-13. The user edits and exports SRT, VTT, TXT, or JSON locally.
+5. The worker analyzes the decoded samples with a deterministic frame-based speech activity detector. It estimates a local noise floor, smooths isolated frames, merges nearby speech, and adds bounded pre/post speech padding.
+6. Detected speech regions are packed into windows near 26 seconds. Boundaries prefer silence, context overlap is normally 1.5 seconds, and every model input is capped at 29 seconds. If speech analysis yields no usable regions, contiguous fixed windows use a 4-second overlap and the same 29-second ceiling.
+7. The compatibility resolver validates the selected model, language, and task, then Transformers.js loads the resolved model from browser cache or the model repository. The ASR pipeline requests word timestamps by default; if the export does not support them, the current call is retried with segment timestamps and later windows stay in segment mode.
+8. Raw model chunks are mapped from exact sample-slice offsets back to the full video timeline. Adjacent-window text is reconciled conservatively so duplicate overlap words are removed while unique boundary words remain.
+9. Speech regions are compared with normalized subtitle coverage. Likely uncovered speech can trigger one bounded repair pass of at most 20 local windows, using the already loaded transcriber.
+10. Text-only ASR output becomes a low-confidence subtitle only when speech evidence supplies a safe interval; text returned over silence is not turned into a cue.
+11. Generated segment timestamps are snapped to nearby speech onsets/offsets with small lead-in/tail padding when this cannot create an overlap.
+12. Partial generated subtitles are shown in the editor while transcription continues, then the existing readability formatter splits, wraps, de-duplicates, and normalizes the final generated cues.
+13. The user reviews, edits, and exports SRT, VTT, TXT, or JSON locally.
 
-The 30-second ceiling follows Whisper's fixed input context, while the overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
+The 29-second ceiling leaves safety margin below Whisper's fixed input context. The overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
+
+## Accurate-local Defaults
+
+New and legacy projects are normalized to safe missing-field defaults without changing the project schema. The default profile uses automatic language detection and execution provider selection, `q8` model weights, word timestamps with segment fallback, VAD enabled, a 29-second maximum input, 26-second speech-aware target windows, 1.5-second speech-aware overlap, and 4-second fixed-window fallback overlap.
+
+Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-to-6-second cue duration, 0.08-second inter-cue gap, 42 characters per line, 84 per cue, a 20 CPS target with a 21 CPS hard limit, and safe closure of gaps below 0.5 seconds.
 
 ## Regenerating A Subtitle Range
 
 1. Select a video and create, import, or generate subtitles.
 2. Use the regenerate icon on a subtitle row.
-3. Adjust the prefilled start/end timestamps if a wider section is needed; one request is limited to 30 seconds.
+3. Adjust the prefilled start/end timestamps if a wider section is needed; one request is limited to 29 seconds.
 4. Generate alternatives. The worker extracts that range once, loads the selected Whisper model once, and performs bounded sequential decoding passes locally.
 5. Compare the unchanged current cues with up to three distinct alternatives.
 6. Preview any choice against the video without modifying the editor.
@@ -131,7 +138,7 @@ Regeneration uses the current compatible language, output task, model, engine, p
 
 Generated captions use a deterministic, local-only post-processing pass informed by public subtitle guidance from Netflix, BBC, and DCMP:
 
-- captions target about 21 characters per second and use the app's readable minimum duration when timing room allows
+- captions target about 20 characters per second, enforce a 21 CPS hard limit during timing decisions, and use the app's readable minimum duration when timing room allows
 - very short generated captions are extended before they are split or exported
 - adjacent abrupt captions can be merged when the combined caption remains within the existing line, duration, and reading-speed limits
 - gaps below about half a second are chained by extending the previous caption when safe, reducing visible flicker without pulling the next caption ahead of its words
@@ -189,8 +196,10 @@ The transcription provider boundary is intentionally small so another local engi
 - Codec support depends on the browser and FFmpeg.wasm build.
 - WebGPU is optional. The app attempts supported WebAssembly or CPU fallback paths, but speed can be much slower.
 - Word-level timestamps depend on model support and may fall back to coarser chunks.
+- Speech activity analysis can be imperfect with music, sustained background noise, overlapping speakers, or very quiet speech. A missed VAD region cannot trigger coverage repair.
+- Coverage recovery is deliberately limited to one pass and 20 ranges so difficult audio cannot cause an unbounded transcription loop.
 - Range regeneration starts a fresh worker and model pipeline for each request. Browser caching avoids unchanged model downloads, but repeated requests still require local initialization and audio extraction.
-- Generated subtitle synchronization is improved by deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
+- Generated subtitle synchronization is improved by speech-aware windowing, bounded recovery, and deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
 
 ## Troubleshooting
 

@@ -96,7 +96,7 @@ export function RegenerationDialog({
         <div className="regeneration-dialog__header">
           <div>
             <h2 id="regeneration-dialog-title">Regenerate subtitles</h2>
-            <p>Compare local Whisper alternatives for a range up to 30 seconds.</p>
+            <p>Compare local Whisper alternatives for a range up to 29 seconds.</p>
           </div>
           <button aria-label="Close regeneration dialog" className="icon-button icon-button--ghost" type="button" onClick={onCancel}>
             <X size={17} />

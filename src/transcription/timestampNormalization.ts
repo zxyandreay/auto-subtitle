@@ -1,9 +1,13 @@
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
+import type { SpeechRegion } from './speechActivity'
 
 export type AsrTimelineOptions = {
   offsetSeconds?: number
   coreStartTime?: number
   coreEndTime?: number
+  fallbackStartTime?: number
+  fallbackEndTime?: number
+  speechRegions?: SpeechRegion[]
 }
 
 export type NormalizedAsrResult = {
@@ -109,17 +113,34 @@ function createFallbackSegment(
   options?: AsrTimelineOptions,
 ): RawTranscriptionSegment[] {
   const text = fallbackText.trim()
-  if (!text || options?.coreStartTime !== undefined || options?.coreEndTime !== undefined) {
+  if (text.replace(/\s/g, '').length < 2 || !options?.speechRegions?.length) {
     return []
   }
 
-  const startTime = 0
-  const endTime = Math.max(1, text.length / 14)
+  const rangeStart = options.fallbackStartTime ?? options.coreStartTime ?? options.offsetSeconds ?? 0
+  const rangeEnd = options.fallbackEndTime ?? options.coreEndTime ?? Number.POSITIVE_INFINITY
+  const evidence = options.speechRegions
+    .map((region) => ({
+      startTime: Math.max(rangeStart, region.startTime),
+      endTime: Math.min(rangeEnd, region.endTime),
+    }))
+    .filter((region) => region.endTime - region.startTime >= 0.5)
+    .sort((first, second) => second.endTime - second.startTime - (first.endTime - first.startTime))[0]
+  if (!evidence) {
+    return []
+  }
+
+  const startTime = Math.max(rangeStart, evidence.startTime - 0.08)
+  const endTime = Math.min(rangeEnd, evidence.endTime + 0.18, startTime + 8)
+  if (endTime <= startTime) {
+    return []
+  }
   return [
     {
       startTime: roundSeconds(startTime),
       endTime: roundSeconds(endTime),
       text,
+      confidence: 0.35,
     },
   ]
 }

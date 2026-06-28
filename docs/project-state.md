@@ -96,7 +96,8 @@ The core design is a single-page app with a worker-backed transcription provider
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/models.ts`, `src/transcription/capabilities.ts` | Registers model metadata and compatibility, normalizes settings, starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
 | Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that preserve delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
 | Range regeneration | `src/transcription/regeneration.ts`, `src/subtitles/regeneration.ts` | Validates ranges, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
-| Transcription windowing | `src/transcription/windowing.ts` | Plans contiguous ownership cores and overlap context while keeping every model input within Whisper's 30-second limit. |
+| Speech activity and windowing | `src/transcription/speechActivity.ts`, `src/transcription/windowing.ts` | Detects padded speech regions locally and plans silence-preferred ownership windows within a 29-second model budget. |
+| Coverage and timing recovery | `src/transcription/coverage.ts`, `src/transcription/repair.ts`, `src/transcription/reconciliation.ts`, `src/transcription/timingRefinement.ts` | Finds likely missed speech, plans one bounded repair pass, reconciles overlap words, and snaps generated cues to safe speech boundaries. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
 | Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes full or bounded audio, loads the ASR model, transcribes windows or sequential regeneration profiles, and posts typed results. |
 | Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
@@ -534,7 +535,7 @@ Current `executionProvider` choices:
 | `wasm` | Prefer WebAssembly. |
 | `cpu` | Use CPU execution path. |
 
-Current `dtype` choices in the UI and type model are `auto`, `q8`, and `fp32`. If dtype is not `auto`, the worker passes it through to the pipeline. High-resource models recommend WebGPU and `q8`; missing WebGPU, CPU/WASM selection, and `fp32` each produce a specific warning but do not block the job.
+Current `dtype` choices in the UI and type model are `auto`, `q8`, and `fp32`. The accurate-local profile defaults to `q8`; `auto` remains accepted for legacy/imported settings. When dtype is not `auto`, the worker passes it through to the pipeline. High-resource models recommend WebGPU and `q8`; missing WebGPU, CPU/WASM selection, and `fp32` each produce a specific warning but do not block the job.
 
 Model download/cache progress is translated from Transformers.js progress callback payloads. The user-facing stage is `Loading speech model`, because files may come from either browser cache or the model repository. Technical details identify the selected label, resolved ID, resource class, engine, and dtype. The worker supports payloads with either:
 
@@ -566,6 +567,20 @@ The app configures the model through these user-facing settings:
 | Precision | pipeline `dtype` | Chooses auto, q8, or fp32 model weights. |
 | Use word timestamps | `return_timestamps` | Uses `'word'` when enabled; otherwise uses segment timestamps. |
 
+Accurate-local synchronization defaults:
+
+| Setting | Default |
+| --- | --- |
+| Language / task / provider / dtype | `auto` / `transcribe` / `auto` / `q8` |
+| Maximum input / speech target | `29.0 s` / `26.0 s` |
+| Speech-aware / fixed fallback overlap | `1.5 s` / `4.0 s` |
+| Hard minimum window | `5.0 s` |
+| VAD frame / hop / minimum speech | `30 ms` / `10 ms` / `250 ms` |
+| VAD merge gap / pre-pad / post-pad | `350 ms` / `200 ms` / `300 ms` |
+| Repair context / maximum ranges | `750 ms` per side / `20` |
+
+`normalizeTranscriptionSettings` and `normalizeFormattingPreferences` fill missing fields when schema-v1 projects or autosaves were created before these settings existed. Existing recognized values are retained, the project schema version remains unchanged, and model inputs are clamped to the 29-second safety ceiling.
+
 The worker calls the transcriber with:
 
 ```ts
@@ -578,20 +593,22 @@ The worker calls the transcriber with:
 }
 ```
 
-`chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization. Every manually prepared input is therefore kept at or below Whisper's 30-second feature-input limit.
+`chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization. Every manually prepared input is capped at 29 seconds, leaving margin below Whisper's fixed feature-input limit.
 
 For Distil Large v3, the resolver overrides the ASR call to explicit English transcription. Turbo and Distil translation requests never reach the pipeline with `task: 'translate'`; they resolve to Base first. Word-timestamp failure continues to retry the same resolved model with segment timestamps.
 
-## Audio Windowing And Timestamp Normalization
+## Speech Activity, Windowing, And Timestamp Normalization
 
 ```mermaid
 flowchart TD
     Audio["Full decoded Float32Array"] --> Duration["duration = samples.length / sampleRate"]
-    Duration --> Window["windowSeconds = min(30, max(5, setting chunk length))"]
-    Window --> Overlap["overlapSeconds = min(setting overlap, windowSeconds / 4)"]
-    Overlap --> Core["coreSeconds = windowSeconds - 2 * overlapSeconds"]
-    Core --> SliceLoop["Create each contiguous ownership core"]
-    SliceLoop --> Slice["sliceStart = max(0, coreStart - overlap)\nsliceEnd = min(duration, coreEnd + overlap)"]
+    Duration --> VAD["30 ms RMS frames, 10 ms hop, adaptive noise floor"]
+    VAD --> Regions["Smooth, merge, pad, and clamp speech regions"]
+    Regions --> Choice{"Usable speech regions?"}
+    Choice -->|Yes| Pack["Pack near 26 s; 1.5 s context overlap"]
+    Choice -->|No| Fallback["Contiguous fixed cores; 4 s overlap"]
+    Pack --> Slice["Prefer silence boundaries and preserve speech ownership"]
+    Fallback --> Slice
     Slice --> Limit["Clamp sample count to windowSeconds * sampleRate"]
     Limit --> Samples["samples.subarray(startSample, endSample)"]
     Samples --> Model["Run Whisper on slice"]
@@ -604,23 +621,29 @@ flowchart TD
     Round --> Segment["RawTranscriptionSegment"]
 ```
 
-Windowing details:
+Speech and windowing details:
 
-1. The configured chunk length represents the complete model input and is bounded to a minimum of 5 seconds and a maximum of 30 seconds.
-2. The configured overlap is bounded to no more than one quarter of that complete model window.
-3. Left and right overlap are subtracted from the ownership core: `coreSeconds = windowSeconds - (2 * overlapSeconds)`.
-4. With the default 30-second chunk and 5-second overlap, interior windows contain a 20-second core plus 5 seconds of context on each side. They are exactly 30 seconds long, never 40 seconds.
-5. First and last windows are naturally shorter when context is unavailable at the media boundary.
-6. Sample-index rounding is capped to the model-window sample budget, and `sliceStartTime` is derived from the exact first sample passed to Whisper.
-7. The ASR result is converted back to the full-video timeline by adding that exact `sliceStartTime`.
-8. A chunk's absolute start time assigns it to the core where the recognized speech begins, preventing a later window from pulling a long overlap chunk into earlier silence.
-9. Owned chunks retain their full absolute ASR start and end times, so speech crossing the right boundary is not delayed to the next core start.
-10. Valid chunks that begin in a neighboring core are discarded without recreating the window's fallback text.
-11. Times are rounded to three decimal places.
+1. `detectSpeechRegions` analyzes mono 16 kHz samples with 30 ms RMS frames and a 10 ms hop. An adaptive noise estimate, a nonzero RMS floor, isolated-frame smoothing, a 250 ms minimum, a 350 ms merge gap, and 200/300 ms pre/post padding produce deterministic regions clamped to the audio duration.
+2. Usable regions are packed into ownership spans near the 26-second target. Interior speech-aware windows use 1.5 seconds of context and never exceed the 29-second maximum.
+3. Long continuous speech is split into contiguous ownership cores with overlap context, so every detected speech instant belongs to at least one core.
+4. If VAD is disabled, fails, or yields no usable regions, the fixed planner covers the complete timeline with a default 4-second overlap and the same 29-second cap.
+5. First and last windows are naturally shorter when context is unavailable at the media boundary; tiny windows are expanded in surrounding silence toward the 5-second hard minimum where possible.
+6. Sample indices use `floor` for slice starts and `ceil` for requested ends, are capped to the exact model sample budget, and derive `sliceStartTime` from the first sample actually passed to Whisper.
+7. ASR timestamps are converted to the full-video timeline by adding that exact sample-derived offset. Chunk starts assign ownership, while crossing chunks keep their full absolute end times.
+8. Adjacent window results within two seconds of a core boundary use conservative normalized-token comparison. Near duplicates are kept once; suffix/prefix overlap is removed from the later text while unique words are retained.
+9. Times are rounded to milliseconds.
 
-This design makes progress predictable and lets the terminal show captions as each window completes. The overlap gives Whisper recognition context, while onset-based ownership prevents both late boundary clipping and early captions inherited from the left overlap.
+This design prefers cuts in silence while keeping a fixed-window fallback for difficult audio. VAD affects planning and generated-cue refinement only; it does not modify imported/manual subtitles.
 
-The window budget is synchronization-critical. The previous calculation treated a 30-second setting as a 30-second core and then appended 5 seconds on both sides. Interior calls were therefore 40 seconds long while Transformers.js internal chunking was disabled. Whisper's feature extractor only retained the first 30 seconds, silently omitting the end of those calls and breaking continuity around later core boundaries. Reserving overlap inside the 30-second budget ensures every owned timeline region is actually heard by the model. See the official [Transformers.js ASR pipeline options](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper model documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
+### Coverage Recovery And Speech-Boundary Refinement
+
+After the first normalized ASR pass, subtitle intervals are merged and compared with detected speech. Coverage uses 100 ms tolerance, ignores gaps below 250 ms, and reports a region only when at least 500 ms and 40% of that speech region remain uncovered.
+
+When repair is enabled, one pass processes at most 20 uncovered ranges. Each range receives 750 ms of context on both sides, remains below 29 seconds, and reuses the already loaded transcriber. Repair results must have valid text/timing, overlap the uncovered range, and differ from nearby existing cues. Accepted timing is clipped away from neighboring cues using the configured 80 ms gap. There is no recursive coverage loop.
+
+If ASR returns non-empty text without usable chunks, normalization creates a `confidence: 0.35` fallback only when at least 500 ms of VAD evidence exists in the owned window or repair range. The cue is bounded to that evidence, receives the normal 80/180 ms lead/tail padding, and is capped at eight seconds. Text-only output over silence remains omitted.
+
+Finally, generated raw segments may snap to a speech onset within 200 ms or an offset within 300 ms. The default 80 ms lead-in and 180 ms tail apply only when movement stays inside the search budget and adjacent proposed cues retain the configured gap. Imported and manually edited subtitles do not enter this worker refinement path.
 
 ## Timestamp Modes And Fallback
 
@@ -628,8 +651,8 @@ The worker supports two timestamp modes:
 
 | Mode | Trigger | Result |
 | --- | --- | --- |
-| Segment timestamps | Default | Returns larger timestamped chunks suitable for subtitles. |
-| Word timestamps | Enabled by formatting preference `useWordTimestamps` | Attempts word-level timing. |
+| Word timestamps | Accurate-local default | Attempts word-level timing and grouping. |
+| Segment timestamps | Automatic fallback | Used after a known word-timestamp capability failure. |
 
 Some exported Whisper models do not expose cross-attention outputs needed for word-level timestamps. When word timestamps fail with known messages such as `Model outputs must contain cross attentions to extract timestamps`, `token-level timestamps not available`, or `output_attentions=True`, the worker retries the current window with segment timestamps and uses segment timestamps for later windows.
 
@@ -651,7 +674,7 @@ The worker receives an unknown result shape from the pipeline and normalizes def
 5. Invalid chunks are dropped.
 6. Valid chunks are offset onto the full-video timeline.
 7. Boundary-crossing chunks are assigned to the core containing their absolute start time, and their original absolute in/out times are preserved.
-8. If the model returned text without usable timestamp chunks for a window, the text remains available in the plain transcript but no guessed subtitle interval is created.
+8. If the model returned text without usable timestamp chunks, VAD evidence in the owned range can provide a bounded low-confidence interval; without speech evidence, no subtitle is created.
 9. If valid chunks begin in an adjacent overlap, no fallback caption is created. This prevents neighboring speech from appearing early or being recreated late.
 
 When many chunks look word-level, the worker combines them into a single segment with a `words` array. Later formatting can split those words into readable subtitle entries if word timestamps are enabled.
@@ -689,8 +712,11 @@ Formatting preferences:
 | `maxCharsPerSubtitle` | `84` | Splitting long generated segments or grouping words. |
 | `minDuration` | `1.1` | Enforcing readable minimum subtitle duration during overlap normalization. |
 | `maxDuration` | `6` | Splitting overly long generated segments or word groups. |
-| `gapBetweenSubtitles` | `0.04` | Preventing back-to-back overlap after normalization. |
-| `useWordTimestamps` | `false` | Choosing word-level grouping when supported. |
+| `gapBetweenSubtitles` | `0.08` | Preventing back-to-back overlap after normalization. |
+| `useWordTimestamps` | `true` | Choosing word-level grouping when supported, with session fallback. |
+| `subtitleLeadIn` / `subtitleTailPadding` | `0.08` / `0.18` | Padding generated word/speech boundaries. |
+| `targetMaxCps` / `hardMaxCps` | `20` / `21` | Readable-duration target and hard timing guard. |
+| `closeGapsBelow` | `0.50` | Safely chaining short generated-cue gaps. |
 
 Best-practice inputs used for generated subtitles:
 
@@ -772,7 +798,7 @@ Live preview details:
 ```mermaid
 flowchart TD
     Row["User clicks regenerate on a subtitle row"] --> Dialog["Dialog opens with editable cue range"]
-    Dialog --> Validate{"Finite, inside video, positive, and <= 30 seconds?"}
+    Dialog --> Validate{"Finite, inside video, positive, and <= 29 seconds?"}
     Validate -->|No| RangeError["Show inline validation error"]
     Validate -->|Yes| Request["Provider posts regenerate request"]
     Request --> Extract["FFmpeg extracts range plus bounded context once"]
@@ -789,8 +815,8 @@ flowchart TD
 Regeneration details:
 
 1. A row action is enabled only when a source video is selected and no local model job is active.
-2. The dialog starts with the row's current timestamps and supports arbitrary adjusted ranges up to 30 seconds.
-3. Context planning adds up to two seconds on each side only when the complete extracted model input remains within Whisper's 30-second budget.
+2. The dialog starts with the row's current timestamps and supports arbitrary adjusted ranges up to 29 seconds.
+3. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
 4. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
 5. The current compatible model, language, task, engine, dtype, word-timestamp preference, and formatting preferences are captured when generation begins. The worker enforces compatibility again and returns the resolved model ID.
 6. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
@@ -816,9 +842,14 @@ The worker emits semantic stages and maps them to monotonic overall progress. Th
 | `loading-engine` | `0.02` |
 | `preparing-video` | `0.06` |
 | `extracting-audio` | `0.08 + stageProgress * 0.22` |
-| `downloading-model` | `0.30 + stageProgress * 0.25` |
-| `transcribing` | `0.55 + stageProgress * 0.40` |
-| `formatting-subtitles` | `0.97` |
+| `analyzing-speech` | `0.31` |
+| `planning-windows` | `0.33` |
+| `downloading-model` | `0.34 + stageProgress * 0.18` |
+| `transcribing` | `0.52 + stageProgress * 0.34` |
+| `checking-coverage` | `0.88` |
+| `repairing-coverage` | `0.89 + stageProgress * 0.06` |
+| `refining-timing` | `0.96` |
+| `formatting-subtitles` | `0.98` |
 | `complete` | `1.00` |
 | `cancelled` / `failed` | Keep last known progress |
 
@@ -1040,7 +1071,7 @@ The editor supports:
 8. Reveal the new row, focus its text area, and select the placeholder for immediate replacement; error-only filtering is disabled so the row cannot remain hidden.
 9. Add before and add after relative to an existing row, with the new row focused immediately.
 10. Open local range regeneration from any row when its source video is selected.
-11. Adjust and validate a regeneration range up to 30 seconds.
+11. Adjust and validate a regeneration range up to 29 seconds.
 12. Compare the current cues with up to three distinct local Whisper alternatives.
 13. Preview a choice against video without committing it, then keep the original or apply one undoable replacement.
 14. Delete.
@@ -1245,7 +1276,7 @@ The app intentionally keeps errors visible:
 | Model download or pipeline failure | Worker posts error with stack details when available. |
 | Word timestamp unsupported | Worker retries with segment timestamps. |
 | User cancellation | Progress becomes `cancelled`; busy state clears. |
-| Invalid regeneration range | Dialog blocks non-finite, negative, empty, out-of-video, or longer-than-30-second requests before worker startup. |
+| Invalid regeneration range | Dialog blocks non-finite, negative, empty, out-of-video, or longer-than-29-second requests before worker startup. |
 | Empty or duplicate regeneration results | Dialog explains that no distinct timestamped alternative was found; original cues remain unchanged. |
 | Regeneration failure or cancellation | Dedicated worker is terminated, temporary preview is cleared, and original cues remain unchanged. |
 | Autosave load/save failure | Warning notice; app remains usable. |
@@ -1278,7 +1309,7 @@ Vite configuration:
 
 ## Testing Coverage
 
-Current tests live in `src/tests/audio-extraction.test.ts`, `src/tests/regeneration-dialog.test.tsx`, `src/tests/regeneration-utils.test.ts`, `src/tests/subtitle-utils.test.ts`, `src/tests/transcription-models.test.ts`, `src/tests/transcription-panel.test.tsx`, `src/tests/transcription-timestamps.test.ts`, and `src/tests/transcription-windowing.test.ts`.
+Current tests live under `src/tests/`, including dedicated speech-model compatibility and selector UI, speech activity, coverage, repair, timing refinement, settings compatibility, timestamp normalization, windowing, formatting/export, regeneration, audio extraction, and dialog suites.
 
 They cover:
 
@@ -1312,15 +1343,15 @@ They cover:
 28. Preservation of absolute timestamps when speech begins before a core's right boundary.
 29. Onset-based single-core ownership for boundary-crossing chunks.
 30. Rejection of long left-overlap chunks that would place subtitles into earlier silence.
-31. Suppression of guessed window timing when a model returns text without usable timestamp chunks.
-32. Model windows that include overlap without exceeding Whisper's 30-second input budget.
+31. Evidence-bounded low-confidence timing when a model returns text without usable timestamp chunks, plus suppression over silence.
+32. Fixed and speech-aware model windows that include overlap without exceeding the 29-second safety budget.
 33. Complete, contiguous core ownership across the full audio timeline.
 34. Full-size cores when overlap is disabled and conservative clamping when overlap is excessive.
 35. Timeline-preserving FFmpeg arguments for delayed audio-track starts.
 36. Manual subtitle creation at the millisecond-rounded playhead time.
 37. Manual cue duration shortening at the known end of a video.
 38. Preservation of playhead timing while video metadata still reports an unknown zero duration.
-39. Regeneration range validation and 30-second context budgeting.
+39. Regeneration range validation and 29-second context budgeting.
 40. Fixed bounded decoding profiles and normalized candidate deduplication.
 41. Range-constrained segment timing and all-overlap cue replacement.
 42. Neighbor-gap clamping without invented gaps at an open range boundary.
@@ -1332,6 +1363,14 @@ They cover:
 48. High-resource WebGPU, precision, and CPU/WASM warnings.
 49. Project model preservation, fallback normalization, and one-time warning details.
 50. Selector model metadata, disabled incompatible options, high-resource guidance, and cache-accurate progress labels.
+51. VAD silence rejection, speech detection, padding, merging, clamping, and analysis-failure fallback.
+52. Speech-aware ownership coverage and safe splitting of long continuous regions.
+53. Coverage interval calculation, material uncovered-range detection, and tiny-gap suppression.
+54. Bounded repair planning, absolute repair offsets, nearby deduplication, and distant repeated-text preservation.
+55. Safe speech-boundary snapping without adjacent overlap.
+56. Adjacent-window duplicate removal and unique suffix/prefix word preservation.
+57. Accurate-local defaults and schema-v1 missing-field normalization.
+58. Valid export of low-confidence fallback cues while invalid entries remain omitted.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1355,11 +1394,13 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
 7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker keeps overlap inside Whisper's 30-second input budget, uses onset-based core ownership, and applies deterministic duplicate cleanup to reduce mistimed or repeated captions, but manual review is still expected.
-9. Generated subtitle timing is improved with word timestamp padding, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
-10. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
-11. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
-12. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time.
+8. Chunk-boundary quality can vary. The worker prefers VAD silence boundaries, keeps overlap inside a 29-second input budget, reconciles nearby overlap tokens, and uses onset-based ownership, but manual review is still expected.
+9. Speech activity analysis can be imperfect on music, sustained noise, overlapping speakers, and very quiet speech. Speech it fails to detect cannot trigger coverage repair.
+10. Coverage recovery is deliberately bounded to one pass and at most 20 ranges; it reduces likely omissions but cannot guarantee complete transcripts.
+11. Generated subtitle timing is improved with word timestamp padding, speech-boundary snapping, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
+12. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
+13. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
+14. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time.
 
 ## Extension Points
 
@@ -1389,10 +1430,11 @@ flowchart TD
     C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
     D --> R["Registry resolves a compatible model, language, and task"]
     R --> E["Worker loads the resolved ASR model through Transformers.js"]
-    E --> F["Worker splits decoded audio into model-safe windows with overlap inside the 30-second budget"]
+    E --> F["Worker detects speech and plans silence-preferred windows inside a 29-second budget"]
     F --> G["Whisper returns text and timestamps"]
     G --> H["Worker maps chunks to the full video timeline"]
-    H --> P["App streams partial captions into the subtitle editor"]
+    H --> COV["Worker checks coverage, repairs bounded gaps, and refines speech boundaries"]
+    COV --> P["App streams partial captions into the subtitle editor"]
     P --> I["App optimizes generated captions for timing, duplicates, and readability"]
     I --> L["App formats optimized captions into settled SubtitleEntry records"]
     L --> J["Editor validates, previews, autosaves, and lets user revise"]
