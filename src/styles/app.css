@@ -985,6 +985,17 @@ progress {
   border: 0;
 }
 
+@media (min-width: 1281px) {
+  .workspace__right {
+    contain: size;
+    min-height: 0;
+  }
+
+  .editor-panel {
+    min-height: 0;
+  }
+}
+
 @media (max-width: 1280px) {
   .workspace {
     align-items: start;
