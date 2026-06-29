@@ -60,22 +60,29 @@ describe('PlayerSubtitleEditor', () => {
     expect(textarea.value).toContain('\n')
   })
 
-  it('exposes navigation, range playback, duplication, and deletion actions', () => {
+  it('exposes navigation, range playback, regeneration, and deletion actions', () => {
     const onSelect = vi.fn()
     const onPlayRange = vi.fn()
-    const onDuplicate = vi.fn()
+    const onRegenerate = vi.fn()
     const onDelete = vi.fn()
-    renderEditor({ onSelect, onPlayRange, onDuplicate, onDelete })
+    renderEditor({ onSelect, onPlayRange, onRegenerate, onDelete })
 
     click(button('Previous subtitle'))
     click(button('Play selected subtitle range'))
-    click(button('Duplicate selected subtitle'))
+    click(button('Regenerate selected subtitle'))
     click(button('Delete selected subtitle'))
 
     expect(onSelect).toHaveBeenCalledWith('first')
     expect(onPlayRange).toHaveBeenCalledWith(3, 5)
-    expect(onDuplicate).toHaveBeenCalledWith('second')
+    expect(onRegenerate).toHaveBeenCalledOnce()
     expect(onDelete).toHaveBeenCalledWith('second')
+    expect(container.querySelector('button[aria-label="Duplicate selected subtitle"]')).toBeNull()
+  })
+
+  it('disables regeneration when no source video is available', () => {
+    renderEditor({ canRegenerate: false })
+
+    expect(button('Regenerate selected subtitle').disabled).toBe(true)
   })
 
   function renderEditor(overrides: Partial<React.ComponentProps<typeof PlayerSubtitleEditor>> = {}) {
@@ -85,8 +92,9 @@ describe('PlayerSubtitleEditor', () => {
           entries={entries}
           entry={entries[1]}
           formatting={DEFAULT_FORMATTING_PREFERENCES}
+          canRegenerate
           onDelete={() => undefined}
-          onDuplicate={() => undefined}
+          onRegenerate={() => undefined}
           onPlayRange={() => undefined}
           onSeek={() => undefined}
           onSelect={() => undefined}
@@ -105,8 +113,9 @@ describe('PlayerSubtitleEditor', () => {
           entries={state}
           entry={state[1]}
           formatting={{ ...DEFAULT_FORMATTING_PREFERENCES, maxCharsPerLine: 24 }}
+          canRegenerate
           onDelete={() => undefined}
-          onDuplicate={() => undefined}
+          onRegenerate={() => undefined}
           onPlayRange={() => undefined}
           onSeek={() => undefined}
           onSelect={() => undefined}

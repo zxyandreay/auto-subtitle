@@ -54,7 +54,6 @@ describe('player and main editor subtitle selection', () => {
             onChangeRegenerationRange={() => undefined}
             onConfigureRegeneration={() => undefined}
             onPreviewRegeneration={() => undefined}
-            onStartRegeneration={() => undefined}
           />
           <SubtitleEditor
             activeEntryId="first"
@@ -79,6 +78,8 @@ describe('player and main editor subtitle selection', () => {
     }
 
     act(() => root.render(<Harness />))
+
+    expect(container.querySelector('button[aria-label="Duplicate subtitle"]')).toBeNull()
 
     click(container.querySelector('[data-subtitle-id="second"]') as HTMLElement)
     expect(editorRow('second').className).toContain('subtitle-row--selected')

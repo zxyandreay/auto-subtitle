@@ -143,6 +143,21 @@ describe('VideoPlayer subtitle workspace', () => {
     expect(onStartRegeneration).not.toHaveBeenCalled()
   })
 
+  it('starts timeline regeneration from the selected subtitle action', () => {
+    const onStartRegeneration = vi.fn()
+    renderPlayer({
+      canRegenerate: true,
+      selectedSubtitleId: 'first',
+      onStartRegeneration,
+    })
+
+    click(button('Regenerate selected subtitle'))
+
+    expect(onStartRegeneration).toHaveBeenCalledOnce()
+    expect(container.querySelector('button[aria-label="Start timeline regeneration range"]')).toBeNull()
+    expect(container.querySelector('button[aria-label="Duplicate selected subtitle"]')).toBeNull()
+  })
+
   it('enters and exits fullscreen on the whole player workspace', async () => {
     renderPlayer()
     const workspace = container.querySelector('.video-panel') as HTMLElement
@@ -192,7 +207,6 @@ describe('VideoPlayer subtitle workspace', () => {
           videoRef={createRef<HTMLVideoElement>()}
           onAddSubtitleAt={() => undefined}
           onDeleteSubtitle={() => undefined}
-          onDuplicateSubtitle={() => undefined}
           onDuration={() => undefined}
           onPlayRange={() => undefined}
           onRedo={() => undefined}

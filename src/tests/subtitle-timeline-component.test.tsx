@@ -138,11 +138,8 @@ describe('SubtitleTimeline', () => {
   })
 
   it('starts and renders an accessible timeline regeneration range with dedicated actions', () => {
-    const onStartRegeneration = vi.fn()
-    renderTimeline({ canRegenerate: true, onStartRegeneration })
-
-    click(button('Start timeline regeneration range'))
-    expect(onStartRegeneration).toHaveBeenCalledOnce()
+    renderTimeline({ canRegenerate: true })
+    expect(button('Start timeline regeneration range')).toBeNull()
 
     const onCancelRegeneration = vi.fn()
     const onConfigureRegeneration = vi.fn()
@@ -312,7 +309,6 @@ describe('SubtitleTimeline', () => {
           onChangeRegenerationRange={() => undefined}
           onConfigureRegeneration={() => undefined}
           onPreviewRegeneration={() => undefined}
-          onStartRegeneration={() => undefined}
           onRedo={() => undefined}
           onSeek={() => undefined}
           onSelect={() => undefined}

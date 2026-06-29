@@ -160,7 +160,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | `timelineRegenerationRange` | Temporary draggable timeline range used to preview and configure regeneration. |
 | `regenerationPreferences` | Session-only language, output, model, engine, precision, timestamp, and one-to-five alternative-count choices for regeneration. |
 | `regenerationRequestContext` | Immutable range, settings, and requested-alternative-count snapshot used to format, preview, and apply one generated candidate set. |
-| `focusSubtitleRequest` | Monotonic request used to focus newly added or duplicated text in the player editor. |
+| `focusSubtitleRequest` | Monotonic request used to focus newly added text in the player editor. |
 | `shiftMilliseconds` | Global timing shift amount. |
 | `includeTranscriptTimestamps` | Whether TXT export includes timestamps. |
 | `seekRequest` | Imperative seek request sent to the video player. |
@@ -211,7 +211,7 @@ flowchart TB
     TranscriptionPanel --> WorkerJob["Transcription job"]
     FormattingPanel --> Preferences["Formatting preferences"]
     GlobalTools --> BatchOps["Shift, normalize, clean, jump, undo, redo"]
-    SubtitleEditor --> RowOps["Add, edit, split, merge, duplicate, move, delete"]
+    SubtitleEditor --> RowOps["Add, edit, split, merge, move, delete"]
     SubtitleEditor --> Regenerate["Regenerate editable subtitle range"]
 ```
 
@@ -224,7 +224,7 @@ flowchart TB
 | `GlobalVideoDropOverlay` | `src/components/GlobalVideoDropOverlay.tsx` | Window-level external-file drag detection, supported/unsupported feedback, and page-wide video dropping without intercepting internal drags. |
 | `VideoPlayer` | `src/components/VideoPlayer.tsx` | Controlled media/fullscreen workspace containing video, overlay, playback controls, timeline, and player subtitle editor. |
 | `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Continuously zoomable/scrollable cue track, empty-track seeking, draggable playhead, magnetic snapping, split/history controls, cue timing edits, and a temporary draggable regeneration range with preview/configure/cancel actions. |
-| `PlayerSubtitleEditor` | `src/components/PlayerSubtitleEditor.tsx` | Selected-cue text/timestamp editing, navigation, seek, range playback, duplicate, and delete actions. |
+| `PlayerSubtitleEditor` | `src/components/PlayerSubtitleEditor.tsx` | Selected-cue text/timestamp editing, navigation, seek, range playback, adjustable-range regeneration, and delete actions. |
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
@@ -836,8 +836,8 @@ flowchart TD
 
 Regeneration details:
 
-1. Timeline and row actions are enabled only when a source video is selected and no local model job is active.
-2. Timeline mode starts from the selected cue. Without one, it creates a five-second range centered on the playhead and shifts the range inside video boundaries. Cues longer than 29 seconds use their first valid 29-second window.
+1. The selected subtitle's player-editor Regenerate action is enabled only when a source video is selected and no local model job is active. Main-editor rows keep their direct regeneration action.
+2. The selected-subtitle action creates timeline mode from that cue. Cues longer than 29 seconds use their first valid 29-second window. The timeline toolbar exposes no idle Regenerate button; once a range exists, it shows Preview, Configure, and Cancel.
 3. The range body preserves duration while moving; start/end handles resize it. Pointer and keyboard edits reuse cue-boundary, playhead, video-boundary, and half-second-grid snapping, with Alt/Option as a temporary bypass.
 4. Preview seeks to the selected start, plays once through the selected end with current subtitles, then stops without clearing the range.
 5. The dialog exposes language, output task, model, execution provider, dtype, word/segment timestamps, and an Alternatives selector from one to five. The count defaults to three. These choices remain in memory for the browser session and never update project or full-transcription settings.
@@ -1119,15 +1119,14 @@ The editor supports:
 12. Request one to five alternatives and compare the current cues with the distinct local Whisper results.
 13. Preview a choice against video without committing it, then keep the original or apply one undoable replacement.
 14. Delete.
-15. Duplicate.
-16. Split.
-17. Merge previous and merge next.
-18. Move up and move down.
-19. Play only the current subtitle range.
-20. Seek to the subtitle start.
-21. Inline timestamp editing.
-22. Inline text editing.
-23. Text reformatting on blur.
+15. Split.
+16. Merge previous and merge next.
+17. Move up and move down.
+18. Play only the current subtitle range.
+19. Seek to the subtitle start.
+20. Inline timestamp editing.
+21. Inline text editing.
+22. Text reformatting on blur.
 
 The player uses the same `SubtitleEntry[]` and `commitSubtitleChanges` path. Its timeline positions cues by media time, provides a continuous 12–96 pixels-per-second slider plus enabled-by-default Magnet and follow toggles, and renders active, selected, warning, and error states. The toolbar duplicates the global Undo/Redo actions and adds Split-at-playhead. The local Magnet toggle controls snapping for cue bodies, start/end handles, playhead pointer/keyboard movement, and empty-track clicks without adding project persistence. Pointer-captured dragging previews locally and commits once on release; start/end handles enforce a positive range and prefer the configured minimum duration, while cue-body dragging preserves duration. Magnetic snapping uses a 10-pixel threshold at the active zoom and considers every other cue start/end, the media playhead, timeline start, known video end, and a lower-priority half-second grid. Whole-cue movement can snap either edge without changing duration. A vertical guide, label, and target accent show the active lock, and holding Alt/Option temporarily bypasses snapping while Magnet is enabled.
 
@@ -1438,6 +1437,7 @@ They cover:
 70. Enabled-by-default Magnet control and consistent snap disabling across empty-track, playhead, cue-body, and boundary interactions.
 71. One-time regeneration worker startup recovery, detailed repeated-crash errors, and fullscreen dialog portal mounting.
 72. Session-local one-to-five regeneration counts, count normalization, candidate invalidation, and immutable worker-request propagation.
+73. Selected-subtitle regeneration entry, idle timeline-button removal, active-range controls, and removal of duplicate buttons from both editors.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 

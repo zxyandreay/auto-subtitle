@@ -3,9 +3,9 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Copy,
   CornerDownRight,
   Crosshair,
+  RefreshCw,
   Trash2,
 } from 'lucide-react'
 import { memo, useEffect, useRef, useState } from 'react'
@@ -21,9 +21,10 @@ type PlayerSubtitleEditorProps = {
   duration?: number
   formatting: FormattingPreferences
   focusRequest?: number
+  canRegenerate: boolean
   onUpdate: (id: string, patch: Partial<SubtitleEntry>) => void
   onDelete: (id: string) => void
-  onDuplicate: (id: string) => void
+  onRegenerate: () => void
   onSelect: (id: string) => void
   onSeek: (time: number) => void
   onPlayRange: (startTime: number, endTime: number) => void
@@ -35,9 +36,10 @@ export const PlayerSubtitleEditor = memo(function PlayerSubtitleEditor({
   duration,
   formatting,
   focusRequest,
+  canRegenerate,
   onUpdate,
   onDelete,
-  onDuplicate,
+  onRegenerate,
   onSelect,
   onSeek,
   onPlayRange,
@@ -109,8 +111,12 @@ export const PlayerSubtitleEditor = memo(function PlayerSubtitleEditor({
             <IconButton label="Play selected subtitle range" onClick={() => onPlayRange(entry.startTime, entry.endTime)}>
               <CornerDownRight size={16} />
             </IconButton>
-            <IconButton label="Duplicate selected subtitle" onClick={() => onDuplicate(entry.id)}>
-              <Copy size={16} />
+            <IconButton
+              label="Regenerate selected subtitle"
+              disabled={!canRegenerate}
+              onClick={onRegenerate}
+            >
+              <RefreshCw size={16} />
             </IconButton>
             <IconButton label="Delete selected subtitle" variant="danger" onClick={() => onDelete(entry.id)}>
               <Trash2 size={16} />

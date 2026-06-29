@@ -1,4 +1,4 @@
-import { LocateFixed, Magnet, Play, RefreshCw, RotateCcw, RotateCw, Scissors, Settings2, X } from 'lucide-react'
+import { LocateFixed, Magnet, Play, RotateCcw, RotateCw, Scissors, Settings2, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSubtitleTimelineDrag } from '../hooks/useSubtitleTimelineDrag'
@@ -34,7 +34,6 @@ type SubtitleTimelineProps = {
   onRedo: () => void
   onSplitAtPlayhead: () => void
   onUndo: () => void
-  onStartRegeneration: () => void
   onChangeRegenerationRange: (range: RegenerationRange) => void
   onPreviewRegeneration: () => void
   onConfigureRegeneration: () => void
@@ -65,7 +64,6 @@ export function SubtitleTimeline({
   onRedo,
   onSplitAtPlayhead,
   onUndo,
-  onStartRegeneration,
   onChangeRegenerationRange,
   onPreviewRegeneration,
   onConfigureRegeneration,
@@ -442,16 +440,7 @@ export function SubtitleTimeline({
                 <X size={16} />
               </IconButton>
             </>
-          ) : (
-            <IconButton
-              label="Start timeline regeneration range"
-              disabled={!canRegenerate}
-              title="Choose a timeline range to regenerate"
-              onClick={onStartRegeneration}
-            >
-              <RefreshCw size={16} />
-            </IconButton>
-          )}
+          ) : null}
           <IconButton
             label={snappingEnabled ? 'Disable timeline magnetic snapping' : 'Enable timeline magnetic snapping'}
             variant={snappingEnabled ? 'soft' : 'ghost'}

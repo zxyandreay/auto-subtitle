@@ -15,7 +15,6 @@ import { findFirstValidVideoFile, getDurationWarning, validateVideoFile, type Vi
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
 import {
   deleteSubtitleEntry,
-  duplicateSubtitleEntry,
   splitSubtitleEntryAtTime,
   updateSubtitleEntry,
 } from './subtitles/editing'
@@ -380,16 +379,6 @@ function App() {
       const result = deleteSubtitleEntry(subtitlesRef.current, id)
       commitSubtitleChanges(result.entries)
       setSelectedSubtitleId(result.selectedId)
-    },
-    [commitSubtitleChanges],
-  )
-
-  const duplicateSubtitleFromPlayer = useCallback(
-    (id: string) => {
-      const result = duplicateSubtitleEntry(subtitlesRef.current, id)
-      commitSubtitleChanges(result.entries)
-      setSelectedSubtitleId(result.selectedId)
-      setFocusSubtitleRequest((value) => value + 1)
     },
     [commitSubtitleChanges],
   )
@@ -1140,7 +1129,6 @@ function App() {
             onConfigureRegeneration={configureTimelineRegeneration}
             onDeleteSubtitle={deleteSubtitleFromPlayer}
             onDuration={handleDuration}
-            onDuplicateSubtitle={duplicateSubtitleFromPlayer}
             onPlayRange={playSubtitleRange}
             onPreviewRegeneration={previewTimelineRegenerationRange}
             onRedo={redo}

@@ -13,7 +13,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
 - Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
-- Synchronized player and list editors with playhead-accurate insertion, text and timestamp editing, timeline dragging, validation, search, delete, split, merge, duplicate, move, range playback, undo, and redo.
+- Synchronized player and list editors with playhead-accurate insertion, text and timestamp editing, timeline dragging, validation, search, delete, split, merge, move, range playback, undo, and redo.
 - Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus one to five requested Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
@@ -131,7 +131,7 @@ Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-t
 ## Regenerating A Subtitle Range
 
 1. Select a video and create, import, or generate subtitles.
-2. Use the timeline Regenerate tool. It starts from the selected cue or creates a five-second range around the playhead. The subtitle-row regenerate icon remains available.
+2. Select a cue and use **Regenerate selected subtitle** in the player subtitle editor. It creates an adjustable timeline range from that cue. The main subtitle editor's row-level Regenerate action remains available as a direct dialog entry point.
 3. Drag the amber range to move it, drag either edge to resize it, or use the timestamp fields for exact values. A range can cover one or many cues but cannot exceed 29 seconds.
 4. Use **Preview range** to play the current section once. The range remains selected when playback stops.
 5. Open **Configure regeneration** and choose the language, output, model, engine, precision, timestamp detail, and **Alternatives** count for this run. You can request one to five alternatives; the default is three. These choices persist for later regenerations in the current browser session without changing full-transcription settings.

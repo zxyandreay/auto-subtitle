@@ -1,7 +1,6 @@
 import {
   ArrowDown,
   ArrowUp,
-  Copy,
   CornerDownRight,
   Plus,
   RefreshCw,
@@ -221,14 +220,6 @@ export function SubtitleEditor({
                 onAddBefore={() => insertAt(index, 'before')}
                 onFocusHandled={() => setEntryToFocusId(undefined)}
                 onDelete={() => commit(entries.filter((item) => item.id !== entry.id))}
-                onDuplicate={() => {
-                  const duplicate = makeSubtitleEntry({
-                    startTime: entry.endTime + 0.1,
-                    endTime: entry.endTime + Math.max(1, entry.endTime - entry.startTime),
-                    text: entry.text,
-                  })
-                  commit([...entries.slice(0, index + 1), duplicate, ...entries.slice(index + 1)])
-                }}
                 onMergeNext={() => {
                   const next = entries[index + 1]
                   if (next) {
@@ -317,7 +308,6 @@ type SubtitleRowProps = {
   onMergeNext: () => void
   onMoveUp: () => void
   onMoveDown: () => void
-  onDuplicate: () => void
   regenerationDisabled: boolean
 }
 
@@ -344,7 +334,6 @@ function SubtitleRow({
   onMergeNext,
   onMoveUp,
   onMoveDown,
-  onDuplicate,
   regenerationDisabled,
 }: SubtitleRowProps) {
   const hasError = issues.some((issue) => issue.level === 'error')
@@ -398,9 +387,6 @@ function SubtitleRow({
           </IconButton>
           <IconButton label="Split subtitle" onClick={onSplit}>
             <Scissors size={15} />
-          </IconButton>
-          <IconButton label="Duplicate subtitle" onClick={onDuplicate}>
-            <Copy size={15} />
           </IconButton>
           <IconButton label="Move subtitle up" onClick={onMoveUp}>
             <ArrowUp size={15} />

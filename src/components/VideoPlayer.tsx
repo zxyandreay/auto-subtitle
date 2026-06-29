@@ -41,7 +41,6 @@ type VideoPlayerProps = {
   onCancelRegeneration: () => void
   onUpdateSubtitle: (id: string, patch: Partial<SubtitleEntry>) => void
   onDeleteSubtitle: (id: string) => void
-  onDuplicateSubtitle: (id: string) => void
   onAddSubtitleAt: (time: number) => void
   onSelectSubtitle: (id: string) => void
   onPlayRange: (startTime: number, endTime: number) => void
@@ -81,7 +80,6 @@ export function VideoPlayer({
   onCancelRegeneration,
   onUpdateSubtitle,
   onDeleteSubtitle,
-  onDuplicateSubtitle,
   onAddSubtitleAt,
   onSelectSubtitle,
   onPlayRange,
@@ -331,18 +329,18 @@ export function VideoPlayer({
         onSplitAtPlayhead={onSplitAtPlayhead}
         onUndo={onUndo}
         onUpdate={onUpdateSubtitle}
-        onStartRegeneration={onStartRegeneration}
       />
 
       <PlayerSubtitleEditor
+        canRegenerate={canRegenerate}
         duration={duration || undefined}
         entries={subtitles}
         entry={selectedSubtitle}
         focusRequest={focusSubtitleRequest}
         formatting={formatting}
         onDelete={onDeleteSubtitle}
-        onDuplicate={onDuplicateSubtitle}
         onPlayRange={onPlayRange}
+        onRegenerate={onStartRegeneration}
         onSeek={onSeek}
         onSelect={onSelectSubtitle}
         onUpdate={onUpdateSubtitle}

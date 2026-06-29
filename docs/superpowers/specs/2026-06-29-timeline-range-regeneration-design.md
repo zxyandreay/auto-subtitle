@@ -6,7 +6,7 @@ Add a temporary regeneration mode to the subtitle timeline. Users can select, mo
 
 ## Timeline Interaction
 
-- A Regenerate toolbar action starts from the selected cue or a five-second range centered on the playhead.
+- A Regenerate action on the selected subtitle starts an adjustable timeline range from that cue. The timeline toolbar shows range actions only after the range exists.
 - An amber range sits above the cue track. Dragging its body moves it; dragging either handle resizes it.
 - Pointer and keyboard edits share the timeline's magnetic targets. Alt/Option bypasses snapping, and Shift changes the keyboard step from 0.1 to 0.5 seconds.
 - Preview plays the current subtitles once through the range. Configure opens the existing regeneration dialog. Cancel clears the range.
