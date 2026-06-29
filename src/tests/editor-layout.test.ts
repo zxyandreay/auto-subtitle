@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const appStyles = readFileSync(resolve(process.cwd(), 'src/styles/app.css'), 'utf8')
+const appSource = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8')
 
 describe('desktop subtitle editor layout', () => {
   it('lets the left workspace stack set the shared height while only the subtitle list scrolls', () => {
@@ -21,6 +22,10 @@ describe('desktop subtitle editor layout', () => {
     expect(appStyles).toMatch(/\.subtitle-timeline__handle\s*{[^}]*min-width:\s*24px;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__playhead\s*{[^}]*touch-action:\s*none;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__snap-guide\s*{[^}]*pointer-events:\s*none;/)
+  })
+
+  it('starts subtitle auto-scroll disabled', () => {
+    expect(appSource).toMatch(/const \[autoScroll, setAutoScroll\] = useState\(false\)/)
   })
 
   it('keeps the global file overlay fixed, non-blocking, and motion-aware', () => {

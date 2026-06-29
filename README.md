@@ -7,7 +7,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 ## Features
 
 - Page-wide drag-and-drop video import with a responsive supported-file overlay, local privacy messaging, file metadata, size warnings, duration warnings, and validation.
-- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a zoomable magnetic subtitle timeline with a draggable playhead.
+- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a continuously zoomable magnetic subtitle timeline with click/drag seeking and precise playhead splitting.
 - Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
 - Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
 - Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
@@ -19,7 +19,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
 - Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
-- Keyboard shortcuts for playback, seeking, subtitle timeline nudging, undo, and redo.
+- Keyboard shortcuts for playback, seeking, subtitle timeline nudging and splitting, undo, and redo.
 
 ## Screenshots
 
@@ -173,21 +173,24 @@ When importing project JSON, the app validates the schema, normalizes saved mode
 - Arrow Right: seek forward 5 seconds
 - Ctrl+Z: undo subtitle edits
 - Ctrl+Shift+Z or Ctrl+Y: redo subtitle edits
+- Ctrl+K or Cmd+K: split the selected subtitle at the playhead when both halves will be at least 0.1 seconds
 - Enter on a subtitle row: seek to that subtitle start
 - Enter or Space on a timeline cue: select the cue and seek to its start
 - Arrow Left or Arrow Right on a timeline cue: move it by 0.1 seconds
 - Arrow Left or Arrow Right on a focused timeline handle: adjust that start or end boundary by 0.1 seconds
 - Hold Shift with a timeline Arrow key: use a 0.5-second adjustment
 - Arrow Left or Arrow Right on the focused timeline playhead: seek by 0.1 seconds; Home/End seek to timeline boundaries
-- Hold Alt/Option while dragging a cue edge, cue body, or playhead: temporarily disable magnetic snapping
+- Hold Alt/Option while clicking the empty timeline or dragging a cue edge, cue body, or playhead: temporarily disable magnetic snapping
 
 ## Player Subtitle Editing
 
-The video player includes a horizontally scrollable subtitle timeline. Cue blocks show their text, timing, active/selected state, and existing validation severity. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. A 10-pixel magnetic threshold snaps either moving edge to any other subtitle boundary, the media playhead, timeline start, known video end, or a lower-priority half-second grid. A guide and target accent show the active snap; hold Alt/Option to bypass it. Overlaps remain visible as validation errors instead of being silently removed.
+The video player includes a horizontally scrollable subtitle timeline with continuous 12–96 pixels-per-second zoom, dedicated Undo/Redo controls, and an enabled-by-default playhead-follow toggle. Cue blocks show their text, timing, active/selected state, and existing validation severity. Clicking a cue selects it and seeks to its start. Clicking empty space in the timeline—including the bands above or below cue cards—seeks magnetically to that point; hold Alt/Option for the exact clicked time. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. A 10-pixel magnetic threshold snaps either moving edge to any other subtitle boundary, the media playhead, timeline start, known video end, or a lower-priority half-second grid. A guide and target accent show the active snap. Overlaps remain visible as validation errors instead of being silently removed.
 
-The timeline playhead is directly draggable and keyboard accessible. It seeks the media responsively, snaps to subtitle boundaries, shows a timestamp while dragging, works in fullscreen and at every zoom/fit level, and never adds subtitle undo history. Cue timing previews remain local and commit once on pointer release, so one completed gesture is one undo step.
+The timeline playhead is directly draggable and keyboard accessible. It seeks the media responsively, snaps to subtitle boundaries, shows a timestamp while dragging, works in fullscreen at every zoom level, and never adds subtitle undo history. Cue timing previews remain local and commit once on pointer release, so one completed gesture is one undo step.
 
-Selecting a cue opens the player subtitle editor for text, timestamp, navigation, range playback, duplication, and deletion. **Add subtitle** pauses playback and inserts a focused cue at the exact playhead. Player changes and the main subtitle list share the same undoable subtitle state and synchronize selection immediately.
+Select a cue, place the playhead at least 0.1 seconds inside each edge, then use the timeline Split button or Ctrl/Cmd+K to cut it at the exact millisecond-rounded playhead time. The text uses the same natural split as the main editor, the second half remains selected, and the entire cut is one undoable edit.
+
+Selecting a cue opens the player subtitle editor for text, timestamp, navigation, range playback, duplication, and deletion. **Add subtitle** pauses playback and inserts a focused cue at the exact playhead. Player changes and the main subtitle list share the same undoable subtitle state and synchronize selection immediately. The main list editor's optional Auto-scroll control starts disabled.
 
 Fullscreen targets the whole editing workspace rather than only the video, keeping the timeline, editor, add/delete actions, playback controls, volume, and subtitle visibility available. Tablet layouts stack these tools; narrow layouts use a horizontally scrolling timeline and a collapsible sticky editor panel with touch-sized actions.
 

@@ -18,13 +18,19 @@ type VideoPlayerProps = {
   selectedSubtitleId?: string
   focusSubtitleRequest?: number
   subtitlesVisible: boolean
+  canRedo: boolean
+  canSplitAtPlayhead: boolean
+  canUndo: boolean
   seekRequest?: { time: number; id: number }
   playRangeRequest?: { startTime: number; endTime: number; id: number }
   playToggleRequest?: number
   onDuration: (duration: number) => void
   onTime: (time: number) => void
   onRangePlaybackEnd?: () => void
+  onRedo: () => void
+  onSplitAtPlayhead: () => void
   onToggleSubtitles: () => void
+  onUndo: () => void
   onUpdateSubtitle: (id: string, patch: Partial<SubtitleEntry>) => void
   onDeleteSubtitle: (id: string) => void
   onDuplicateSubtitle: (id: string) => void
@@ -45,13 +51,19 @@ export function VideoPlayer({
   selectedSubtitleId,
   focusSubtitleRequest,
   subtitlesVisible,
+  canRedo,
+  canSplitAtPlayhead,
+  canUndo,
   seekRequest,
   playRangeRequest,
   playToggleRequest,
   onDuration,
   onTime,
   onRangePlaybackEnd,
+  onRedo,
+  onSplitAtPlayhead,
   onToggleSubtitles,
+  onUndo,
   onUpdateSubtitle,
   onDeleteSubtitle,
   onDuplicateSubtitle,
@@ -283,14 +295,20 @@ export function VideoPlayer({
       ) : null}
 
       <SubtitleTimeline
+        canRedo={canRedo}
+        canSplitAtPlayhead={canSplitAtPlayhead}
+        canUndo={canUndo}
         currentTime={currentTime}
         duration={duration || undefined}
         entries={subtitles}
         minDuration={formatting.minDuration}
         playing={playing}
         selectedId={selectedSubtitleId}
+        onRedo={onRedo}
         onSeek={seekTo}
         onSelect={onSelectSubtitle}
+        onSplitAtPlayhead={onSplitAtPlayhead}
+        onUndo={onUndo}
         onUpdate={onUpdateSubtitle}
       />
 

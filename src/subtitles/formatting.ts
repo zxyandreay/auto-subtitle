@@ -176,13 +176,70 @@ export function normalizeOverlaps(
 }
 
 export function splitEntry(entry: SubtitleEntry): [SubtitleEntry, SubtitleEntry] {
-  const plainText = normalizeSubtitleText(entry.text).replace(/\n+/g, ' ')
-  const splitIndex = findNaturalSplit(plainText)
-  const firstText = plainText.slice(0, splitIndex).trim()
-  const secondText = plainText.slice(splitIndex).trim()
+  const { firstText, plainText, secondText } = splitEntryText(entry)
   const duration = Math.max(0.2, entry.endTime - entry.startTime)
   const ratio = firstText.length / Math.max(plainText.length, 1)
   const splitTime = roundTime(entry.startTime + duration * Math.min(0.75, Math.max(0.25, ratio)))
+
+  return buildSplitEntries(entry, splitTime, firstText, secondText, plainText)
+}
+
+export function canSplitEntryAtTime(
+  entry: SubtitleEntry,
+  splitTime: number,
+  minimumSideDuration = 0.1,
+): boolean {
+  if (
+    !Number.isFinite(entry.startTime) ||
+    !Number.isFinite(entry.endTime) ||
+    !Number.isFinite(splitTime) ||
+    !Number.isFinite(minimumSideDuration)
+  ) {
+    return false
+  }
+
+  const roundedSplitTime = roundTime(splitTime)
+  const minimum = Math.max(0.1, minimumSideDuration)
+  return (
+    roundTime(roundedSplitTime - entry.startTime) >= minimum &&
+    roundTime(entry.endTime - roundedSplitTime) >= minimum
+  )
+}
+
+export function splitEntryAtTime(
+  entry: SubtitleEntry,
+  splitTime: number,
+  minimumSideDuration = 0.1,
+): [SubtitleEntry, SubtitleEntry] | undefined {
+  if (!canSplitEntryAtTime(entry, splitTime, minimumSideDuration)) {
+    return undefined
+  }
+
+  const { firstText, plainText, secondText } = splitEntryText(entry)
+  return buildSplitEntries(entry, roundTime(splitTime), firstText, secondText, plainText)
+}
+
+function splitEntryText(entry: SubtitleEntry): {
+  plainText: string
+  firstText: string
+  secondText: string
+} {
+  const plainText = normalizeSubtitleText(entry.text).replace(/\n+/g, ' ')
+  const splitIndex = findNaturalSplit(plainText)
+  return {
+    plainText,
+    firstText: plainText.slice(0, splitIndex).trim(),
+    secondText: plainText.slice(splitIndex).trim(),
+  }
+}
+
+function buildSplitEntries(
+  entry: SubtitleEntry,
+  splitTime: number,
+  firstText: string,
+  secondText: string,
+  plainText: string,
+): [SubtitleEntry, SubtitleEntry] {
 
   return [
     makeSubtitleEntry({

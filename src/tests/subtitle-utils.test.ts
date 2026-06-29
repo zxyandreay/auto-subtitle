@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   calculateCharactersPerSecond,
+  canSplitEntryAtTime,
   formatSubtitleText,
   formatTranscriptionSegments,
   makeSubtitleEntry,
@@ -10,6 +11,7 @@ import {
   shiftEntries,
   sortAndRenumber,
   splitEntry,
+  splitEntryAtTime,
 } from '../subtitles/formatting'
 import { createProjectExport, exportSrt, exportVtt, parseProjectJson } from '../subtitles/exporters'
 import { parseSrt, parseVtt } from '../subtitles/importers'
@@ -157,6 +159,35 @@ describe('subtitle editing logic', () => {
     expect(merged.text).toContain('This sentence')
     expect(merged.startTime).toBe(10)
     expect(merged.endTime).toBe(16)
+  })
+
+  it('splits an entry at an exact rounded timeline time using the editor text split', () => {
+    const entry = makeSubtitleEntry({
+      startTime: 10,
+      endTime: 16,
+      text: 'This sentence should split near the middle without dropping words.',
+      confidence: 0.82,
+    })
+    const [naturalFirst, naturalSecond] = splitEntry(entry)
+    const result = splitEntryAtTime(entry, 12.3456)
+
+    expect(result).toBeDefined()
+    const [first, second] = result!
+    expect(first.endTime).toBe(12.346)
+    expect(second.startTime).toBe(12.346)
+    expect([first.text, second.text]).toEqual([naturalFirst.text, naturalSecond.text])
+    expect([first.confidence, second.confidence]).toEqual([0.82, 0.82])
+  })
+
+  it('requires at least 0.1 seconds on each side of a timeline split', () => {
+    const entry = makeSubtitleEntry({ startTime: 10, endTime: 12, text: 'Split this subtitle safely.' })
+
+    expect(canSplitEntryAtTime(entry, 10.1)).toBe(true)
+    expect(canSplitEntryAtTime(entry, 11.9)).toBe(true)
+    expect(canSplitEntryAtTime(entry, 10.099)).toBe(false)
+    expect(canSplitEntryAtTime(entry, 11.901)).toBe(false)
+    expect(canSplitEntryAtTime(entry, Number.NaN)).toBe(false)
+    expect(splitEntryAtTime(entry, 10.099)).toBeUndefined()
   })
 
   it('formats long text into readable lines', () => {

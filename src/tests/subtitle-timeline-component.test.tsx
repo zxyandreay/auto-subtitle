@@ -53,6 +53,47 @@ describe('SubtitleTimeline', () => {
     expect(onSeek).toHaveBeenCalledWith(1)
   })
 
+  it('seeks a snapped empty-track click and lets Alt bypass snapping', () => {
+    const onSeek = vi.fn()
+    renderTimeline({ onSeek })
+    const track = container.querySelector('.subtitle-timeline__track') as HTMLElement
+    vi.spyOn(track, 'getBoundingClientRect').mockReturnValue(rect({ left: 0, width: 240 }))
+
+    clickAt(track, 66)
+    expect(onSeek).toHaveBeenLastCalledWith(3)
+    expect(container.querySelector('.subtitle-timeline__snap-guide')?.textContent).toContain('subtitle 1 end')
+
+    clickAt(track, 66, true)
+    expect(onSeek).toHaveBeenLastCalledWith(2.75)
+  })
+
+  it('renders dedicated history and split controls with their enabled states', () => {
+    const onRedo = vi.fn()
+    const onSplitAtPlayhead = vi.fn()
+    const onUndo = vi.fn()
+    renderTimeline({
+      canRedo: false,
+      canSplitAtPlayhead: true,
+      canUndo: true,
+      onRedo,
+      onSplitAtPlayhead,
+      onUndo,
+    } as Partial<React.ComponentProps<typeof SubtitleTimeline>>)
+
+    const undo = button('Undo subtitle edit from timeline')
+    const redo = button('Redo subtitle edit from timeline')
+    const split = button('Split selected subtitle at playhead')
+    expect(undo.disabled).toBe(false)
+    expect(redo.disabled).toBe(true)
+    expect(split.disabled).toBe(false)
+
+    click(undo)
+    click(split)
+    expect(onUndo).toHaveBeenCalledOnce()
+    expect(onRedo).not.toHaveBeenCalled()
+    expect(onSplitAtPlayhead).toHaveBeenCalledOnce()
+  })
+
   it('supports keyboard movement and boundary nudging without global seek propagation', () => {
     const onUpdate = vi.fn()
     renderTimeline({ onUpdate })
@@ -113,30 +154,40 @@ describe('SubtitleTimeline', () => {
     expect(container.querySelector('.subtitle-timeline__playhead-time')).toBeNull()
   })
 
-  it('uses the fitted pixels-per-second scale for cue dragging', () => {
-    const onUpdate = vi.fn()
-    const longEntry = makeSubtitleEntry({ id: 'long', startTime: 100, endTime: 200, text: 'Long timeline cue' })
-    renderTimeline({ duration: 3600, entries: [longEntry], onUpdate })
-    click(button('Fit subtitle timeline to width'))
-    const cue = timelineCue(1)
+  it('uses a continuous zoom slider and keeps the playhead-follow toggle', () => {
+    renderTimeline()
+    const slider = container.querySelector('input[aria-label="Zoom subtitle timeline"]') as HTMLInputElement
 
-    pointer(cue, 'pointerdown', 10, 100)
-    pointer(cue, 'pointerup', 10, 118)
+    expect(slider.type).toBe('range')
+    expect(slider.min).toBe('12')
+    expect(slider.max).toBe('96')
+    expect(slider.step).toBe('1')
+    expect(slider.value).toBe('24')
+    expect(button('Fit subtitle timeline to width')).toBeNull()
+    expect(button('Disable timeline playhead follow')).not.toBeNull()
 
-    expect(onUpdate).toHaveBeenCalledWith('long', { startTime: 201.25, endTime: 301.25 })
+    input(slider, '60')
+    expect(slider.value).toBe('60')
+    expect(timelineCue(1).parentElement?.style.left).toBe('60px')
   })
 
   function renderTimeline(overrides: Partial<React.ComponentProps<typeof SubtitleTimeline>> = {}) {
     act(() => {
       root.render(
         <SubtitleTimeline
+          canRedo={false}
+          canSplitAtPlayhead={false}
+          canUndo={false}
           currentTime={0}
           duration={10}
           entries={entries}
           minDuration={1.1}
           playing={false}
+          onRedo={() => undefined}
           onSeek={() => undefined}
           onSelect={() => undefined}
+          onSplitAtPlayhead={() => undefined}
+          onUndo={() => undefined}
           onUpdate={() => undefined}
           {...overrides}
         />,
@@ -157,6 +208,16 @@ function click(element: HTMLElement): void {
   act(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true })))
 }
 
+function clickAt(element: HTMLElement, clientX: number, altKey = false): void {
+  act(() => element.dispatchEvent(new MouseEvent('click', { altKey, bubbles: true, clientX })))
+}
+
+function input(element: HTMLInputElement, value: string): void {
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  valueSetter?.call(element, value)
+  act(() => element.dispatchEvent(new Event('input', { bubbles: true })))
+}
+
 function keyDown(element: HTMLElement, key: string, shiftKey = false): void {
   act(() => element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, shiftKey })))
 }
@@ -170,4 +231,19 @@ function pointer(element: HTMLElement, type: string, pointerId: number, clientX:
     pointerId: { value: pointerId },
   })
   act(() => element.dispatchEvent(event))
+}
+
+function rect(overrides: Partial<DOMRect> = {}): DOMRect {
+  return {
+    bottom: 64,
+    height: 64,
+    left: 0,
+    right: 240,
+    toJSON: () => ({}),
+    top: 0,
+    width: 240,
+    x: 0,
+    y: 0,
+    ...overrides,
+  }
 }

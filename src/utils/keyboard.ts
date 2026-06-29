@@ -1,6 +1,7 @@
 export type HistoryShortcut = 'undo' | 'redo'
 
 type HistoryShortcutEvent = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey'>
+type SplitShortcutEvent = Pick<KeyboardEvent, 'key' | 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>
 
 export function getHistoryShortcut(event: HistoryShortcutEvent): HistoryShortcut | undefined {
   if (!event.ctrlKey && !event.metaKey) {
@@ -11,6 +12,15 @@ export function getHistoryShortcut(event: HistoryShortcutEvent): HistoryShortcut
     return event.shiftKey ? 'redo' : 'undo'
   }
   return key === 'y' ? 'redo' : undefined
+}
+
+export function isSplitShortcut(event: SplitShortcutEvent): boolean {
+  return (
+    event.key.toLowerCase() === 'k' &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.altKey &&
+    !event.shiftKey
+  )
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {

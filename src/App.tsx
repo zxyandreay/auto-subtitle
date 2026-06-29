@@ -13,8 +13,14 @@ import { getDiagnosticLog, recordDiagnosticEvent } from './diagnostics/diagnosti
 import { useUndoableSubtitles } from './hooks/useUndoableSubtitles'
 import { findFirstValidVideoFile, getDurationWarning, validateVideoFile, type VideoFileState } from './media/video'
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
-import { deleteSubtitleEntry, duplicateSubtitleEntry, updateSubtitleEntry } from './subtitles/editing'
 import {
+  deleteSubtitleEntry,
+  duplicateSubtitleEntry,
+  splitSubtitleEntryAtTime,
+  updateSubtitleEntry,
+} from './subtitles/editing'
+import {
+  canSplitEntryAtTime,
   formatSubtitleText,
   formatTranscriptionSegments,
   makeSubtitleEntry,
@@ -51,7 +57,7 @@ import type {
 import { DEFAULT_TRANSCRIPTION_SETTINGS, normalizeTranscriptionSettings } from './transcription/types'
 import type { SubtitleEntry } from './types/subtitles'
 import { baseName, downloadTextFile } from './utils/format'
-import { getHistoryShortcut, isEditableShortcutTarget } from './utils/keyboard'
+import { getHistoryShortcut, isEditableShortcutTarget, isSplitShortcut } from './utils/keyboard'
 import './styles/app.css'
 
 const FILE_SIZE_WARNING_MB = 500
@@ -96,7 +102,7 @@ function App() {
   const [regenerationPreviewEntries, setRegenerationPreviewEntries] = useState<SubtitleEntry[] | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [autosave, setAutosave] = useState<AutosaveRecord | null>(null)
-  const [autoScroll, setAutoScroll] = useState(true)
+  const [autoScroll, setAutoScroll] = useState(false)
   const [showOnlyErrors, setShowOnlyErrors] = useState(false)
   const [shiftMilliseconds, setShiftMilliseconds] = useState(250)
   const [includeTranscriptTimestamps, setIncludeTranscriptTimestamps] = useState(false)
@@ -115,6 +121,10 @@ function App() {
   const capabilities = useMemo(() => detectBrowserCapabilities(), [])
   const capabilityWarnings = useMemo(() => getCapabilityWarnings(capabilities), [capabilities])
   const activeSubtitle = subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime)
+  const selectedSubtitle = subtitles.find((entry) => entry.id === selectedSubtitleId)
+  const canSplitAtPlayhead = selectedSubtitle
+    ? canSplitEntryAtTime(selectedSubtitle, currentTime)
+    : false
 
   useEffect(() => {
     if (selectedSubtitleId && subtitles.some((entry) => entry.id === selectedSubtitleId)) {
@@ -378,6 +388,35 @@ function App() {
     },
     [commitSubtitleChanges, requestSeek, video?.duration],
   )
+
+  const splitSubtitleAtPlayhead = useCallback(() => {
+    if (!selectedSubtitleId) {
+      return
+    }
+    const result = splitSubtitleEntryAtTime(subtitlesRef.current, selectedSubtitleId, currentTime)
+    if (!result.selectedId) {
+      return
+    }
+    commitSubtitleChanges(result.entries)
+    setSelectedSubtitleId(result.selectedId)
+  }, [commitSubtitleChanges, currentTime, selectedSubtitleId])
+
+  useEffect(() => {
+    const onSplitShortcut = (event: KeyboardEvent) => {
+      if (
+        !canSplitAtPlayhead ||
+        isEditableShortcutTarget(event.target) ||
+        !isSplitShortcut(event)
+      ) {
+        return
+      }
+      event.preventDefault()
+      splitSubtitleAtPlayhead()
+    }
+
+    window.addEventListener('keydown', onSplitShortcut)
+    return () => window.removeEventListener('keydown', onSplitShortcut)
+  }, [canSplitAtPlayhead, splitSubtitleAtPlayhead])
 
   const playSubtitleRange = useCallback((startTime: number, endTime: number) => {
     setPlayRangeRequest({ startTime, endTime, id: Date.now() })
@@ -958,6 +997,9 @@ function App() {
           />
 
           <VideoPlayer
+            canRedo={canRedo}
+            canSplitAtPlayhead={canSplitAtPlayhead}
+            canUndo={canUndo}
             currentTime={currentTime}
             duration={video?.duration ?? 0}
             focusSubtitleRequest={focusSubtitleRequest}
@@ -976,11 +1018,14 @@ function App() {
             onDuration={handleDuration}
             onDuplicateSubtitle={duplicateSubtitleFromPlayer}
             onPlayRange={playSubtitleRange}
+            onRedo={redo}
             onTime={setCurrentTime}
             onRangePlaybackEnd={() => setRegenerationPreviewEntries(null)}
             onSeek={requestSeek}
             onSelectSubtitle={setSelectedSubtitleId}
+            onSplitAtPlayhead={splitSubtitleAtPlayhead}
             onToggleSubtitles={() => setSubtitlesVisible((visible) => !visible)}
+            onUndo={undo}
             onUpdateSubtitle={updateSubtitleFromPlayer}
           />
 

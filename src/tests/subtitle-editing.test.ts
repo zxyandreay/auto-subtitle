@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { deleteSubtitleEntry, duplicateSubtitleEntry, updateSubtitleEntry } from '../subtitles/editing'
+import {
+  deleteSubtitleEntry,
+  duplicateSubtitleEntry,
+  splitSubtitleEntryAtTime,
+  updateSubtitleEntry,
+} from '../subtitles/editing'
 import { makeSubtitleEntry } from '../subtitles/formatting'
 
 const entries = [
@@ -34,5 +39,27 @@ describe('shared subtitle editing helpers', () => {
     expect(duplicate?.text).toBe('Second')
     expect(duplicate?.startTime).toBe(5.1)
     expect(duplicate?.endTime).toBe(7.1)
+  })
+
+  it('replaces one subtitle at the playhead and selects the second half', () => {
+    const result = splitSubtitleEntryAtTime(entries, 'second', 4)
+    const secondHalf = result.entries.find((entry) => entry.id === result.selectedId)
+
+    expect(result.entries).toHaveLength(4)
+    expect(result.entries.map((entry) => [entry.startTime, entry.endTime])).toEqual([
+      [1, 2],
+      [3, 4],
+      [4, 5],
+      [6, 7],
+    ])
+    expect(secondHalf?.startTime).toBe(4)
+    expect(secondHalf?.endTime).toBe(5)
+  })
+
+  it('leaves entries unchanged when the requested timeline split is invalid', () => {
+    const result = splitSubtitleEntryAtTime(entries, 'second', 3.05)
+
+    expect(result.entries.map((entry) => entry.id)).toEqual(['first', 'second', 'third'])
+    expect(result.selectedId).toBeUndefined()
   })
 })

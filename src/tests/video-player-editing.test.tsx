@@ -101,6 +101,23 @@ describe('VideoPlayer subtitle workspace', () => {
     expect(onUpdateSubtitle).not.toHaveBeenCalled()
   })
 
+  it('forwards timeline history and split controls', () => {
+    const onSplitAtPlayhead = vi.fn()
+    const onUndo = vi.fn()
+    renderPlayer({
+      canSplitAtPlayhead: true,
+      canUndo: true,
+      onSplitAtPlayhead,
+      onUndo,
+    } as Partial<React.ComponentProps<typeof VideoPlayer>>)
+
+    click(button('Undo subtitle edit from timeline'))
+    click(button('Split selected subtitle at playhead'))
+
+    expect(onUndo).toHaveBeenCalledOnce()
+    expect(onSplitAtPlayhead).toHaveBeenCalledOnce()
+  })
+
   it('enters and exits fullscreen on the whole player workspace', async () => {
     renderPlayer()
     const workspace = container.querySelector('.video-panel') as HTMLElement
@@ -110,6 +127,7 @@ describe('VideoPlayer subtitle workspace', () => {
 
     expect(workspace.requestFullscreen).toHaveBeenCalled()
     expect(button('Exit fullscreen subtitle workspace')).not.toBeNull()
+    expect(button('Split selected subtitle at playhead')).not.toBeNull()
 
     click(button('Exit fullscreen subtitle workspace'))
     await act(async () => Promise.resolve())
@@ -136,6 +154,9 @@ describe('VideoPlayer subtitle workspace', () => {
     act(() => {
       root.render(
         <VideoPlayer
+          canRedo={false}
+          canSplitAtPlayhead={false}
+          canUndo={false}
           currentTime={0}
           duration={20}
           formatting={DEFAULT_FORMATTING_PREFERENCES}
@@ -148,10 +169,13 @@ describe('VideoPlayer subtitle workspace', () => {
           onDuplicateSubtitle={() => undefined}
           onDuration={() => undefined}
           onPlayRange={() => undefined}
+          onRedo={() => undefined}
           onSeek={() => undefined}
           onSelectSubtitle={() => undefined}
+          onSplitAtPlayhead={() => undefined}
           onTime={() => undefined}
           onToggleSubtitles={() => undefined}
+          onUndo={() => undefined}
           onUpdateSubtitle={() => undefined}
           {...overrides}
         />,

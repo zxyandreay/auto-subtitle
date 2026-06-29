@@ -1,6 +1,6 @@
-import { LocateFixed, Maximize2, ZoomIn, ZoomOut } from 'lucide-react'
+import { LocateFixed, RotateCcw, RotateCw, Scissors } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSubtitleTimelineDrag } from '../hooks/useSubtitleTimelineDrag'
 import {
   buildTimelineSnapTargets,
@@ -22,12 +22,19 @@ type SubtitleTimelineProps = {
   playing: boolean
   selectedId?: string
   minDuration: number
+  canRedo: boolean
+  canSplitAtPlayhead: boolean
+  canUndo: boolean
+  onRedo: () => void
+  onSplitAtPlayhead: () => void
+  onUndo: () => void
   onUpdate: (id: string, patch: Pick<SubtitleEntry, 'startTime' | 'endTime'>) => void
   onSelect: (id: string) => void
   onSeek: (time: number) => void
 }
 
-const ZOOM_LEVELS = [12, 24, 48, 96]
+const MIN_PIXELS_PER_SECOND = 12
+const MAX_PIXELS_PER_SECOND = 96
 const DEFAULT_PIXELS_PER_SECOND = 24
 const FALLBACK_VIEWPORT_WIDTH = 640
 const EMPTY_ISSUES: ValidationIssue[] = []
@@ -39,6 +46,12 @@ export function SubtitleTimeline({
   playing,
   selectedId,
   minDuration,
+  canRedo,
+  canSplitAtPlayhead,
+  canUndo,
+  onRedo,
+  onSplitAtPlayhead,
+  onUndo,
   onUpdate,
   onSelect,
   onSeek,
@@ -46,16 +59,15 @@ export function SubtitleTimeline({
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const trackRef = useRef<HTMLDivElement | null>(null)
   const playheadDragRef = useRef<{ pointerId: number; captureElement: HTMLElement } | null>(null)
+  const trackClickSnapTimeoutRef = useRef<number | undefined>(undefined)
   const [viewportWidth, setViewportWidth] = useState(FALLBACK_VIEWPORT_WIDTH)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
-  const [fit, setFit] = useState(false)
   const [followPlayhead, setFollowPlayhead] = useState(true)
   const [playheadDragTime, setPlayheadDragTime] = useState<number>()
   const [playheadSnap, setPlayheadSnap] = useState<TimelineSnapMatch>()
+  const [trackClickSnap, setTrackClickSnap] = useState<TimelineSnapMatch>()
   const timelineDuration = Math.max(duration ?? 0, entries.at(-1)?.endTime ?? 0, 30)
-  const effectivePixelsPerSecond = fit
-    ? Math.max(0.01, viewportWidth / Math.max(1, timelineDuration))
-    : pixelsPerSecond
+  const effectivePixelsPerSecond = pixelsPerSecond
   const trackWidth = Math.max(viewportWidth, timelineDuration * effectivePixelsPerSecond)
   const issues = useMemo(() => validateSubtitles(entries, duration), [duration, entries])
   const issuesById = useMemo(() => groupIssues(issues), [issues])
@@ -86,6 +98,14 @@ export function SubtitleTimeline({
   }, [])
 
   useEffect(() => {
+    return () => {
+      if (trackClickSnapTimeoutRef.current !== undefined) {
+        window.clearTimeout(trackClickSnapTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     if (!selectedId) {
       return
     }
@@ -97,7 +117,7 @@ export function SubtitleTimeline({
 
   useEffect(() => {
     const viewport = viewportRef.current
-    if (!viewport || !playing || !followPlayhead || fit) {
+    if (!viewport || !playing || !followPlayhead) {
       return
     }
     const frame = window.requestAnimationFrame(() => {
@@ -109,7 +129,7 @@ export function SubtitleTimeline({
       }
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [currentTime, effectivePixelsPerSecond, fit, followPlayhead, playing])
+  }, [currentTime, effectivePixelsPerSecond, followPlayhead, playing])
 
   const handlePointerDown = useCallback(
     (
@@ -156,7 +176,7 @@ export function SubtitleTimeline({
     [onSeek, onSelect, shouldSuppressClick],
   )
 
-  const calculatePlayheadDrag = useCallback(
+  const calculatePlayheadTime = useCallback(
     (clientX: number, snappingDisabled: boolean) => {
       const trackLeft = trackRef.current?.getBoundingClientRect().left ?? 0
       const maximum = duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : timelineDuration
@@ -179,6 +199,11 @@ export function SubtitleTimeline({
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     playheadDragRef.current = { pointerId: event.pointerId, captureElement: event.currentTarget }
+    if (trackClickSnapTimeoutRef.current !== undefined) {
+      window.clearTimeout(trackClickSnapTimeoutRef.current)
+      trackClickSnapTimeoutRef.current = undefined
+    }
+    setTrackClickSnap(undefined)
     setPlayheadDragTime(currentTime)
     setPlayheadSnap(undefined)
   }, [currentTime])
@@ -189,18 +214,18 @@ export function SubtitleTimeline({
     }
     event.preventDefault()
     event.stopPropagation()
-    const result = calculatePlayheadDrag(event.clientX, event.altKey)
+    const result = calculatePlayheadTime(event.clientX, event.altKey)
     setPlayheadDragTime(result.time)
     setPlayheadSnap(result.snap)
     onSeek(result.time)
-  }, [calculatePlayheadDrag, onSeek])
+  }, [calculatePlayheadTime, onSeek])
 
   const finishPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     const drag = playheadDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) {
       return
     }
-    const result = calculatePlayheadDrag(event.clientX, event.altKey)
+    const result = calculatePlayheadTime(event.clientX, event.altKey)
     playheadDragRef.current = null
     setPlayheadDragTime(undefined)
     setPlayheadSnap(undefined)
@@ -210,7 +235,7 @@ export function SubtitleTimeline({
     } catch {
       // Pointer capture may already be released by the browser.
     }
-  }, [calculatePlayheadDrag, onSeek])
+  }, [calculatePlayheadTime, onSeek])
 
   const cancelPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     const drag = playheadDragRef.current
@@ -252,32 +277,76 @@ export function SubtitleTimeline({
     onSeek(result.time)
   }, [currentTime, duration, effectivePixelsPerSecond, entries, onSeek, timelineDuration])
 
-  const changeZoom = (direction: -1 | 1) => {
-    const currentIndex = ZOOM_LEVELS.indexOf(pixelsPerSecond)
-    const nextIndex = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, currentIndex + direction))
-    setFit(false)
-    setPixelsPerSecond(ZOOM_LEVELS[nextIndex])
-  }
+  const handleTrackClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) {
+        return
+      }
+      const result = calculatePlayheadTime(event.clientX, event.altKey)
+      if (trackClickSnapTimeoutRef.current !== undefined) {
+        window.clearTimeout(trackClickSnapTimeoutRef.current)
+      }
+      setTrackClickSnap(result.snap)
+      if (result.snap) {
+        trackClickSnapTimeoutRef.current = window.setTimeout(() => {
+          setTrackClickSnap(undefined)
+          trackClickSnapTimeoutRef.current = undefined
+        }, 700)
+      } else {
+        trackClickSnapTimeoutRef.current = undefined
+      }
+      onSeek(result.time)
+    },
+    [calculatePlayheadTime, onSeek],
+  )
 
   const renderedPlayheadTime = playheadDragTime ?? currentTime
-  const activeSnap = playheadSnap ?? cueSnap
+  const activeSnap = playheadSnap ?? cueSnap ?? trackClickSnap
   const snapTarget = activeSnap?.target
 
   return (
     <section className="subtitle-timeline" aria-label="Interactive subtitle timeline">
       <div className="subtitle-timeline__toolbar">
         <strong>Subtitle timeline</strong>
-        <span>{fit ? 'Fit' : `${pixelsPerSecond} px/s`}</span>
+        <span>{`${pixelsPerSecond} px/s`}</span>
         <div className="subtitle-timeline__tools">
-          <IconButton label="Zoom subtitle timeline out" disabled={!fit && pixelsPerSecond === ZOOM_LEVELS[0]} onClick={() => changeZoom(-1)}>
-            <ZoomOut size={16} />
+          <IconButton
+            label="Undo subtitle edit from timeline"
+            disabled={!canUndo}
+            title="Undo subtitle edit (Ctrl+Z / Cmd+Z)"
+            onClick={onUndo}
+          >
+            <RotateCcw size={16} />
           </IconButton>
-          <IconButton label="Fit subtitle timeline to width" variant={fit ? 'soft' : 'ghost'} onClick={() => setFit(true)}>
-            <Maximize2 size={16} />
+          <IconButton
+            label="Redo subtitle edit from timeline"
+            disabled={!canRedo}
+            title="Redo subtitle edit (Ctrl+Y / Ctrl+Shift+Z / Cmd+Shift+Z)"
+            onClick={onRedo}
+          >
+            <RotateCw size={16} />
           </IconButton>
-          <IconButton label="Zoom subtitle timeline in" disabled={!fit && pixelsPerSecond === ZOOM_LEVELS.at(-1)} onClick={() => changeZoom(1)}>
-            <ZoomIn size={16} />
+          <IconButton
+            label="Split selected subtitle at playhead"
+            disabled={!canSplitAtPlayhead}
+            title="Split selected subtitle at playhead (Ctrl+K / Cmd+K)"
+            onClick={onSplitAtPlayhead}
+          >
+            <Scissors size={16} />
           </IconButton>
+          <label className="subtitle-timeline__zoom">
+            <span className="sr-only">Zoom subtitle timeline</span>
+            <input
+              aria-label="Zoom subtitle timeline"
+              max={MAX_PIXELS_PER_SECOND}
+              min={MIN_PIXELS_PER_SECOND}
+              step={1}
+              title={`Timeline zoom: ${pixelsPerSecond} pixels per second`}
+              type="range"
+              value={pixelsPerSecond}
+              onChange={(event) => setPixelsPerSecond(Number(event.target.value))}
+            />
+          </label>
           <IconButton
             label={followPlayhead ? 'Disable timeline playhead follow' : 'Enable timeline playhead follow'}
             variant={followPlayhead ? 'soft' : 'ghost'}
@@ -289,7 +358,12 @@ export function SubtitleTimeline({
       </div>
 
       <div ref={viewportRef} className="subtitle-timeline__viewport" tabIndex={0}>
-        <div ref={trackRef} className="subtitle-timeline__track" style={{ width: trackWidth }}>
+        <div
+          ref={trackRef}
+          className="subtitle-timeline__track"
+          style={{ width: trackWidth }}
+          onClick={handleTrackClick}
+        >
           {activeSnap ? (
             <div
               className="subtitle-timeline__snap-guide"

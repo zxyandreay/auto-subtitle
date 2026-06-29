@@ -566,9 +566,24 @@ body {
 }
 
 .subtitle-timeline__tools {
+  align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 5px;
   margin-left: auto;
+}
+
+.subtitle-timeline__zoom {
+  align-items: center;
+  display: flex;
+  min-width: 120px;
+  width: clamp(120px, 18vw, 220px);
+}
+
+.subtitle-timeline__zoom input {
+  accent-color: var(--accent);
+  cursor: ew-resize;
+  width: 100%;
 }
 
 .subtitle-timeline__viewport {
@@ -591,6 +606,7 @@ body {
     color-mix(in srgb, var(--border) 70%, transparent) 12px
   );
   height: 64px;
+  cursor: pointer;
   min-width: 100%;
   position: relative;
 }
@@ -1532,8 +1548,14 @@ progress {
   }
 
   .subtitle-timeline__tools .icon-button {
-    flex: 1;
+    flex: 1 1 44px;
     min-height: 44px;
+  }
+
+  .subtitle-timeline__zoom {
+    flex: 1 0 100%;
+    order: 2;
+    width: 100%;
   }
 
   .player-subtitle-editor {

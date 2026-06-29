@@ -34,14 +34,20 @@ describe('player and main editor subtitle selection', () => {
       return (
         <>
           <SubtitleTimeline
+            canRedo={false}
+            canSplitAtPlayhead={false}
+            canUndo={false}
             currentTime={0}
             duration={10}
             entries={entries}
             minDuration={1.1}
             playing={false}
             selectedId={selectedId}
+            onRedo={() => undefined}
             onSeek={() => undefined}
             onSelect={setSelectedId}
+            onSplitAtPlayhead={() => undefined}
+            onUndo={() => undefined}
             onUpdate={() => undefined}
           />
           <SubtitleEditor

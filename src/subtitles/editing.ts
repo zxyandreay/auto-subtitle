@@ -1,5 +1,5 @@
 import type { SubtitleEntry } from '../types/subtitles'
-import { makeSubtitleEntry, sortAndRenumber } from './formatting'
+import { makeSubtitleEntry, sortAndRenumber, splitEntryAtTime } from './formatting'
 
 type DeleteSubtitleResult = {
   entries: SubtitleEntry[]
@@ -7,6 +7,11 @@ type DeleteSubtitleResult = {
 }
 
 type DuplicateSubtitleResult = {
+  entries: SubtitleEntry[]
+  selectedId?: string
+}
+
+type SplitSubtitleResult = {
   entries: SubtitleEntry[]
   selectedId?: string
 }
@@ -51,5 +56,33 @@ export function duplicateSubtitleEntry(entries: SubtitleEntry[], id: string): Du
   return {
     entries: sortAndRenumber([...entries, duplicate]),
     selectedId: duplicate.id,
+  }
+}
+
+export function splitSubtitleEntryAtTime(
+  entries: SubtitleEntry[],
+  id: string,
+  splitTime: number,
+): SplitSubtitleResult {
+  const sorted = sortAndRenumber(entries)
+  const sourceIndex = sorted.findIndex((entry) => entry.id === id)
+  if (sourceIndex < 0) {
+    return { entries: sorted }
+  }
+
+  const split = splitEntryAtTime(sorted[sourceIndex], splitTime)
+  if (!split) {
+    return { entries: sorted }
+  }
+
+  const [first, second] = split
+  return {
+    entries: sortAndRenumber([
+      ...sorted.slice(0, sourceIndex),
+      first,
+      second,
+      ...sorted.slice(sourceIndex + 1),
+    ]),
+    selectedId: second.id,
   }
 }
