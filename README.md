@@ -141,6 +141,8 @@ Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-t
 
 Range movement, resizing, and keyboard edits use the timeline's magnetic cue-boundary, playhead, video-boundary, and half-second-grid snapping. Hold Alt/Option to bypass snapping. Regeneration inherits the current caption-formatting preferences and freezes all settings when generation starts. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
 
+The regeneration dialog remains available while the media workspace is fullscreen. It is mounted inside the active fullscreen workspace so the browser can display it without forcing fullscreen to close.
+
 ## Generated Caption Readability
 
 Generated captions use a deterministic, local-only post-processing pass informed by public subtitle guidance from Netflix, BBC, and DCMP:
@@ -242,6 +244,7 @@ The transcription provider boundary is intentionally small so another local engi
 - Video cannot be decoded: try MP4/H.264 or WebM/VP9. MOV and MKV support depends heavily on codecs.
 - Empty or silent audio: confirm the source video has an audio track.
 - Browser becomes slow: use a shorter file, the faster model, or close other memory-heavy apps.
+- Regeneration worker fails before loading: the app automatically starts one fresh worker when the first worker crashes before sending any message. If the retry also fails, the error includes the browser's worker message and source location when available; reload the page after a long development hot-reload session and export a new debug log if it persists.
 - Intermittent repeated or silent-area subtitles: reproduce the issue, click **Debug log**, and keep the exported JSON with the affected video timestamp. The report contains recognized text, so review it before sharing.
 
 ## Dependency And License Notes

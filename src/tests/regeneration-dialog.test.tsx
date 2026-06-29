@@ -20,6 +20,10 @@ describe('RegenerationDialog', () => {
   let root: Root
 
   beforeEach(() => {
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    })
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -28,6 +32,11 @@ describe('RegenerationDialog', () => {
   afterEach(() => {
     act(() => root.unmount())
     container.remove()
+    document.querySelector('[data-testid="fullscreen-host"]')?.remove()
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    })
   })
 
   it('opens with the subtitle range and current subtitles selected', () => {
@@ -115,6 +124,27 @@ describe('RegenerationDialog', () => {
     act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
 
     expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it('mounts inside the active fullscreen element so the dialog remains visible', () => {
+    const fullscreenHost = document.createElement('section')
+    fullscreenHost.dataset.testid = 'fullscreen-host'
+    document.body.append(fullscreenHost)
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: fullscreenHost,
+    })
+
+    renderDialog()
+
+    expect(fullscreenHost.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
+
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    })
+    fullscreenHost.remove()
   })
 
   function renderDialog(overrides: Partial<React.ComponentProps<typeof RegenerationDialog>> = {}) {

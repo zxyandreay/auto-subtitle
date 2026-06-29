@@ -228,7 +228,7 @@ flowchart TB
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
-| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, session-only runtime settings, model compatibility warnings, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. |
+| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, session-only runtime settings, model compatibility warnings, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. A fullscreen-aware portal mounts the backdrop inside the active fullscreen element. |
 | `IconButton` | `src/components/IconButton.tsx` | Shared accessible icon button with `aria-label` and `title`. |
 | `SubtitleLogo` | `src/components/SubtitleLogo.tsx` | Reusable letter-free SVG caption-bubble symbol displayed in the app header. |
 
@@ -437,6 +437,8 @@ The provider listens for typed worker outcomes:
 | `complete` | Terminates the worker and resolves the job promise. |
 | `regeneration-complete` | Terminates the worker and resolves the range-regeneration promise. |
 | `error` | Terminates the worker and rejects the job promise. |
+
+Range regeneration treats an error before the worker's first message as a startup failure. The provider terminates that worker and creates one fresh worker using the same immutable request. It retries only once and only before any diagnostic, progress, or result message, so model execution failures and out-of-memory crashes are never repeated automatically. A second startup failure rejects with the browser's message and worker source location when available, giving exported diagnostics more evidence than the generic crash fallback.
 
 ### 3. Worker Initialization
 
@@ -841,7 +843,7 @@ Regeneration details:
 5. The dialog exposes language, output task, model, execution provider, dtype, and word/segment timestamps. These choices remain in memory for the browser session and never update project or full-transcription settings.
 6. Changing the range or runtime preferences invalidates prior candidates. Generation captures an immutable settings snapshot, including current caption formatting, and uses it for candidate formatting, preview, and apply.
 7. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
-8. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
+8. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state. If the worker crashes before its first message, the provider makes one fresh startup attempt and then reports browser error details if that also fails.
 9. The worker enforces model compatibility again and returns the resolved model ID.
 10. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
 11. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
@@ -850,6 +852,8 @@ Regeneration details:
 14. Candidate preview replaces cues only in the video overlay and clears when range playback finishes or the dialog closes.
 15. Apply removes every overlapping cue, inserts the chosen candidate, sorts and renumbers, and calls the undoable `commit` path once. Timeline range edits never enter subtitle history or autosave.
 16. The original option closes the dialog without changing subtitles.
+
+When the video workspace is fullscreen, the browser paints only descendants of the fullscreen element. `RegenerationDialog` therefore portals its backdrop into `document.fullscreenElement` and follows `fullscreenchange`; outside fullscreen it keeps the normal application-level mount. Users can configure, preview, cancel, and apply regeneration without leaving fullscreen.
 
 Full transcription and regeneration have separate job references but are mutually exclusive. This avoids running two FFmpeg.wasm/model pipelines concurrently while preserving independent progress and cancellation UI.
 
@@ -1326,6 +1330,7 @@ The app intentionally keeps errors visible:
 | User cancellation | Progress becomes `cancelled`; busy state clears. |
 | Invalid regeneration range | Dialog blocks non-finite, negative, empty, out-of-video, or longer-than-29-second requests before worker startup. |
 | Empty or duplicate regeneration results | Dialog explains that no distinct timestamped alternative was found; original cues remain unchanged. |
+| Regeneration worker startup failure | Provider retries once only if the worker has not emitted a message; a repeated failure includes the browser message/source location when available. |
 | Regeneration failure or cancellation | Dedicated worker is terminated, temporary preview is cleared, and original cues remain unchanged. |
 | Autosave load/save failure | Warning notice; app remains usable. |
 | Import parse failure | Error notice with parse or validation details. |
@@ -1431,6 +1436,7 @@ They cover:
 68. Cross-platform undo/redo shortcut recognition and form/contenteditable focus guards.
 69. Exact timeline splitting, 0.1-second edge guards, second-half selection, dedicated history/split controls, continuous zoom, empty-track seeking, and Ctrl/Cmd+K recognition.
 70. Enabled-by-default Magnet control and consistent snap disabling across empty-track, playhead, cue-body, and boundary interactions.
+71. One-time regeneration worker startup recovery, detailed repeated-crash errors, and fullscreen dialog portal mounting.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 

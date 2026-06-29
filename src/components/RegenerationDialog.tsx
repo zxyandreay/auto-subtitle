@@ -1,5 +1,6 @@
 import { Loader2, Play, RefreshCw, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { BrowserCapabilities } from '../transcription/capabilities'
 import {
   getSpeechModelOption,
@@ -77,6 +78,7 @@ export function RegenerationDialog({
   const [rangeDirty, setRangeDirty] = useState(false)
   const [settingsDirty, setSettingsDirty] = useState(false)
   const [compatibilityNotice, setCompatibilityNotice] = useState('')
+  const [fullscreenHost, setFullscreenHost] = useState<Element | null>(() => document.fullscreenElement)
   const startRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -88,6 +90,12 @@ export function RegenerationDialog({
 
   useEffect(() => {
     startRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    const syncFullscreenHost = () => setFullscreenHost(document.fullscreenElement)
+    document.addEventListener('fullscreenchange', syncFullscreenHost)
+    return () => document.removeEventListener('fullscreenchange', syncFullscreenHost)
   }, [])
 
   useEffect(() => {
@@ -134,7 +142,7 @@ export function RegenerationDialog({
   ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
 
-  return (
+  const dialog = (
     <div className="dialog-backdrop">
       <section
         aria-labelledby="regeneration-dialog-title"
@@ -381,6 +389,8 @@ export function RegenerationDialog({
       </section>
     </div>
   )
+
+  return fullscreenHost ? createPortal(dialog, fullscreenHost) : dialog
 }
 
 type RegenerationChoiceProps = {

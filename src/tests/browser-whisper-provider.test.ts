@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { startBrowserWhisperTranscription } from '../transcription/browserWhisperProvider'
+import {
+  startBrowserWhisperRegeneration,
+  startBrowserWhisperTranscription,
+} from '../transcription/browserWhisperProvider'
 import { DEFAULT_TRANSCRIPTION_SETTINGS, type WorkerEvent } from '../transcription/types'
 
 class MockWorker {
@@ -15,6 +18,15 @@ class MockWorker {
 
   emit(data: WorkerEvent): void {
     this.onmessage?.({ data } as MessageEvent<WorkerEvent>)
+  }
+
+  emitError(message = ''): void {
+    this.onerror?.({
+      message,
+      filename: 'transcription.worker.js',
+      lineno: 1,
+      colno: 1,
+    } as ErrorEvent)
   }
 }
 
@@ -54,5 +66,64 @@ describe('browser Whisper diagnostic events', () => {
       result: { modelId: 'model', segments: [], text: '' },
     })
     await expect(job.done).resolves.toMatchObject({ modelId: 'model' })
+  })
+
+  it('restarts regeneration once when the worker crashes before its first message', async () => {
+    const file = new File(['video'], 'sample.mp4', { type: 'video/mp4' })
+    const range = { startTime: 12, endTime: 18 }
+    const onDiagnostic = vi.fn()
+    const job = startBrowserWhisperRegeneration(
+      file,
+      DEFAULT_TRANSCRIPTION_SETTINGS,
+      range,
+      60,
+      { onProgress: vi.fn(), onDiagnostic },
+    )
+    void job.done.catch(() => undefined)
+    const firstWorker = MockWorker.instances[0]
+
+    firstWorker.emitError()
+
+    expect(firstWorker.terminate).toHaveBeenCalledOnce()
+    expect(onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'app',
+      category: 'regeneration-worker-startup-retry',
+      level: 'warning',
+    }))
+    expect(MockWorker.instances).toHaveLength(2)
+    const restartedWorker = MockWorker.instances[1]
+    expect(restartedWorker.postMessage).toHaveBeenCalledWith({
+      type: 'regenerate',
+      file,
+      settings: DEFAULT_TRANSCRIPTION_SETTINGS,
+      range,
+      videoDuration: 60,
+    })
+
+    restartedWorker.emit({
+      type: 'regeneration-complete',
+      result: { range, candidates: [], modelId: DEFAULT_TRANSCRIPTION_SETTINGS.modelId },
+    })
+
+    await expect(job.done).resolves.toMatchObject({ range })
+  })
+
+  it('reports browser worker details when the fresh startup also fails', async () => {
+    const job = startBrowserWhisperRegeneration(
+      new File(['video'], 'sample.mp4', { type: 'video/mp4' }),
+      DEFAULT_TRANSCRIPTION_SETTINGS,
+      { startTime: 12, endTime: 18 },
+      60,
+      { onProgress: vi.fn() },
+    )
+    const rejection = expect(job.done).rejects.toThrow(
+      'The regeneration worker crashed: Failed to load module script. (transcription.worker.js:1:1)',
+    )
+
+    MockWorker.instances[0].emitError()
+    MockWorker.instances[1].emitError('Failed to load module script.')
+
+    await rejection
+    expect(MockWorker.instances).toHaveLength(2)
   })
 })
