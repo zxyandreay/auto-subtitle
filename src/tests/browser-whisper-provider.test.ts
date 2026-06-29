@@ -77,6 +77,7 @@ describe('browser Whisper diagnostic events', () => {
       DEFAULT_TRANSCRIPTION_SETTINGS,
       range,
       60,
+      5,
       { onProgress: vi.fn(), onDiagnostic },
     )
     void job.done.catch(() => undefined)
@@ -98,6 +99,7 @@ describe('browser Whisper diagnostic events', () => {
       settings: DEFAULT_TRANSCRIPTION_SETTINGS,
       range,
       videoDuration: 60,
+      alternativeCount: 5,
     })
 
     restartedWorker.emit({
@@ -114,6 +116,7 @@ describe('browser Whisper diagnostic events', () => {
       DEFAULT_TRANSCRIPTION_SETTINGS,
       { startTime: 12, endTime: 18 },
       60,
+      4,
       { onProgress: vi.fn() },
     )
     const rejection = expect(job.done).rejects.toThrow(

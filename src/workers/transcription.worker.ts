@@ -17,12 +17,12 @@ import {
 } from '../transcription/models'
 import {
   dedupeRegenerationCandidates,
-  MAX_REGENERATION_CANDIDATES,
   planRegenerationAudioRange,
   REGENERATION_DECODING_PROFILES,
   validateRegenerationRange,
   type RegenerationDecodingProfile,
 } from '../transcription/regeneration'
+import { normalizeRegenerationAlternativeCount } from '../transcription/regenerationLimits'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
 import { isWordTimestampUnsupportedError } from '../transcription/timestampSupport'
 import { safelyDetectSpeechRegions, type SpeechRegion } from '../transcription/speechActivity'
@@ -133,6 +133,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
     settings: request.settings,
     range: request.type === 'regenerate' ? request.range : undefined,
     videoDuration: request.type === 'regenerate' ? request.videoDuration : undefined,
+    alternativeCount: request.type === 'regenerate' ? request.alternativeCount : undefined,
   })
   const task =
     request.type === 'regenerate'
@@ -140,6 +141,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
           request.file,
           normalizeTranscriptionSettings(request.settings).settings,
           request.range,
+          request.alternativeCount,
           request.videoDuration,
         )
       : transcribe(request.file, normalizeTranscriptionSettings(request.settings).settings)
@@ -267,8 +269,10 @@ async function regenerate(
   file: File,
   settings: TranscriptionSettings,
   range: RegenerationRange,
+  alternativeCount: number,
   videoDuration?: number,
 ): Promise<void> {
+  const requestedAlternativeCount = normalizeRegenerationAlternativeCount(alternativeCount)
   const runtime = resolveSpeechModelRuntimeSettings(settings)
   const effectiveSettings = runtime.settings
   const model = getSpeechModelOption(effectiveSettings.modelId)
@@ -279,6 +283,7 @@ async function regenerate(
     model,
     range,
     videoDuration,
+    requestedAlternativeCount,
   })
   const validationError = validateRegenerationRange(range, videoDuration)
   if (validationError) {
@@ -319,7 +324,7 @@ async function regenerate(
       rms: audioRms,
       threshold: 0.0008,
     }, 'warning')
-    postRegenerationComplete(range, [], effectiveSettings.modelId)
+    postRegenerationComplete(range, [], effectiveSettings.modelId, requestedAlternativeCount)
     return
   }
 
@@ -351,7 +356,7 @@ async function regenerate(
       assertNotCancelled()
       postProgress(
         'transcribing',
-        `Generating local alternative ${Math.min(candidates.length + 1, MAX_REGENERATION_CANDIDATES)} of ${MAX_REGENERATION_CANDIDATES}.`,
+        `Generating local alternative ${Math.min(candidates.length + 1, requestedAlternativeCount)} of ${requestedAlternativeCount}.`,
         profileIndex / REGENERATION_DECODING_PROFILES.length,
       )
 
@@ -394,7 +399,7 @@ async function regenerate(
         candidates.push({ id: profile.id, segments, text })
       }
 
-      const uniqueCandidates = dedupeRegenerationCandidates(candidates)
+      const uniqueCandidates = dedupeRegenerationCandidates(candidates, requestedAlternativeCount)
       candidates.splice(0, candidates.length, ...uniqueCandidates)
       postProgress(
         'transcribing',
@@ -402,13 +407,13 @@ async function regenerate(
         (profileIndex + 1) / REGENERATION_DECODING_PROFILES.length,
       )
 
-      if (candidates.length >= MAX_REGENERATION_CANDIDATES) {
+      if (candidates.length >= requestedAlternativeCount) {
         break
       }
     }
 
     assertNotCancelled()
-    postRegenerationComplete(range, candidates, effectiveSettings.modelId)
+    postRegenerationComplete(range, candidates, effectiveSettings.modelId, requestedAlternativeCount)
   } finally {
     if ('dispose' in transcriber && typeof transcriber.dispose === 'function') {
       await transcriber.dispose()
@@ -450,10 +455,12 @@ function postRegenerationComplete(
   range: RegenerationRange,
   candidates: RegenerationCandidate[],
   modelId: string,
+  requestedAlternativeCount: number,
 ): void {
   postDiagnostic('regeneration-result', 'Completed bounded regeneration attempts.', {
     range,
     modelId,
+    requestedAlternativeCount,
     candidateCount: candidates.length,
     candidates: candidates.map((candidate) => ({
       id: candidate.id,

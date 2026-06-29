@@ -69,6 +69,9 @@ describe('RegenerationDialog', () => {
     expect(select('Regeneration model').options).toHaveLength(4)
     expect(select('Regeneration model').querySelector<HTMLOptionElement>(`option[value="${DISTIL_LARGE_V3_MODEL_ID}"]`)?.disabled).toBe(true)
     expect(select('Regeneration timestamp detail').value).toBe('word')
+    const alternativeCount = container.querySelector<HTMLSelectElement>('select[aria-label="Regeneration alternative count"]')
+    expect(alternativeCount).not.toBeNull()
+    expect(alternativeCount?.value).toBe('3')
   })
 
   it('keeps changed settings session-local and invalidates displayed candidates', () => {
@@ -82,6 +85,21 @@ describe('RegenerationDialog', () => {
     changeSelect(select('Regeneration model'), LARGE_V3_TURBO_MODEL_ID)
 
     expect(onPreferencesChange).toHaveBeenCalledWith(expect.objectContaining({ modelId: LARGE_V3_TURBO_MODEL_ID }))
+    expect(container.textContent).not.toContain('Alternative 1')
+  })
+
+  it('selects the requested alternative count and invalidates displayed candidates', () => {
+    const onPreferencesChange = vi.fn()
+    renderDialog({
+      candidates: [formattedCandidate('candidate-1', 'Alternative.')],
+      onPreferencesChange,
+    })
+    const alternativeCount = container.querySelector<HTMLSelectElement>('select[aria-label="Regeneration alternative count"]')
+    expect(alternativeCount).not.toBeNull()
+
+    changeSelect(alternativeCount!, '5')
+
+    expect(onPreferencesChange).toHaveBeenCalledWith(expect.objectContaining({ alternativeCount: 5 }))
     expect(container.textContent).not.toContain('Alternative 1')
   })
 

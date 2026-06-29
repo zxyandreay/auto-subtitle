@@ -95,7 +95,7 @@ The core design is a single-page app with a worker-backed transcription provider
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/models.ts`, `src/transcription/capabilities.ts` | Registers model metadata and compatibility, normalizes settings, starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
 | Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that preserve delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
-| Range regeneration | `src/transcription/regeneration.ts`, `src/subtitles/regeneration.ts` | Validates ranges, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
+| Range regeneration | `src/transcription/regeneration.ts`, `src/transcription/regenerationLimits.ts`, `src/subtitles/regeneration.ts` | Validates ranges, normalizes the requested one-to-five alternative count, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
 | Speech activity and windowing | `src/transcription/speechActivity.ts`, `src/transcription/windowing.ts` | Detects padded speech regions locally and plans silence-preferred ownership windows within a 29-second model budget. |
 | Coverage and timing recovery | `src/transcription/coverage.ts`, `src/transcription/repair.ts`, `src/transcription/reconciliation.ts`, `src/transcription/timingRefinement.ts` | Finds likely missed speech, plans one bounded repair pass, reconciles overlap words, and snaps generated cues to safe speech boundaries. |
 | Local diagnostics | `src/diagnostics/*`, worker diagnostic events, provider bridge, toolbar export | Persists bounded structured evidence for model output, timing decisions, recovery, formatting, environment, and errors without storing media bytes. |
@@ -158,8 +158,8 @@ The core design is a single-page app with a worker-backed transcription provider
 | `showOnlyErrors` | Whether the editor filters rows to entries with validation issues. |
 | `selectedSubtitleId` | Shared selection for the player timeline, player editor, and main subtitle editor. |
 | `timelineRegenerationRange` | Temporary draggable timeline range used to preview and configure regeneration. |
-| `regenerationPreferences` | Session-only language, output, model, engine, precision, and timestamp choices for regeneration. |
-| `regenerationRequestContext` | Immutable range and settings snapshot used to format, preview, and apply one generated candidate set. |
+| `regenerationPreferences` | Session-only language, output, model, engine, precision, timestamp, and one-to-five alternative-count choices for regeneration. |
+| `regenerationRequestContext` | Immutable range, settings, and requested-alternative-count snapshot used to format, preview, and apply one generated candidate set. |
 | `focusSubtitleRequest` | Monotonic request used to focus newly added or duplicated text in the player editor. |
 | `shiftMilliseconds` | Global timing shift amount. |
 | `includeTranscriptTimestamps` | Whether TXT export includes timestamps. |
@@ -228,7 +228,7 @@ flowchart TB
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
-| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, session-only runtime settings, model compatibility warnings, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. A fullscreen-aware portal mounts the backdrop inside the active fullscreen element. |
+| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, session-only runtime settings and alternative count, model compatibility warnings, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. A fullscreen-aware portal mounts the backdrop inside the active fullscreen element. |
 | `IconButton` | `src/components/IconButton.tsx` | Shared accessible icon button with `aria-label` and `title`. |
 | `SubtitleLogo` | `src/components/SubtitleLogo.tsx` | Reusable letter-free SVG caption-bubble symbol displayed in the app header. |
 
@@ -827,7 +827,7 @@ flowchart TD
     Extract --> Load["Load selected Whisper pipeline once"]
     Load --> Profiles["Run greedy and sampled profiles sequentially"]
     Profiles --> Normalize["Restore absolute timestamps and constrain to range"]
-    Normalize --> Dedupe["Keep up to three normalized-text-distinct candidates"]
+    Normalize --> Dedupe["Keep the requested 1-5 normalized-text-distinct candidates"]
     Dedupe --> Compare["Dialog shows original and alternatives"]
     Compare --> Preview["Temporary video-overlay preview"]
     Compare --> Apply["Replace overlapping cues in one commit"]
@@ -840,12 +840,12 @@ Regeneration details:
 2. Timeline mode starts from the selected cue. Without one, it creates a five-second range centered on the playhead and shifts the range inside video boundaries. Cues longer than 29 seconds use their first valid 29-second window.
 3. The range body preserves duration while moving; start/end handles resize it. Pointer and keyboard edits reuse cue-boundary, playhead, video-boundary, and half-second-grid snapping, with Alt/Option as a temporary bypass.
 4. Preview seeks to the selected start, plays once through the selected end with current subtitles, then stops without clearing the range.
-5. The dialog exposes language, output task, model, execution provider, dtype, and word/segment timestamps. These choices remain in memory for the browser session and never update project or full-transcription settings.
-6. Changing the range or runtime preferences invalidates prior candidates. Generation captures an immutable settings snapshot, including current caption formatting, and uses it for candidate formatting, preview, and apply.
+5. The dialog exposes language, output task, model, execution provider, dtype, word/segment timestamps, and an Alternatives selector from one to five. The count defaults to three. These choices remain in memory for the browser session and never update project or full-transcription settings.
+6. Changing the range, runtime preferences, or requested count invalidates prior candidates. Generation captures an immutable settings-and-count snapshot, including current caption formatting, and uses it for candidate formatting, preview, and apply.
 7. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
 8. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state. If the worker crashes before its first message, the provider makes one fresh startup attempt and then reports browser error details if that also fails.
 9. The worker enforces model compatibility again and returns the resolved model ID.
-10. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
+10. The worker runs greedy decoding, then sampling at temperatures `0.4`, `0.75`, `0.9`, and `1.0`. Processing stops after it finds the requested one-to-five distinct candidates or exhausts all five profiles. Empty and normalized duplicate results can leave the final count below the request.
 11. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
 12. Empty, silent, duplicate-only, cancelled, or failed regeneration produces no editor mutation.
 13. Candidate formatting is bounded to the selected range before display. Applying also respects the configured gap from nearest untouched cues.
@@ -1116,7 +1116,7 @@ The editor supports:
 9. Add before and add after relative to an existing row, with the new row focused immediately.
 10. Open local range regeneration from any row when its source video is selected.
 11. Adjust and validate a regeneration range up to 29 seconds.
-12. Compare the current cues with up to three distinct local Whisper alternatives.
+12. Request one to five alternatives and compare the current cues with the distinct local Whisper results.
 13. Preview a choice against video without committing it, then keep the original or apply one undoable replacement.
 14. Delete.
 15. Duplicate.
@@ -1437,6 +1437,7 @@ They cover:
 69. Exact timeline splitting, 0.1-second edge guards, second-half selection, dedicated history/split controls, continuous zoom, empty-track seeking, and Ctrl/Cmd+K recognition.
 70. Enabled-by-default Magnet control and consistent snap disabling across empty-track, playhead, cue-body, and boundary interactions.
 71. One-time regeneration worker startup recovery, detailed repeated-crash errors, and fullscreen dialog portal mounting.
+72. Session-local one-to-five regeneration counts, count normalization, candidate invalidation, and immutable worker-request propagation.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1472,7 +1473,7 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 11. Generated subtitle timing is improved with word timestamp padding, speech-boundary snapping, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 12. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 13. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
-14. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time.
+14. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time. Higher requested alternative counts may require more decoding passes.
 
 ## Extension Points
 

@@ -94,6 +94,7 @@ type RegenerationDialogState = {
 type RegenerationRequestContext = {
   range: RegenerationRange
   settings: TranscriptionSettings
+  alternativeCount: number
 }
 
 function App() {
@@ -743,6 +744,7 @@ function App() {
       data: {
         range,
         videoDuration,
+        alternativeCount: preferences.alternativeCount,
         settings: transcriptionSettings,
         originalEntries: summarizeSegments(originalEntries),
       },
@@ -753,7 +755,11 @@ function App() {
     setRegenerationPreviewEntries(null)
     setRegenerationError('')
     setRegenerationBusy(true)
-    setRegenerationRequestContext({ range, settings: transcriptionSettings })
+    setRegenerationRequestContext({
+      range,
+      settings: transcriptionSettings,
+      alternativeCount: preferences.alternativeCount,
+    })
     setRegenerationProgress({
       stage: 'loading-engine',
       message: 'Starting local subtitle regeneration.',
@@ -765,6 +771,7 @@ function App() {
       transcriptionSettings,
       range,
       videoDuration,
+      preferences.alternativeCount,
       { onProgress: setRegenerationProgress, onDiagnostic: recordDiagnosticEvent },
     )
     regenerationJobRef.current = job

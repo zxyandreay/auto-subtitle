@@ -1,9 +1,13 @@
 import { normalizeForDuplicateComparison } from '../subtitles/formatting'
+import {
+  DEFAULT_REGENERATION_ALTERNATIVES,
+  MAX_REGENERATION_ALTERNATIVES,
+} from './regenerationLimits'
 import type { RegenerationCandidate, RegenerationRange } from './types'
 
 export const MAX_REGENERATION_RANGE_SECONDS = 29
 export const MAX_REGENERATION_CONTEXT_SECONDS = 2
-export const MAX_REGENERATION_CANDIDATES = 3
+export const MAX_REGENERATION_CANDIDATES = MAX_REGENERATION_ALTERNATIVES
 
 export type RegenerationDecodingProfile = {
   id: string
@@ -66,7 +70,7 @@ export function planRegenerationAudioRange(
 
 export function dedupeRegenerationCandidates(
   candidates: RegenerationCandidate[],
-  maximum = MAX_REGENERATION_CANDIDATES,
+  maximum = DEFAULT_REGENERATION_ALTERNATIVES,
 ): RegenerationCandidate[] {
   const seen = new Set<string>()
   const unique: RegenerationCandidate[] = []

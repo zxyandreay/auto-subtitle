@@ -107,6 +107,7 @@ export function startBrowserWhisperRegeneration(
   settings: TranscriptionSettings,
   range: RegenerationRange,
   videoDuration: number | undefined,
+  alternativeCount: number,
   callbacks: Pick<TranscriptionCallbacks, 'onProgress' | 'onDiagnostic'>,
 ): RegenerationJob {
   let worker: Worker | null = null
@@ -120,6 +121,7 @@ export function startBrowserWhisperRegeneration(
     settings,
     range,
     videoDuration,
+    alternativeCount,
   } satisfies WorkerRequest
 
   const done = new Promise<RegenerationResult>((resolve, reject) => {

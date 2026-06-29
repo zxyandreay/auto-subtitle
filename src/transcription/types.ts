@@ -2,6 +2,7 @@ import type { FormattingPreferences } from '../types/subtitles'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import type { DiagnosticEventInput } from '../diagnostics/types'
 import { resolveCompatibleModelId, TINY_MODEL_ID, type SpeechModelId } from './models'
+import { DEFAULT_REGENERATION_ALTERNATIVES } from './regenerationLimits'
 
 export type TranscriptionStage =
   | 'idle'
@@ -55,6 +56,7 @@ export type RegenerationPreferences = Pick<
   'language' | 'task' | 'modelId' | 'executionProvider' | 'dtype'
 > & {
   useWordTimestamps: boolean
+  alternativeCount: number
 }
 
 export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionSettings = {
@@ -187,6 +189,7 @@ export type WorkerRegenerateRequest = {
   file: File
   settings: TranscriptionSettings
   range: RegenerationRange
+  alternativeCount: number
   videoDuration?: number
 }
 
@@ -232,6 +235,7 @@ export function createRegenerationPreferences(settings: TranscriptionSettings): 
     executionProvider: settings.executionProvider,
     dtype: settings.dtype,
     useWordTimestamps: settings.formatting.useWordTimestamps,
+    alternativeCount: DEFAULT_REGENERATION_ALTERNATIVES,
   }
 }
 

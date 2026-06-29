@@ -11,6 +11,7 @@ import {
   planRegenerationAudioRange,
   validateRegenerationRange,
 } from '../transcription/regeneration'
+import { normalizeRegenerationAlternativeCount } from '../transcription/regenerationLimits'
 import type { RegenerationCandidate, RegenerationRange } from '../transcription/types'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
 
@@ -93,6 +94,15 @@ describe('regeneration ranges', () => {
 })
 
 describe('regeneration candidates', () => {
+  it('normalizes requested alternative counts to the supported one-to-five range', () => {
+    expect(normalizeRegenerationAlternativeCount(0)).toBe(1)
+    expect(normalizeRegenerationAlternativeCount(1)).toBe(1)
+    expect(normalizeRegenerationAlternativeCount(4.4)).toBe(4)
+    expect(normalizeRegenerationAlternativeCount(5)).toBe(5)
+    expect(normalizeRegenerationAlternativeCount(9)).toBe(5)
+    expect(normalizeRegenerationAlternativeCount(Number.NaN)).toBe(3)
+  })
+
   it('uses one greedy pass and four bounded sampling attempts', () => {
     expect(REGENERATION_DECODING_PROFILES).toEqual([
       { id: 'greedy', doSample: false },
@@ -117,6 +127,11 @@ describe('regeneration candidates', () => {
       'sample-075',
       'sample-09',
     ])
+    expect(dedupeRegenerationCandidates(candidates, 2).map(({ id }) => id)).toEqual([
+      'greedy',
+      'sample-075',
+    ])
+    expect(dedupeRegenerationCandidates(candidates, 5)).toHaveLength(4)
   })
 })
 

@@ -83,6 +83,7 @@ describe('accurate-local defaults', () => {
       executionProvider: 'auto',
       dtype: 'q8',
       useWordTimestamps: true,
+      alternativeCount: 3,
     })
   })
 
@@ -95,6 +96,7 @@ describe('accurate-local defaults', () => {
       executionProvider: 'webgpu',
       dtype: 'fp32',
       useWordTimestamps: false,
+      alternativeCount: 5,
     })
 
     expect(snapshot).toMatchObject({

@@ -10,6 +10,11 @@ import {
   SPEECH_MODELS,
 } from '../transcription/models'
 import { validateRegenerationRange } from '../transcription/regeneration'
+import {
+  MAX_REGENERATION_ALTERNATIVES,
+  MIN_REGENERATION_ALTERNATIVES,
+  normalizeRegenerationAlternativeCount,
+} from '../transcription/regenerationLimits'
 import type {
   RegenerationPreferences,
   RegenerationRange,
@@ -53,6 +58,10 @@ const LANGUAGES = [
   ['korean', 'Korean'],
   ['chinese', 'Chinese'],
 ]
+const ALTERNATIVE_COUNTS = Array.from(
+  { length: MAX_REGENERATION_ALTERNATIVES - MIN_REGENERATION_ALTERNATIVES + 1 },
+  (_, index) => MIN_REGENERATION_ALTERNATIVES + index,
+)
 
 export function RegenerationDialog({
   range,
@@ -293,6 +302,22 @@ export function RegenerationDialog({
             >
               <option value="word">Word timestamps</option>
               <option value="segment">Segment timestamps</option>
+            </select>
+          </label>
+          <label>
+            Alternatives
+            <select
+              aria-label="Regeneration alternative count"
+              disabled={busy}
+              value={preferences.alternativeCount}
+              onChange={(event) => updatePreferences({
+                ...preferences,
+                alternativeCount: normalizeRegenerationAlternativeCount(Number(event.target.value)),
+              })}
+            >
+              {ALTERNATIVE_COUNTS.map((count) => (
+                <option key={count} value={count}>{count}</option>
+              ))}
             </select>
           </label>
         </div>

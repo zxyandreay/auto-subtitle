@@ -14,7 +14,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
 - Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
 - Synchronized player and list editors with playhead-accurate insertion, text and timestamp editing, timeline dragging, validation, search, delete, split, merge, duplicate, move, range playback, undo, and redo.
-- Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus as many as three distinct Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
+- Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus one to five requested Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
@@ -134,9 +134,9 @@ Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-t
 2. Use the timeline Regenerate tool. It starts from the selected cue or creates a five-second range around the playhead. The subtitle-row regenerate icon remains available.
 3. Drag the amber range to move it, drag either edge to resize it, or use the timestamp fields for exact values. A range can cover one or many cues but cannot exceed 29 seconds.
 4. Use **Preview range** to play the current section once. The range remains selected when playback stops.
-5. Open **Configure regeneration** and choose the language, output, model, engine, precision, and timestamp detail for this run. These choices persist for later regenerations in the current browser session without changing full-transcription settings.
-6. Generate alternatives. The worker extracts the range once, loads the selected Whisper model once, and performs bounded sequential decoding passes locally.
-7. Compare the unchanged current cues with up to three distinct alternatives, then preview any choice against the video.
+5. Open **Configure regeneration** and choose the language, output, model, engine, precision, timestamp detail, and **Alternatives** count for this run. You can request one to five alternatives; the default is three. These choices persist for later regenerations in the current browser session without changing full-transcription settings.
+6. Generate alternatives. The worker extracts the range once, loads the selected Whisper model once, and performs up to five bounded sequential decoding passes locally, stopping when it finds the requested number of distinct results.
+7. Compare the unchanged current cues with the generated alternatives, then preview any choice against the video. Empty or duplicate decoding results can produce fewer alternatives than requested.
 8. Apply an alternative to replace all overlapping cues as one undoable edit, or keep the original unchanged.
 
 Range movement, resizing, and keyboard edits use the timeline's magnetic cue-boundary, playhead, video-boundary, and half-second-grid snapping. Hold Alt/Option to bypass snapping. Regeneration inherits the current caption-formatting preferences and freezes all settings when generation starts. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
@@ -232,7 +232,7 @@ The transcription provider boundary is intentionally small so another local engi
 - Word-level timestamps depend on model support and may fall back to coarser chunks.
 - Speech activity analysis can be imperfect with music, sustained background noise, overlapping speakers, or very quiet speech. A missed VAD region cannot trigger coverage repair.
 - Coverage recovery is deliberately limited to one pass and 20 ranges so difficult audio cannot cause an unbounded transcription loop.
-- Range regeneration starts a fresh worker and model pipeline for each request. Browser caching avoids unchanged model downloads, but repeated requests still require local initialization and audio extraction.
+- Range regeneration starts a fresh worker and model pipeline for each request. Browser caching avoids unchanged model downloads, but repeated requests still require local initialization and audio extraction. Requesting more alternatives can require more decoding passes.
 - Generated subtitle synchronization is improved by speech-aware windowing, bounded recovery, and deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
 
 ## Troubleshooting
