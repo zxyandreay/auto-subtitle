@@ -38,7 +38,7 @@ import {
   mergeLiveTranscriptionPreview,
   type LiveTranscriptionPreviewState,
 } from './subtitles/livePreview'
-import { replaceEntriesInRange } from './subtitles/regeneration'
+import { createInitialRegenerationRange, replaceEntriesInRange } from './subtitles/regeneration'
 import { applyTheme, loadThemePreference, saveThemePreference, type ThemePreference } from './theme'
 import { detectBrowserCapabilities, getCapabilityWarnings } from './transcription/capabilities'
 import {
@@ -49,12 +49,18 @@ import {
 } from './transcription/browserWhisperProvider'
 import { resolveCompatibleModelId } from './transcription/models'
 import type {
+  RegenerationPreferences,
   RegenerationRange,
   TranscriptionProgress,
   TranscriptionResult,
   TranscriptionSettings,
 } from './transcription/types'
-import { DEFAULT_TRANSCRIPTION_SETTINGS, normalizeTranscriptionSettings } from './transcription/types'
+import {
+  buildRegenerationSettings,
+  createRegenerationPreferences,
+  DEFAULT_TRANSCRIPTION_SETTINGS,
+  normalizeTranscriptionSettings,
+} from './transcription/types'
 import type { SubtitleEntry } from './types/subtitles'
 import { baseName, downloadTextFile } from './utils/format'
 import { getHistoryShortcut, isEditableShortcutTarget, isSplitShortcut } from './utils/keyboard'
@@ -82,6 +88,12 @@ type Notice = {
 type RegenerationDialogState = {
   range: RegenerationRange
   originalEntries: SubtitleEntry[]
+  origin: 'editor' | 'timeline'
+}
+
+type RegenerationRequestContext = {
+  range: RegenerationRange
+  settings: TranscriptionSettings
 }
 
 function App() {
@@ -96,6 +108,9 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [regenerationBusy, setRegenerationBusy] = useState(false)
   const [regenerationDialog, setRegenerationDialog] = useState<RegenerationDialogState | null>(null)
+  const [timelineRegenerationRange, setTimelineRegenerationRange] = useState<RegenerationRange>()
+  const [regenerationPreferences, setRegenerationPreferences] = useState<RegenerationPreferences>()
+  const [regenerationRequestContext, setRegenerationRequestContext] = useState<RegenerationRequestContext | null>(null)
   const [regenerationCandidates, setRegenerationCandidates] = useState<FormattedRegenerationCandidate[]>([])
   const [regenerationProgress, setRegenerationProgress] = useState(IDLE_REGENERATION_PROGRESS)
   const [regenerationError, setRegenerationError] = useState('')
@@ -320,6 +335,8 @@ function App() {
     regenerationJobRef.current = null
     setRegenerationBusy(false)
     setRegenerationDialog(null)
+    setTimelineRegenerationRange(undefined)
+    setRegenerationRequestContext(null)
     setRegenerationPreviewEntries(null)
   }
 
@@ -583,7 +600,7 @@ function App() {
     }))
   }
 
-  const closeRegenerationDialog = () => {
+  const closeRegenerationDialog = (clearTimelineRange = false) => {
     regenerationJobRef.current?.cancel()
     regenerationJobRef.current = null
     setRegenerationBusy(false)
@@ -591,7 +608,73 @@ function App() {
     setRegenerationCandidates([])
     setRegenerationError('')
     setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
     setPlayRangeRequest(undefined)
+    if (clearTimelineRange) {
+      setTimelineRegenerationRange(undefined)
+    }
+  }
+
+  const collectOriginalEntries = (range: RegenerationRange) =>
+    subtitlesRef.current.filter(
+      (subtitle) => subtitle.endTime > range.startTime && subtitle.startTime < range.endTime,
+    )
+
+  const startTimelineRegeneration = () => {
+    if (!video?.duration || busy || regenerationBusy) {
+      return
+    }
+    videoElementRef.current?.pause()
+    setPlayRangeRequest(undefined)
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
+    setRegenerationCandidates([])
+    setRegenerationError('')
+    setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
+    setTimelineRegenerationRange(
+      createInitialRegenerationRange({
+        selectedEntry: selectedSubtitle,
+        currentTime,
+        videoDuration: video.duration,
+      }),
+    )
+  }
+
+  const changeTimelineRegenerationRange = (range: RegenerationRange) => {
+    setTimelineRegenerationRange(range)
+    setRegenerationCandidates([])
+    setRegenerationError('')
+    setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
+  }
+
+  const previewTimelineRegenerationRange = () => {
+    if (!timelineRegenerationRange) {
+      return
+    }
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
+    setSubtitlesVisible(true)
+    setPlayRangeRequest({ ...timelineRegenerationRange, id: Date.now() })
+  }
+
+  const configureTimelineRegeneration = () => {
+    if (!timelineRegenerationRange || !video || busy || regenerationBusy) {
+      return
+    }
+    videoElementRef.current?.pause()
+    setRegenerationPreferences((current) => current ?? createRegenerationPreferences(settings))
+    setRegenerationDialog({
+      range: timelineRegenerationRange,
+      originalEntries: collectOriginalEntries(timelineRegenerationRange),
+      origin: 'timeline',
+    })
+    setRegenerationCandidates([])
+    setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
+    setRegenerationError('')
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
   }
 
   const openRegenerationDialog = (entry: SubtitleEntry) => {
@@ -600,34 +683,59 @@ function App() {
     }
 
     videoElementRef.current?.pause()
+    setRegenerationPreferences((current) => current ?? createRegenerationPreferences(settings))
     const range = { startTime: entry.startTime, endTime: entry.endTime }
-    const originalEntries = subtitlesRef.current.filter(
-      (subtitle) => subtitle.endTime > range.startTime && subtitle.startTime < range.endTime,
-    )
-    setRegenerationDialog({ range, originalEntries })
+    setTimelineRegenerationRange(undefined)
+    const originalEntries = collectOriginalEntries(range)
+    setRegenerationDialog({ range, originalEntries, origin: 'editor' })
     setRegenerationCandidates([])
     setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
     setRegenerationError('')
     setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
   }
 
-  const generateRegenerationCandidates = async (range: RegenerationRange) => {
+  const changeRegenerationPreferences = (nextPreferences: RegenerationPreferences) => {
+    setRegenerationPreferences(nextPreferences)
+    setRegenerationCandidates([])
+    setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
+    setRegenerationError('')
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
+  }
+
+  const changeDialogRegenerationRange = (range: RegenerationRange) => {
+    const origin = regenerationDialog?.origin ?? 'editor'
+    setRegenerationDialog({ range, originalEntries: collectOriginalEntries(range), origin })
+    if (origin === 'timeline') {
+      setTimelineRegenerationRange(range)
+    }
+    setRegenerationCandidates([])
+    setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
+    setRegenerationError('')
+    setRegenerationPreviewEntries(null)
+    setRegenerationRequestContext(null)
+  }
+
+  const generateRegenerationCandidates = async (
+    range: RegenerationRange,
+    preferences: RegenerationPreferences,
+  ) => {
     if (!video || busy || regenerationBusy) {
       return
     }
 
-    const resolvedModel = resolveCompatibleModelId(settings)
-    const transcriptionSettings = { ...settings, modelId: resolvedModel.modelId }
+    const requestedSettings = buildRegenerationSettings(settings, preferences)
+    const resolvedModel = resolveCompatibleModelId(requestedSettings)
+    const transcriptionSettings = { ...requestedSettings, modelId: resolvedModel.modelId }
     if (resolvedModel.changed) {
-      setSettings(transcriptionSettings)
+      setRegenerationPreferences({ ...preferences, modelId: resolvedModel.modelId })
       if (resolvedModel.reason) {
         setNotice({ tone: 'warning', message: resolvedModel.reason })
       }
     }
     const videoDuration = video.duration || undefined
-    const originalEntries = subtitlesRef.current.filter(
-      (entry) => entry.endTime > range.startTime && entry.startTime < range.endTime,
-    )
+    const originalEntries = collectOriginalEntries(range)
     recordDiagnosticEvent({
       source: 'app',
       category: 'regeneration-started',
@@ -639,11 +747,13 @@ function App() {
         originalEntries: summarizeSegments(originalEntries),
       },
     })
-    setRegenerationDialog({ range, originalEntries })
+    setRegenerationDialog((current) => ({ range, originalEntries, origin: current?.origin ?? 'editor' }))
+    setTimelineRegenerationRange((current) => (current ? range : current))
     setRegenerationCandidates([])
     setRegenerationPreviewEntries(null)
     setRegenerationError('')
     setRegenerationBusy(true)
+    setRegenerationRequestContext({ range, settings: transcriptionSettings })
     setRegenerationProgress({
       stage: 'loading-engine',
       message: 'Starting local subtitle regeneration.',
@@ -724,11 +834,12 @@ function App() {
   }
 
   const previewRegenerationCandidate = (entries: SubtitleEntry[], range: RegenerationRange) => {
+    const formatting = regenerationRequestContext?.settings.formatting ?? settings.formatting
     const previewEntries = replaceEntriesInRange(
       subtitlesRef.current,
       entries,
       range,
-      settings.formatting,
+      formatting,
       video?.duration,
     )
     setRegenerationPreviewEntries(previewEntries)
@@ -737,6 +848,7 @@ function App() {
   }
 
   const applyRegenerationCandidate = (entries: SubtitleEntry[] | null, range: RegenerationRange) => {
+    const formatting = regenerationRequestContext?.settings.formatting ?? settings.formatting
     recordDiagnosticEvent({
       source: 'app',
       category: 'regeneration-applied',
@@ -749,13 +861,13 @@ function App() {
           subtitlesRef.current,
           entries,
           range,
-          settings.formatting,
+          formatting,
           video?.duration,
         ),
       )
       setNotice({ tone: 'success', message: 'Applied the regenerated subtitle alternative.' })
     }
-    closeRegenerationDialog()
+    closeRegenerationDialog(true)
   }
 
   const handleImportFile = async (file: File) => {
@@ -997,6 +1109,7 @@ function App() {
           />
 
           <VideoPlayer
+            canRegenerate={Boolean(video?.duration) && !busy && !regenerationBusy}
             canRedo={canRedo}
             canSplitAtPlayhead={canSplitAtPlayhead}
             canUndo={canUndo}
@@ -1008,16 +1121,21 @@ function App() {
             playRangeRequest={playRangeRequest}
             playToggleRequest={playToggleRequest}
             selectedSubtitleId={selectedSubtitleId}
+            regenerationRange={timelineRegenerationRange}
             seekRequest={seekRequest}
             src={video?.objectUrl ?? null}
             subtitles={subtitles}
             subtitlesVisible={subtitlesVisible}
             videoRef={videoElementRef}
             onAddSubtitleAt={addSubtitleFromPlayer}
+            onCancelRegeneration={() => closeRegenerationDialog(true)}
+            onChangeRegenerationRange={changeTimelineRegenerationRange}
+            onConfigureRegeneration={configureTimelineRegeneration}
             onDeleteSubtitle={deleteSubtitleFromPlayer}
             onDuration={handleDuration}
             onDuplicateSubtitle={duplicateSubtitleFromPlayer}
             onPlayRange={playSubtitleRange}
+            onPreviewRegeneration={previewTimelineRegenerationRange}
             onRedo={redo}
             onTime={setCurrentTime}
             onRangePlaybackEnd={() => setRegenerationPreviewEntries(null)}
@@ -1025,6 +1143,7 @@ function App() {
             onSelectSubtitle={setSelectedSubtitleId}
             onSplitAtPlayhead={splitSubtitleAtPlayhead}
             onToggleSubtitles={() => setSubtitlesVisible((visible) => !visible)}
+            onStartRegeneration={startTimelineRegeneration}
             onUndo={undo}
             onUpdateSubtitle={updateSubtitleFromPlayer}
           />
@@ -1110,11 +1229,16 @@ function App() {
           error={regenerationError}
           originalEntries={regenerationDialog.originalEntries}
           progress={regenerationProgress}
+          preferences={regenerationPreferences ?? createRegenerationPreferences(settings)}
+          capabilities={capabilities}
+          capabilityWarnings={capabilityWarnings}
           range={regenerationDialog.range}
           videoDuration={video?.duration || undefined}
           onApply={applyRegenerationCandidate}
-          onCancel={closeRegenerationDialog}
-          onGenerate={(range) => void generateRegenerationCandidates(range)}
+          onCancel={() => closeRegenerationDialog(false)}
+          onGenerate={(range, preferences) => void generateRegenerationCandidates(range, preferences)}
+          onPreferencesChange={changeRegenerationPreferences}
+          onRangeChange={changeDialogRegenerationRange}
           onPreview={previewRegenerationCandidate}
         />
       ) : null}

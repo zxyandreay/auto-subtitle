@@ -50,6 +50,13 @@ export type TranscriptionSettings = {
   formatting: FormattingPreferences
 }
 
+export type RegenerationPreferences = Pick<
+  TranscriptionSettings,
+  'language' | 'task' | 'modelId' | 'executionProvider' | 'dtype'
+> & {
+  useWordTimestamps: boolean
+}
+
 export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionSettings = {
   language: 'auto',
   task: 'transcribe',
@@ -214,6 +221,35 @@ export type WorkerErrorEvent = {
   error: {
     message: string
     details?: string
+  }
+}
+
+export function createRegenerationPreferences(settings: TranscriptionSettings): RegenerationPreferences {
+  return {
+    language: settings.language,
+    task: settings.task,
+    modelId: settings.modelId,
+    executionProvider: settings.executionProvider,
+    dtype: settings.dtype,
+    useWordTimestamps: settings.formatting.useWordTimestamps,
+  }
+}
+
+export function buildRegenerationSettings(
+  settings: TranscriptionSettings,
+  preferences: RegenerationPreferences,
+): TranscriptionSettings {
+  return {
+    ...settings,
+    language: preferences.language,
+    task: preferences.task,
+    modelId: preferences.modelId,
+    executionProvider: preferences.executionProvider,
+    dtype: preferences.dtype,
+    formatting: {
+      ...settings.formatting,
+      useWordTimestamps: preferences.useWordTimestamps,
+    },
   }
 }
 

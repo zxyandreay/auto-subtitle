@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { makeSubtitleEntry } from '../subtitles/formatting'
-import { constrainSegmentsToRange, replaceEntriesInRange } from '../subtitles/regeneration'
+import {
+  constrainSegmentsToRange,
+  createInitialRegenerationRange,
+  replaceEntriesInRange,
+} from '../subtitles/regeneration'
 import {
   REGENERATION_DECODING_PROFILES,
   dedupeRegenerationCandidates,
@@ -11,6 +15,53 @@ import type { RegenerationCandidate, RegenerationRange } from '../transcription/
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
 
 describe('regeneration ranges', () => {
+  it('initializes from a selected cue and caps long cues to the first 29 seconds', () => {
+    const selected = makeSubtitleEntry({ startTime: 12, endTime: 18, text: 'Selected' })
+    const long = makeSubtitleEntry({ startTime: 20, endTime: 55, text: 'Long' })
+
+    expect(createInitialRegenerationRange({ selectedEntry: selected, currentTime: 0, videoDuration: 60 })).toEqual({
+      startTime: 12,
+      endTime: 18,
+    })
+    expect(createInitialRegenerationRange({ selectedEntry: long, currentTime: 0, videoDuration: 60 })).toEqual({
+      startTime: 20,
+      endTime: 49,
+    })
+  })
+
+  it('keeps selected-cue initialization valid at or beyond the video end', () => {
+    const clipped = makeSubtitleEntry({ startTime: 19.95, endTime: 25, text: 'Clipped' })
+    const outside = makeSubtitleEntry({ startTime: 30, endTime: 35, text: 'Outside' })
+
+    expect(createInitialRegenerationRange({ selectedEntry: clipped, currentTime: 10, videoDuration: 20 })).toEqual({
+      startTime: 19.9,
+      endTime: 20,
+    })
+    expect(createInitialRegenerationRange({ selectedEntry: outside, currentTime: 10, videoDuration: 20 })).toEqual({
+      startTime: 7.5,
+      endTime: 12.5,
+    })
+  })
+
+  it('initializes a five-second playhead range and preserves its duration at video boundaries', () => {
+    expect(createInitialRegenerationRange({ currentTime: 20, videoDuration: 60 })).toEqual({
+      startTime: 17.5,
+      endTime: 22.5,
+    })
+    expect(createInitialRegenerationRange({ currentTime: 1, videoDuration: 60 })).toEqual({
+      startTime: 0,
+      endTime: 5,
+    })
+    expect(createInitialRegenerationRange({ currentTime: 59, videoDuration: 60 })).toEqual({
+      startTime: 55,
+      endTime: 60,
+    })
+    expect(createInitialRegenerationRange({ currentTime: 1, videoDuration: 3 })).toEqual({
+      startTime: 0,
+      endTime: 3,
+    })
+  })
+
   it('accepts a positive range no longer than the safe 29-second model budget', () => {
     expect(validateRegenerationRange({ startTime: 12, endTime: 41 }, 60)).toBeNull()
   })

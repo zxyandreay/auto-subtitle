@@ -1,16 +1,20 @@
-import { LocateFixed, Magnet, RotateCcw, RotateCw, Scissors } from 'lucide-react'
+import { LocateFixed, Magnet, Play, RefreshCw, RotateCcw, RotateCw, Scissors, Settings2, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSubtitleTimelineDrag } from '../hooks/useSubtitleTimelineDrag'
+import { useRegenerationRangeDrag } from '../hooks/useRegenerationRangeDrag'
 import {
   buildTimelineSnapTargets,
   calculateTimelineEdit,
+  calculateTimelineEditWithSnap,
   snapTimelineTime,
   type TimelineDragMode,
   type TimelineSnapMatch,
   type TimelineSnapTarget,
 } from '../subtitles/timeline'
 import { validateSubtitles } from '../subtitles/validation'
+import { MAX_REGENERATION_RANGE_SECONDS } from '../transcription/regeneration'
+import type { RegenerationRange } from '../transcription/types'
 import type { SubtitleEntry, ValidationIssue } from '../types/subtitles'
 import { formatTimestamp } from '../utils/time'
 import { IconButton } from './IconButton'
@@ -25,9 +29,16 @@ type SubtitleTimelineProps = {
   canRedo: boolean
   canSplitAtPlayhead: boolean
   canUndo: boolean
+  canRegenerate: boolean
+  regenerationRange?: RegenerationRange
   onRedo: () => void
   onSplitAtPlayhead: () => void
   onUndo: () => void
+  onStartRegeneration: () => void
+  onChangeRegenerationRange: (range: RegenerationRange) => void
+  onPreviewRegeneration: () => void
+  onConfigureRegeneration: () => void
+  onCancelRegeneration: () => void
   onUpdate: (id: string, patch: Pick<SubtitleEntry, 'startTime' | 'endTime'>) => void
   onSelect: (id: string) => void
   onSeek: (time: number) => void
@@ -49,9 +60,16 @@ export function SubtitleTimeline({
   canRedo,
   canSplitAtPlayhead,
   canUndo,
+  canRegenerate,
+  regenerationRange,
   onRedo,
   onSplitAtPlayhead,
   onUndo,
+  onStartRegeneration,
+  onChangeRegenerationRange,
+  onPreviewRegeneration,
+  onConfigureRegeneration,
+  onCancelRegeneration,
   onUpdate,
   onSelect,
   onSeek,
@@ -81,6 +99,23 @@ export function SubtitleTimeline({
     playhead: currentTime,
     snappingEnabled,
     onUpdate,
+  })
+
+  const {
+    activeSnap: regenerationSnap,
+    beginDrag: beginRegenerationDrag,
+    cancelDrag: cancelRegenerationDrag,
+    endDrag: endRegenerationDrag,
+    moveDrag: moveRegenerationDrag,
+    preview: regenerationPreview,
+  } = useRegenerationRangeDrag({
+    entries,
+    range: regenerationRange,
+    duration,
+    pixelsPerSecond: effectivePixelsPerSecond,
+    playhead: currentTime,
+    snappingEnabled,
+    onChange: onChangeRegenerationRange,
   })
 
   useEffect(() => {
@@ -292,6 +327,36 @@ export function SubtitleTimeline({
     setSnappingEnabled((enabled) => !enabled)
   }, [snappingEnabled])
 
+  const handleRegenerationKeyboard = useCallback(
+    (event: KeyboardEvent<HTMLElement>, mode: TimelineDragMode) => {
+      if (!regenerationRange || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      const direction = event.key === 'ArrowRight' ? 1 : -1
+      const result = calculateTimelineEditWithSnap({
+        entry: {
+          id: 'timeline-regeneration-range',
+          index: 0,
+          startTime: regenerationRange.startTime,
+          endTime: regenerationRange.endTime,
+          text: '',
+        },
+        mode,
+        deltaTime: direction * (event.shiftKey ? 0.5 : 0.1),
+        duration,
+        minDuration: 0.1,
+        maxDuration: MAX_REGENERATION_RANGE_SECONDS,
+        pixelsPerSecond: Number.POSITIVE_INFINITY,
+        snapTargets: buildTimelineSnapTargets({ entries, playhead: currentTime, duration }),
+        snappingDisabled: !snappingEnabled || event.altKey,
+      })
+      onChangeRegenerationRange(result.timing)
+    },
+    [currentTime, duration, entries, onChangeRegenerationRange, regenerationRange, snappingEnabled],
+  )
+
   const handleTrackClick = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
       if (event.target !== event.currentTarget) {
@@ -316,8 +381,9 @@ export function SubtitleTimeline({
   )
 
   const renderedPlayheadTime = playheadDragTime ?? currentTime
-  const activeSnap = playheadSnap ?? cueSnap ?? trackClickSnap
+  const activeSnap = regenerationSnap ?? playheadSnap ?? cueSnap ?? trackClickSnap
   const snapTarget = activeSnap?.target
+  const renderedRegenerationRange = regenerationPreview ?? regenerationRange
 
   return (
     <section className="subtitle-timeline" aria-label="Interactive subtitle timeline">
@@ -349,6 +415,43 @@ export function SubtitleTimeline({
           >
             <Scissors size={16} />
           </IconButton>
+          {regenerationRange ? (
+            <>
+              <IconButton
+                label="Preview regeneration range"
+                disabled={!canRegenerate}
+                title="Play the selected regeneration range once"
+                onClick={onPreviewRegeneration}
+              >
+                <Play size={16} />
+              </IconButton>
+              <IconButton
+                label="Configure regeneration"
+                disabled={!canRegenerate}
+                title="Choose regeneration model and settings"
+                variant="soft"
+                onClick={onConfigureRegeneration}
+              >
+                <Settings2 size={16} />
+              </IconButton>
+              <IconButton
+                label="Cancel timeline regeneration range"
+                title="Clear the regeneration range"
+                onClick={onCancelRegeneration}
+              >
+                <X size={16} />
+              </IconButton>
+            </>
+          ) : (
+            <IconButton
+              label="Start timeline regeneration range"
+              disabled={!canRegenerate}
+              title="Choose a timeline range to regenerate"
+              onClick={onStartRegeneration}
+            >
+              <RefreshCw size={16} />
+            </IconButton>
+          )}
           <IconButton
             label={snappingEnabled ? 'Disable timeline magnetic snapping' : 'Enable timeline magnetic snapping'}
             variant={snappingEnabled ? 'soft' : 'ghost'}
@@ -382,7 +485,7 @@ export function SubtitleTimeline({
       <div ref={viewportRef} className="subtitle-timeline__viewport" tabIndex={0}>
         <div
           ref={trackRef}
-          className="subtitle-timeline__track"
+          className={`subtitle-timeline__track ${renderedRegenerationRange ? 'subtitle-timeline__track--regeneration' : ''}`}
           style={{ width: trackWidth }}
           onClick={handleTrackClick}
         >
@@ -393,6 +496,18 @@ export function SubtitleTimeline({
             >
               <span>{`Snap: ${activeSnap.target.label} ${formatTimestamp(activeSnap.target.time, { alwaysHours: true })}`}</span>
             </div>
+          ) : null}
+          {renderedRegenerationRange ? (
+            <TimelineRegenerationRange
+              duration={duration ?? timelineDuration}
+              range={renderedRegenerationRange}
+              pixelsPerSecond={effectivePixelsPerSecond}
+              onCancelDrag={cancelRegenerationDrag}
+              onEndDrag={endRegenerationDrag}
+              onKeyDown={handleRegenerationKeyboard}
+              onMoveDrag={moveRegenerationDrag}
+              onPointerDown={beginRegenerationDrag}
+            />
           ) : null}
           <button
             aria-label="Timeline playhead"
@@ -440,6 +555,87 @@ export function SubtitleTimeline({
         </div>
       </div>
     </section>
+  )
+}
+
+type TimelineRegenerationRangeProps = {
+  range: RegenerationRange
+  duration: number
+  pixelsPerSecond: number
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>, mode: TimelineDragMode) => void
+  onMoveDrag: (event: ReactPointerEvent<HTMLElement>) => void
+  onEndDrag: (event: ReactPointerEvent<HTMLElement>) => void
+  onCancelDrag: (event: ReactPointerEvent<HTMLElement>) => void
+  onKeyDown: (event: KeyboardEvent<HTMLElement>, mode: TimelineDragMode) => void
+}
+
+function TimelineRegenerationRange({
+  range,
+  duration,
+  pixelsPerSecond,
+  onPointerDown,
+  onMoveDrag,
+  onEndDrag,
+  onCancelDrag,
+  onKeyDown,
+}: TimelineRegenerationRangeProps) {
+  const valueText = `${formatTimestamp(range.startTime, { alwaysHours: true })} to ${formatTimestamp(range.endTime, { alwaysHours: true })}`
+  const pointerProps = {
+    onPointerCancel: onCancelDrag,
+    onPointerMove: onMoveDrag,
+    onPointerUp: onEndDrag,
+  }
+
+  return (
+    <div
+      className="subtitle-timeline__regeneration-range"
+      style={{
+        left: range.startTime * pixelsPerSecond,
+        width: Math.max(1, (range.endTime - range.startTime) * pixelsPerSecond),
+      }}
+    >
+      <button
+        aria-label="Adjust regeneration range start"
+        aria-valuemax={Math.max(0, range.endTime - 0.1)}
+        aria-valuemin={0}
+        aria-valuenow={range.startTime}
+        aria-valuetext={formatTimestamp(range.startTime, { alwaysHours: true })}
+        className="subtitle-timeline__regeneration-handle subtitle-timeline__regeneration-handle--start"
+        role="slider"
+        type="button"
+        onKeyDown={(event) => onKeyDown(event, 'start')}
+        onPointerDown={(event) => onPointerDown(event, 'start')}
+        {...pointerProps}
+      />
+      <button
+        aria-label="Move regeneration range"
+        aria-valuemax={Math.max(0, duration - (range.endTime - range.startTime))}
+        aria-valuemin={0}
+        aria-valuenow={range.startTime}
+        aria-valuetext={valueText}
+        className="subtitle-timeline__regeneration-body"
+        role="slider"
+        type="button"
+        onKeyDown={(event) => onKeyDown(event, 'move')}
+        onPointerDown={(event) => onPointerDown(event, 'move')}
+        {...pointerProps}
+      >
+        <span>{valueText}</span>
+      </button>
+      <button
+        aria-label="Adjust regeneration range end"
+        aria-valuemax={Math.min(duration, range.startTime + MAX_REGENERATION_RANGE_SECONDS)}
+        aria-valuemin={range.startTime + 0.1}
+        aria-valuenow={range.endTime}
+        aria-valuetext={formatTimestamp(range.endTime, { alwaysHours: true })}
+        className="subtitle-timeline__regeneration-handle subtitle-timeline__regeneration-handle--end"
+        role="slider"
+        type="button"
+        onKeyDown={(event) => onKeyDown(event, 'end')}
+        onPointerDown={(event) => onPointerDown(event, 'end')}
+        {...pointerProps}
+      />
+    </div>
   )
 }
 

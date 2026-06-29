@@ -100,6 +100,32 @@ describe('subtitle timeline timing edits', () => {
     ).toEqual({ startTime: 2, endTime: 3.1 })
   })
 
+  it('enforces an optional maximum duration while resizing either edge', () => {
+    expect(
+      calculateTimelineEdit({
+        entry,
+        mode: 'end',
+        deltaTime: 50,
+        duration: 60,
+        minDuration: 0.1,
+        maxDuration: 29,
+        pixelsPerSecond: 24,
+      }),
+    ).toEqual({ startTime: 2, endTime: 31 })
+
+    expect(
+      calculateTimelineEdit({
+        entry: { ...entry, startTime: 40, endTime: 42 },
+        mode: 'start',
+        deltaTime: -50,
+        duration: 60,
+        minDuration: 0.1,
+        maxDuration: 29,
+        pixelsPerSecond: 24,
+      }),
+    ).toEqual({ startTime: 13, endTime: 42 })
+  })
+
   it('snaps to the playhead before a nearby half-second grid mark', () => {
     const snapTargets = buildTimelineSnapTargets({ entries: [], playhead: 1.95 })
     expect(findNearestTimelineSnap(1.94, snapTargets, 10 / 48)?.target.kind).toBe('playhead')

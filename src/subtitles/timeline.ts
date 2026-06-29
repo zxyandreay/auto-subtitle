@@ -31,6 +31,7 @@ type TimelineEditOptions = {
   deltaTime: number
   duration?: number
   minDuration: number
+  maxDuration?: number
   pixelsPerSecond: number
   playhead?: number
   previous?: SubtitleEntry
@@ -145,6 +146,7 @@ export function calculateTimelineEditWithSnap({
   deltaTime,
   duration,
   minDuration,
+  maxDuration,
   pixelsPerSecond,
   playhead,
   previous,
@@ -155,6 +157,7 @@ export function calculateTimelineEditWithSnap({
   const knownDuration = isFiniteTime(duration) && duration > 0 ? duration : undefined
   const preferredMinimum = Math.max(MIN_VALID_DURATION_SECONDS, minDuration)
   const effectiveMinimum = knownDuration === undefined ? preferredMinimum : Math.min(preferredMinimum, knownDuration)
+  const effectiveMaximum = Math.max(effectiveMinimum, maxDuration ?? Number.POSITIVE_INFINITY)
   const snapThreshold = TIMELINE_SNAP_PIXELS / Math.max(0.01, pixelsPerSecond)
   const gridThreshold = Math.min(MAX_GRID_SNAP_SECONDS, GRID_SNAP_PIXELS / Math.max(0.01, pixelsPerSecond))
   const targets = snapTargets ?? legacySnapTargets(playhead, previous, next, knownDuration)
@@ -195,14 +198,15 @@ export function calculateTimelineEditWithSnap({
 
   if (mode === 'start') {
     const rawStart = entry.startTime + deltaTime
+    const minimumStart = Math.max(0, entry.endTime - effectiveMaximum)
     const maximumStart = entry.endTime - effectiveMinimum
-    const validTargets = targets.filter((target) => target.time >= 0 && target.time <= maximumStart)
+    const validTargets = targets.filter((target) => target.time >= minimumStart && target.time <= maximumStart)
     const snap = snappingDisabled
       ? undefined
-      : findBoundarySnap(rawStart, validTargets, snapThreshold, gridThreshold, 0, maximumStart, 'start')
+      : findBoundarySnap(rawStart, validTargets, snapThreshold, gridThreshold, minimumStart, maximumStart, 'start')
     return {
       timing: {
-        startTime: roundTime(Math.max(0, Math.min(snap?.target.time ?? rawStart, maximumStart))),
+        startTime: roundTime(Math.max(minimumStart, Math.min(snap?.target.time ?? rawStart, maximumStart))),
         endTime: roundTime(entry.endTime),
       },
       snap,
@@ -211,7 +215,7 @@ export function calculateTimelineEditWithSnap({
 
   const rawEnd = entry.endTime + deltaTime
   const minimumEnd = entry.startTime + effectiveMinimum
-  const maximumEnd = knownDuration ?? Infinity
+  const maximumEnd = Math.min(knownDuration ?? Infinity, entry.startTime + effectiveMaximum)
   const validTargets = targets.filter((target) => target.time >= minimumEnd && target.time <= maximumEnd)
   const snap = snappingDisabled
     ? undefined

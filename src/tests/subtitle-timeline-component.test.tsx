@@ -137,6 +137,87 @@ describe('SubtitleTimeline', () => {
     expect(onSplitAtPlayhead).toHaveBeenCalledOnce()
   })
 
+  it('starts and renders an accessible timeline regeneration range with dedicated actions', () => {
+    const onStartRegeneration = vi.fn()
+    renderTimeline({ canRegenerate: true, onStartRegeneration })
+
+    click(button('Start timeline regeneration range'))
+    expect(onStartRegeneration).toHaveBeenCalledOnce()
+
+    const onCancelRegeneration = vi.fn()
+    const onConfigureRegeneration = vi.fn()
+    const onPreviewRegeneration = vi.fn()
+    renderTimeline({
+      canRegenerate: true,
+      regenerationRange: { startTime: 1, endTime: 4 },
+      onCancelRegeneration,
+      onConfigureRegeneration,
+      onPreviewRegeneration,
+    })
+
+    const range = container.querySelector('.subtitle-timeline__regeneration-range') as HTMLElement
+    expect(range.style.left).toBe('24px')
+    expect(range.style.width).toBe('72px')
+    const rangeBody = button('Move regeneration range')
+    expect(rangeBody.getAttribute('aria-valuemin')).toBe('0')
+    expect(rangeBody.getAttribute('aria-valuemax')).toBe('7')
+    expect(rangeBody.getAttribute('aria-valuenow')).toBe('1')
+    expect(rangeBody.getAttribute('aria-valuetext')).toContain('00:00:01.000')
+    expect(button('Adjust regeneration range start').getAttribute('role')).toBe('slider')
+    expect(button('Adjust regeneration range end').getAttribute('role')).toBe('slider')
+
+    click(button('Preview regeneration range'))
+    click(button('Configure regeneration'))
+    click(button('Cancel timeline regeneration range'))
+    expect(onPreviewRegeneration).toHaveBeenCalledOnce()
+    expect(onConfigureRegeneration).toHaveBeenCalledOnce()
+    expect(onCancelRegeneration).toHaveBeenCalledOnce()
+  })
+
+  it('moves, stretches, and keyboard-adjusts the regeneration range without editing subtitles', () => {
+    const onChangeRegenerationRange = vi.fn()
+    const onUpdate = vi.fn()
+    renderTimeline({
+      canRegenerate: true,
+      regenerationRange: { startTime: 1, endTime: 4 },
+      onChangeRegenerationRange,
+      onUpdate,
+    })
+
+    const body = button('Move regeneration range')
+    pointer(body, 'pointerdown', 31, 24)
+    pointer(body, 'pointermove', 31, 48)
+    pointer(body, 'pointerup', 31, 48)
+    expect(onChangeRegenerationRange).toHaveBeenLastCalledWith({ startTime: 2, endTime: 5 })
+
+    const end = button('Adjust regeneration range end')
+    pointer(end, 'pointerdown', 32, 96)
+    pointer(end, 'pointermove', 32, 121, true)
+    pointer(end, 'pointerup', 32, 121, true)
+    expect(onChangeRegenerationRange).toHaveBeenLastCalledWith({ startTime: 1, endTime: 5.042 })
+
+    keyDown(button('Adjust regeneration range start'), 'ArrowRight', true)
+    expect(onChangeRegenerationRange).toHaveBeenLastCalledWith({ startTime: 1.5, endTime: 4 })
+    expect(onUpdate).not.toHaveBeenCalled()
+  })
+
+  it('focuses the range after pointer use and lets keyboard movement leave a snapped boundary', () => {
+    const onChangeRegenerationRange = vi.fn()
+    renderTimeline({
+      canRegenerate: true,
+      regenerationRange: { startTime: 0, endTime: 5 },
+      onChangeRegenerationRange,
+    })
+    const body = button('Move regeneration range')
+
+    pointer(body, 'pointerdown', 41, 60)
+    pointer(body, 'pointerup', 41, 60)
+    expect(document.activeElement).toBe(body)
+
+    keyDown(body, 'ArrowRight')
+    expect(onChangeRegenerationRange).toHaveBeenLastCalledWith({ startTime: 0.1, endTime: 5.1 })
+  })
+
   it('supports keyboard movement and boundary nudging without global seek propagation', () => {
     const onUpdate = vi.fn()
     renderTimeline({ onUpdate })
@@ -226,6 +307,12 @@ describe('SubtitleTimeline', () => {
           entries={entries}
           minDuration={1.1}
           playing={false}
+          canRegenerate={false}
+          onCancelRegeneration={() => undefined}
+          onChangeRegenerationRange={() => undefined}
+          onConfigureRegeneration={() => undefined}
+          onPreviewRegeneration={() => undefined}
+          onStartRegeneration={() => undefined}
           onRedo={() => undefined}
           onSeek={() => undefined}
           onSelect={() => undefined}

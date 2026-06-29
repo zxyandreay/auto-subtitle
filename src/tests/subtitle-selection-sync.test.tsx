@@ -37,6 +37,7 @@ describe('player and main editor subtitle selection', () => {
             canRedo={false}
             canSplitAtPlayhead={false}
             canUndo={false}
+            canRegenerate={false}
             currentTime={0}
             duration={10}
             entries={entries}
@@ -49,6 +50,11 @@ describe('player and main editor subtitle selection', () => {
             onSplitAtPlayhead={() => undefined}
             onUndo={() => undefined}
             onUpdate={() => undefined}
+            onCancelRegeneration={() => undefined}
+            onChangeRegenerationRange={() => undefined}
+            onConfigureRegeneration={() => undefined}
+            onPreviewRegeneration={() => undefined}
+            onStartRegeneration={() => undefined}
           />
           <SubtitleEditor
             activeEntryId="first"

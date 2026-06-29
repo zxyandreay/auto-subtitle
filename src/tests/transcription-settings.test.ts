@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { parseProjectJson } from '../subtitles/exporters'
 import { DEFAULT_FORMATTING_PREFERENCES } from '../types/subtitles'
-import { DEFAULT_TRANSCRIPTION_SETTINGS, normalizeTranscriptionSettings } from '../transcription/types'
+import {
+  buildRegenerationSettings,
+  createRegenerationPreferences,
+  DEFAULT_TRANSCRIPTION_SETTINGS,
+  normalizeTranscriptionSettings,
+} from '../transcription/types'
 
 describe('accurate-local defaults', () => {
   it('uses the synchronization-focused transcription defaults', () => {
@@ -68,5 +73,39 @@ describe('accurate-local defaults', () => {
       maxModelInputSeconds: 29,
       vadEnabled: true,
     })
+  })
+
+  it('creates session regeneration preferences from applicable transcription settings', () => {
+    expect(createRegenerationPreferences(DEFAULT_TRANSCRIPTION_SETTINGS)).toEqual({
+      language: 'auto',
+      task: 'transcribe',
+      modelId: DEFAULT_TRANSCRIPTION_SETTINGS.modelId,
+      executionProvider: 'auto',
+      dtype: 'q8',
+      useWordTimestamps: true,
+    })
+  })
+
+  it('builds an immutable regeneration settings snapshot without changing global settings', () => {
+    const globalSettings = structuredClone(DEFAULT_TRANSCRIPTION_SETTINGS)
+    const snapshot = buildRegenerationSettings(globalSettings, {
+      language: 'english',
+      task: 'transcribe',
+      modelId: 'distil-whisper/distil-large-v3',
+      executionProvider: 'webgpu',
+      dtype: 'fp32',
+      useWordTimestamps: false,
+    })
+
+    expect(snapshot).toMatchObject({
+      language: 'english',
+      modelId: 'distil-whisper/distil-large-v3',
+      executionProvider: 'webgpu',
+      dtype: 'fp32',
+      formatting: { useWordTimestamps: false },
+    })
+    snapshot.formatting.maxCharsPerLine = 10
+    expect(globalSettings.formatting.maxCharsPerLine).toBe(42)
+    expect(globalSettings).toEqual(DEFAULT_TRANSCRIPTION_SETTINGS)
   })
 })

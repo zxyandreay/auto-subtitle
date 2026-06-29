@@ -624,6 +624,90 @@ strong {
   position: relative;
 }
 
+.subtitle-timeline__track--regeneration {
+  height: 92px;
+}
+
+.subtitle-timeline__track--regeneration .subtitle-timeline__cue {
+  top: 42px;
+}
+
+.subtitle-timeline__regeneration-range {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-left: 2px solid var(--warning);
+  border-right: 2px solid var(--warning);
+  bottom: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  z-index: 3;
+}
+
+.subtitle-timeline__regeneration-body,
+.subtitle-timeline__regeneration-handle {
+  pointer-events: auto;
+  position: absolute;
+  touch-action: none;
+}
+
+.subtitle-timeline__regeneration-body {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 4px;
+  color: var(--warning);
+  cursor: grab;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  height: 26px;
+  left: 11px;
+  overflow: hidden;
+  padding: 0 6px;
+  right: 11px;
+  text-align: left;
+  top: 6px;
+  white-space: nowrap;
+}
+
+.subtitle-timeline__regeneration-body:active {
+  cursor: grabbing;
+}
+
+.subtitle-timeline__regeneration-handle {
+  background: transparent;
+  border: 0;
+  bottom: 0;
+  cursor: ew-resize;
+  padding: 0;
+  top: 0;
+  width: 24px;
+  z-index: 2;
+}
+
+.subtitle-timeline__regeneration-handle::after {
+  background: var(--warning);
+  bottom: 0;
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 3px;
+}
+
+.subtitle-timeline__regeneration-handle--start {
+  left: -12px;
+}
+
+.subtitle-timeline__regeneration-handle--start::after {
+  right: 10px;
+}
+
+.subtitle-timeline__regeneration-handle--end {
+  right: -12px;
+}
+
+.subtitle-timeline__regeneration-handle--end::after {
+  left: 10px;
+}
+
 .subtitle-timeline__playhead {
   appearance: none;
   background: transparent;
@@ -1194,6 +1278,14 @@ progress {
   gap: 5px;
 }
 
+.regeneration-settings {
+  margin-top: 12px;
+}
+
+.regeneration-model-note {
+  margin-top: 10px;
+}
+
 .regeneration-generate-row {
   margin-top: 12px;
 }
@@ -1619,6 +1711,14 @@ progress {
   .regeneration-range {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .regeneration-dialog {
+    overflow-y: auto;
+  }
+
+  .regeneration-options {
+    overflow: visible;
   }
 
   .regeneration-range > span {

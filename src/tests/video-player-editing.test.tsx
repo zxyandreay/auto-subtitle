@@ -118,6 +118,31 @@ describe('VideoPlayer subtitle workspace', () => {
     expect(onSplitAtPlayhead).toHaveBeenCalledOnce()
   })
 
+  it('forwards timeline regeneration range state and actions', () => {
+    const onCancelRegeneration = vi.fn()
+    const onConfigureRegeneration = vi.fn()
+    const onPreviewRegeneration = vi.fn()
+    const onStartRegeneration = vi.fn()
+    renderPlayer({
+      canRegenerate: true,
+      regenerationRange: { startTime: 1, endTime: 4 },
+      onCancelRegeneration,
+      onConfigureRegeneration,
+      onPreviewRegeneration,
+      onStartRegeneration,
+    })
+
+    expect(container.querySelector('.subtitle-timeline__regeneration-range')).not.toBeNull()
+    click(button('Preview regeneration range'))
+    click(button('Configure regeneration'))
+    click(button('Cancel timeline regeneration range'))
+
+    expect(onPreviewRegeneration).toHaveBeenCalledOnce()
+    expect(onConfigureRegeneration).toHaveBeenCalledOnce()
+    expect(onCancelRegeneration).toHaveBeenCalledOnce()
+    expect(onStartRegeneration).not.toHaveBeenCalled()
+  })
+
   it('enters and exits fullscreen on the whole player workspace', async () => {
     renderPlayer()
     const workspace = container.querySelector('.video-panel') as HTMLElement
@@ -157,6 +182,7 @@ describe('VideoPlayer subtitle workspace', () => {
           canRedo={false}
           canSplitAtPlayhead={false}
           canUndo={false}
+          canRegenerate={false}
           currentTime={0}
           duration={20}
           formatting={DEFAULT_FORMATTING_PREFERENCES}
@@ -177,6 +203,11 @@ describe('VideoPlayer subtitle workspace', () => {
           onToggleSubtitles={() => undefined}
           onUndo={() => undefined}
           onUpdateSubtitle={() => undefined}
+          onCancelRegeneration={() => undefined}
+          onChangeRegenerationRange={() => undefined}
+          onConfigureRegeneration={() => undefined}
+          onPreviewRegeneration={() => undefined}
+          onStartRegeneration={() => undefined}
           {...overrides}
         />,
       )

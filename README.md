@@ -131,14 +131,15 @@ Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-t
 ## Regenerating A Subtitle Range
 
 1. Select a video and create, import, or generate subtitles.
-2. Use the regenerate icon on a subtitle row.
-3. Adjust the prefilled start/end timestamps if a wider section is needed; one request is limited to 29 seconds.
-4. Generate alternatives. The worker extracts that range once, loads the selected Whisper model once, and performs bounded sequential decoding passes locally.
-5. Compare the unchanged current cues with up to three distinct alternatives.
-6. Preview any choice against the video without modifying the editor.
-7. Apply an alternative to replace all cues overlapping the range as one undoable edit, or keep the original unchanged.
+2. Use the timeline Regenerate tool. It starts from the selected cue or creates a five-second range around the playhead. The subtitle-row regenerate icon remains available.
+3. Drag the amber range to move it, drag either edge to resize it, or use the timestamp fields for exact values. A range can cover one or many cues but cannot exceed 29 seconds.
+4. Use **Preview range** to play the current section once. The range remains selected when playback stops.
+5. Open **Configure regeneration** and choose the language, output, model, engine, precision, and timestamp detail for this run. These choices persist for later regenerations in the current browser session without changing full-transcription settings.
+6. Generate alternatives. The worker extracts the range once, loads the selected Whisper model once, and performs bounded sequential decoding passes locally.
+7. Compare the unchanged current cues with up to three distinct alternatives, then preview any choice against the video.
+8. Apply an alternative to replace all overlapping cues as one undoable edit, or keep the original unchanged.
 
-Regeneration uses the current compatible language, output task, model, engine, precision, and formatting preferences. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
+Range movement, resizing, and keyboard edits use the timeline's magnetic cue-boundary, playhead, video-boundary, and half-second-grid snapping. Hold Alt/Option to bypass snapping. Regeneration inherits the current caption-formatting preferences and freezes all settings when generation starts. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
 
 ## Generated Caption Readability
 
@@ -182,12 +183,16 @@ When importing project JSON, the app validates the schema, normalizes saved mode
 - Hold Shift with a timeline Arrow key: use a 0.5-second adjustment
 - Arrow Left or Arrow Right on the focused timeline playhead: seek by 0.1 seconds; Home/End seek to timeline boundaries
 - Hold Alt/Option while clicking the empty timeline or dragging a cue edge, cue body, or playhead: temporarily disable magnetic snapping
+- Arrow Left or Arrow Right on a regeneration range or handle: move or resize it by 0.1 seconds
+- Hold Shift with a regeneration range Arrow key: move or resize it by 0.5 seconds; hold Alt/Option to bypass snapping
 
 ## Player Subtitle Editing
 
 The video player includes a horizontally scrollable subtitle timeline with continuous 12–96 pixels-per-second zoom, dedicated Undo/Redo controls, an enabled-by-default Magnet toggle, and an enabled-by-default playhead-follow toggle. The Magnet button controls locking for cue movement, start/end handles, playhead movement, and empty-track clicks; Alt/Option remains a temporary bypass while Magnet is enabled. Cue blocks show their text, timing, active/selected state, and existing validation severity. Clicking a cue selects it and seeks to its start. Clicking empty space in the timeline—including the bands above or below cue cards—seeks magnetically to that point when Magnet is enabled. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. A 10-pixel magnetic threshold snaps either moving edge to any other subtitle boundary, the media playhead, timeline start, known video end, or a lower-priority half-second grid. A guide and target accent show the active snap. Overlaps remain visible as validation errors instead of being silently removed.
 
 The timeline playhead is directly draggable and keyboard accessible. It seeks the media responsively, snaps to subtitle boundaries, shows a timestamp while dragging, works in fullscreen at every zoom level, and never adds subtitle undo history. Cue timing previews remain local and commit once on pointer release, so one completed gesture is one undo step.
+
+Timeline regeneration mode adds a temporary amber selection above the cue track. Its body slides the selected section without changing its duration, its handles resize either boundary, and its toolbar actions preview, configure, or cancel the selection. Range edits are temporary UI state: they do not change subtitle history or project autosave.
 
 Select a cue, place the playhead at least 0.1 seconds inside each edge, then use the timeline Split button or Ctrl/Cmd+K to cut it at the exact millisecond-rounded playhead time. The text uses the same natural split as the main editor, the second half remains selected, and the entire cut is one undoable edit.
 

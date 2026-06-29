@@ -1,8 +1,48 @@
 import type { RawTranscriptionSegment } from './formatting'
 import { sortAndRenumber } from './formatting'
 import type { RegenerationRange } from '../transcription/types'
+import { MAX_REGENERATION_RANGE_SECONDS } from '../transcription/regeneration'
 import type { FormattingPreferences, SubtitleEntry } from '../types/subtitles'
 import { roundTime } from '../utils/time'
+
+type CreateInitialRegenerationRangeOptions = {
+  selectedEntry?: SubtitleEntry
+  currentTime: number
+  videoDuration: number
+}
+
+const DEFAULT_REGENERATION_RANGE_SECONDS = 5
+const MIN_REGENERATION_RANGE_SECONDS = 0.1
+
+export function createInitialRegenerationRange({
+  selectedEntry,
+  currentTime,
+  videoDuration,
+}: CreateInitialRegenerationRangeOptions): RegenerationRange {
+  const duration = Math.max(0, Number.isFinite(videoDuration) ? videoDuration : 0)
+
+  if (selectedEntry) {
+    let startTime = Math.max(0, Math.min(selectedEntry.startTime, duration))
+    const endTime = Math.max(
+      startTime,
+      Math.min(selectedEntry.endTime, startTime + MAX_REGENERATION_RANGE_SECONDS, duration),
+    )
+    if (endTime > startTime && endTime - startTime < MIN_REGENERATION_RANGE_SECONDS) {
+      startTime = Math.max(0, endTime - Math.min(MIN_REGENERATION_RANGE_SECONDS, duration))
+    }
+    if (endTime > startTime) {
+      return { startTime: roundTime(startTime), endTime: roundTime(endTime) }
+    }
+  }
+
+  const rangeDuration = Math.min(DEFAULT_REGENERATION_RANGE_SECONDS, duration)
+  const maximumStart = Math.max(0, duration - rangeDuration)
+  const startTime = Math.max(0, Math.min(currentTime - rangeDuration / 2, maximumStart))
+  return {
+    startTime: roundTime(startTime),
+    endTime: roundTime(startTime + rangeDuration),
+  }
+}
 
 export function constrainSegmentsToRange(
   segments: RawTranscriptionSegment[],

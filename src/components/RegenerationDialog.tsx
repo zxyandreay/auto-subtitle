@@ -1,7 +1,19 @@
 import { Loader2, Play, RefreshCw, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { BrowserCapabilities } from '../transcription/capabilities'
+import {
+  getSpeechModelOption,
+  getSpeechModelWarnings,
+  isModelCompatibleWithSettings,
+  resolveCompatibleModelId,
+  SPEECH_MODELS,
+} from '../transcription/models'
 import { validateRegenerationRange } from '../transcription/regeneration'
-import type { RegenerationRange, TranscriptionProgress } from '../transcription/types'
+import type {
+  RegenerationPreferences,
+  RegenerationRange,
+  TranscriptionProgress,
+} from '../transcription/types'
 import type { SubtitleEntry } from '../types/subtitles'
 import { formatTimestamp, parseTimestamp } from '../utils/time'
 
@@ -18,13 +30,28 @@ type RegenerationDialogProps = {
   progress: TranscriptionProgress
   busy: boolean
   error: string
-  onGenerate: (range: RegenerationRange) => void
+  preferences: RegenerationPreferences
+  capabilities: BrowserCapabilities
+  capabilityWarnings: string[]
+  onGenerate: (range: RegenerationRange, preferences: RegenerationPreferences) => void
   onPreview: (entries: SubtitleEntry[], range: RegenerationRange) => void
   onApply: (entries: SubtitleEntry[] | null, range: RegenerationRange) => void
+  onPreferencesChange: (preferences: RegenerationPreferences) => void
+  onRangeChange: (range: RegenerationRange) => void
   onCancel: () => void
 }
 
 const ORIGINAL_OPTION_ID = 'original'
+const LANGUAGES = [
+  ['auto', 'Auto detect'],
+  ['english', 'English'],
+  ['spanish', 'Spanish'],
+  ['french', 'French'],
+  ['german', 'German'],
+  ['japanese', 'Japanese'],
+  ['korean', 'Korean'],
+  ['chinese', 'Chinese'],
+]
 
 export function RegenerationDialog({
   range,
@@ -34,15 +61,22 @@ export function RegenerationDialog({
   progress,
   busy,
   error,
+  preferences,
+  capabilities,
+  capabilityWarnings,
   onGenerate,
   onPreview,
   onApply,
+  onPreferencesChange,
+  onRangeChange,
   onCancel,
 }: RegenerationDialogProps) {
   const [startDraft, setStartDraft] = useState(() => formatTimestamp(range.startTime, { alwaysHours: true }))
   const [endDraft, setEndDraft] = useState(() => formatTimestamp(range.endTime, { alwaysHours: true }))
   const [selectedId, setSelectedId] = useState(ORIGINAL_OPTION_ID)
   const [rangeDirty, setRangeDirty] = useState(false)
+  const [settingsDirty, setSettingsDirty] = useState(false)
+  const [compatibilityNotice, setCompatibilityNotice] = useState('')
   const startRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -74,7 +108,7 @@ export function RegenerationDialog({
   const validationError = parsedRange
     ? validateRegenerationRange(parsedRange, videoDuration)
     : 'Enter valid start and end timestamps.'
-  const visibleCandidates = rangeDirty ? [] : candidates
+  const visibleCandidates = rangeDirty || settingsDirty ? [] : candidates
   const selectedEntries =
     selectedId === ORIGINAL_OPTION_ID
       ? originalEntries
@@ -84,6 +118,21 @@ export function RegenerationDialog({
     setRangeDirty(true)
     setSelectedId(ORIGINAL_OPTION_ID)
   }
+
+  const updatePreferences = (nextPreferences: RegenerationPreferences) => {
+    const resolved = resolveCompatibleModelId(nextPreferences)
+    setCompatibilityNotice(resolved.reason ?? '')
+    setSettingsDirty(true)
+    setSelectedId(ORIGINAL_OPTION_ID)
+    onPreferencesChange({ ...nextPreferences, modelId: resolved.modelId })
+  }
+
+  const selectedModel = getSpeechModelOption(preferences.modelId)
+  const warnings = [
+    ...capabilityWarnings,
+    ...getSpeechModelWarnings(preferences, { webGpu: capabilities.webGpu, dtype: preferences.dtype }),
+  ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
+  const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
 
   return (
     <div className="dialog-backdrop">
@@ -114,6 +163,11 @@ export function RegenerationDialog({
                 setStartDraft(event.target.value)
                 markRangeDirty()
               }}
+              onBlur={() => {
+                if (parsedRange && !validationError) {
+                  onRangeChange(parsedRange)
+                }
+              }}
             />
           </label>
           <span>to</span>
@@ -126,22 +180,136 @@ export function RegenerationDialog({
                 setEndDraft(event.target.value)
                 markRangeDirty()
               }}
+              onBlur={() => {
+                if (parsedRange && !validationError) {
+                  onRangeChange(parsedRange)
+                }
+              }}
             />
           </label>
         </div>
 
         {validationError ? <p className="notice notice--error">{validationError}</p> : null}
 
+        <div className="settings-grid regeneration-settings">
+          <label>
+            Spoken language
+            <select
+              aria-label="Regeneration spoken language"
+              disabled={busy}
+              value={preferences.language}
+              onChange={(event) => updatePreferences({ ...preferences, language: event.target.value })}
+            >
+              {LANGUAGES.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Output
+            <select
+              aria-label="Regeneration output"
+              disabled={busy}
+              value={preferences.task}
+              onChange={(event) => updatePreferences({
+                ...preferences,
+                task: event.target.value as RegenerationPreferences['task'],
+              })}
+            >
+              <option value="transcribe">Same language</option>
+              <option value="translate">Translate to English</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <select
+              aria-label="Regeneration model"
+              disabled={busy}
+              value={preferences.modelId}
+              onChange={(event) => updatePreferences({ ...preferences, modelId: event.target.value })}
+            >
+              {SPEECH_MODELS.map((model) => (
+                <option
+                  disabled={!isModelCompatibleWithSettings(model.id, preferences)}
+                  key={model.id}
+                  value={model.id}
+                >
+                  {`${model.label} - ${model.shortLabel}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Engine
+            <select
+              aria-label="Regeneration engine"
+              disabled={busy}
+              value={preferences.executionProvider}
+              onChange={(event) => updatePreferences({
+                ...preferences,
+                executionProvider: event.target.value as RegenerationPreferences['executionProvider'],
+              })}
+            >
+              <option value="auto">Auto</option>
+              <option value="webgpu">WebGPU</option>
+              <option value="wasm">WASM</option>
+              <option value="cpu">CPU</option>
+            </select>
+          </label>
+          <label>
+            Precision
+            <select
+              aria-label="Regeneration precision"
+              disabled={busy}
+              value={preferences.dtype}
+              onChange={(event) => updatePreferences({
+                ...preferences,
+                dtype: event.target.value as RegenerationPreferences['dtype'],
+              })}
+            >
+              <option value="auto">Auto</option>
+              <option value="q8">q8</option>
+              <option value="fp32">Full precision</option>
+            </select>
+          </label>
+          <label>
+            Timestamp detail
+            <select
+              aria-label="Regeneration timestamp detail"
+              disabled={busy}
+              value={preferences.useWordTimestamps ? 'word' : 'segment'}
+              onChange={(event) => updatePreferences({
+                ...preferences,
+                useWordTimestamps: event.target.value === 'word',
+              })}
+            >
+              <option value="word">Word timestamps</option>
+              <option value="segment">Segment timestamps</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="model-note regeneration-model-note">
+          <span><strong>{selectedModel.shortLabel}</strong>: {selectedModel.description}</span>
+        </div>
+        {compatibilityNotice ? <p className="notice notice--warning">{compatibilityNotice}</p> : null}
+        {warnings.length ? (
+          <div className="capability-list">
+            {warnings.map((warning) => <p className="notice notice--warning" key={warning}>{warning}</p>)}
+          </div>
+        ) : null}
+
         <div className="regeneration-generate-row">
           <button
             className="button button--soft"
-            disabled={busy || Boolean(validationError)}
+            disabled={busy || cannotRun || Boolean(validationError)}
             type="button"
             onClick={() => {
               if (parsedRange && !validationError) {
                 setRangeDirty(false)
+                setSettingsDirty(false)
                 setSelectedId(ORIGINAL_OPTION_ID)
-                onGenerate(parsedRange)
+                onGenerate(parsedRange, preferences)
               }
             }}
           >

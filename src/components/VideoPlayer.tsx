@@ -2,6 +2,7 @@ import { Captions, Maximize, Minimize, Pause, Play, Plus, RotateCcw, Volume2 } f
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { FormattingPreferences, SubtitleEntry } from '../types/subtitles'
+import type { RegenerationRange } from '../transcription/types'
 import { formatDuration } from '../utils/time'
 import { IconButton } from './IconButton'
 import { PlayerSubtitleEditor } from './PlayerSubtitleEditor'
@@ -21,6 +22,8 @@ type VideoPlayerProps = {
   canRedo: boolean
   canSplitAtPlayhead: boolean
   canUndo: boolean
+  canRegenerate: boolean
+  regenerationRange?: RegenerationRange
   seekRequest?: { time: number; id: number }
   playRangeRequest?: { startTime: number; endTime: number; id: number }
   playToggleRequest?: number
@@ -31,6 +34,11 @@ type VideoPlayerProps = {
   onSplitAtPlayhead: () => void
   onToggleSubtitles: () => void
   onUndo: () => void
+  onStartRegeneration: () => void
+  onChangeRegenerationRange: (range: RegenerationRange) => void
+  onPreviewRegeneration: () => void
+  onConfigureRegeneration: () => void
+  onCancelRegeneration: () => void
   onUpdateSubtitle: (id: string, patch: Partial<SubtitleEntry>) => void
   onDeleteSubtitle: (id: string) => void
   onDuplicateSubtitle: (id: string) => void
@@ -54,6 +62,8 @@ export function VideoPlayer({
   canRedo,
   canSplitAtPlayhead,
   canUndo,
+  canRegenerate,
+  regenerationRange,
   seekRequest,
   playRangeRequest,
   playToggleRequest,
@@ -64,6 +74,11 @@ export function VideoPlayer({
   onSplitAtPlayhead,
   onToggleSubtitles,
   onUndo,
+  onStartRegeneration,
+  onChangeRegenerationRange,
+  onPreviewRegeneration,
+  onConfigureRegeneration,
+  onCancelRegeneration,
   onUpdateSubtitle,
   onDeleteSubtitle,
   onDuplicateSubtitle,
@@ -295,6 +310,7 @@ export function VideoPlayer({
       ) : null}
 
       <SubtitleTimeline
+        canRegenerate={canRegenerate}
         canRedo={canRedo}
         canSplitAtPlayhead={canSplitAtPlayhead}
         canUndo={canUndo}
@@ -304,12 +320,18 @@ export function VideoPlayer({
         minDuration={formatting.minDuration}
         playing={playing}
         selectedId={selectedSubtitleId}
+        regenerationRange={regenerationRange}
+        onCancelRegeneration={onCancelRegeneration}
+        onChangeRegenerationRange={onChangeRegenerationRange}
+        onConfigureRegeneration={onConfigureRegeneration}
+        onPreviewRegeneration={onPreviewRegeneration}
         onRedo={onRedo}
         onSeek={seekTo}
         onSelect={onSelectSubtitle}
         onSplitAtPlayhead={onSplitAtPlayhead}
         onUndo={onUndo}
         onUpdate={onUpdateSubtitle}
+        onStartRegeneration={onStartRegeneration}
       />
 
       <PlayerSubtitleEditor

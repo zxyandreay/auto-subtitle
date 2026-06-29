@@ -23,6 +23,8 @@ describe('desktop subtitle editor layout', () => {
     expect(appStyles).toMatch(/\.subtitle-timeline__handle\s*{[^}]*min-width:\s*24px;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__playhead\s*{[^}]*touch-action:\s*none;/)
     expect(appStyles).toMatch(/\.subtitle-timeline__snap-guide\s*{[^}]*pointer-events:\s*none;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__regeneration-handle\s*{[^}]*touch-action:\s*none;/)
+    expect(appStyles).toMatch(/\.subtitle-timeline__regeneration-handle\s*{[^}]*width:\s*24px;/)
   })
 
   it('starts subtitle auto-scroll disabled', () => {
@@ -71,6 +73,9 @@ describe('desktop subtitle editor layout', () => {
     )
     expect(appStyles).toMatch(
       /@media \(max-width: 820px\)[\s\S]*?\.player-subtitle-editor__actions \.icon-button\s*{[^}]*min-height:\s*44px;/,
+    )
+    expect(appStyles).toMatch(
+      /@media \(max-width: 820px\)[\s\S]*?\.regeneration-dialog\s*{[^}]*overflow-y:\s*auto;/,
     )
   })
 })

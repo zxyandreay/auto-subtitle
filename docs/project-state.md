@@ -157,6 +157,9 @@ The core design is a single-page app with a worker-backed transcription provider
 | `autoScroll` | Whether the editor scrolls the active subtitle into view; disabled by default. |
 | `showOnlyErrors` | Whether the editor filters rows to entries with validation issues. |
 | `selectedSubtitleId` | Shared selection for the player timeline, player editor, and main subtitle editor. |
+| `timelineRegenerationRange` | Temporary draggable timeline range used to preview and configure regeneration. |
+| `regenerationPreferences` | Session-only language, output, model, engine, precision, and timestamp choices for regeneration. |
+| `regenerationRequestContext` | Immutable range and settings snapshot used to format, preview, and apply one generated candidate set. |
 | `focusSubtitleRequest` | Monotonic request used to focus newly added or duplicated text in the player editor. |
 | `shiftMilliseconds` | Global timing shift amount. |
 | `includeTranscriptTimestamps` | Whether TXT export includes timestamps. |
@@ -220,12 +223,12 @@ flowchart TB
 | `FileDropZone` | `src/components/FileDropZone.tsx` | Drag/drop and file picker for video files, file facts, validation messages, and removal. |
 | `GlobalVideoDropOverlay` | `src/components/GlobalVideoDropOverlay.tsx` | Window-level external-file drag detection, supported/unsupported feedback, and page-wide video dropping without intercepting internal drags. |
 | `VideoPlayer` | `src/components/VideoPlayer.tsx` | Controlled media/fullscreen workspace containing video, overlay, playback controls, timeline, and player subtitle editor. |
-| `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Continuously zoomable/scrollable cue track, empty-track click seeking, draggable playhead, magnetic snapping toggle/feedback, playhead follow, split/history controls, selection, validation styling, pointer-captured timing edits, and keyboard nudging. |
+| `SubtitleTimeline` | `src/components/SubtitleTimeline.tsx` | Continuously zoomable/scrollable cue track, empty-track seeking, draggable playhead, magnetic snapping, split/history controls, cue timing edits, and a temporary draggable regeneration range with preview/configure/cancel actions. |
 | `PlayerSubtitleEditor` | `src/components/PlayerSubtitleEditor.tsx` | Selected-cue text/timestamp editing, navigation, seek, range playback, duplicate, and delete actions. |
 | `TranscriptionPanel` | `src/components/TranscriptionPanel.tsx` | Language/model/engine/precision/chunk settings, model metadata, compatibility and capability warnings, determinate progress display, start/cancel buttons. |
 | `FormattingPanel` | `src/components/FormattingPanel.tsx` | Formatting preferences and reapply formatting action. |
 | `SubtitleEditor` | `src/components/SubtitleEditor.tsx` | Playhead insertion, editable subtitle rows, timestamp parsing, row actions, search, active-row auto-scroll, and validation issue display. |
-| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. |
+| `RegenerationDialog` | `src/components/RegenerationDialog.tsx` | Editable range validation, session-only runtime settings, model compatibility warnings, local progress, original/alternative comparison, temporary preview, cancellation, and applying a selected result. |
 | `IconButton` | `src/components/IconButton.tsx` | Shared accessible icon button with `aria-label` and `title`. |
 | `SubtitleLogo` | `src/components/SubtitleLogo.tsx` | Reusable letter-free SVG caption-bubble symbol displayed in the app header. |
 
@@ -809,8 +812,13 @@ Live preview details:
 
 ```mermaid
 flowchart TD
-    Row["User clicks regenerate on a subtitle row"] --> Dialog["Dialog opens with editable cue range"]
-    Dialog --> Validate{"Finite, inside video, positive, and <= 29 seconds?"}
+    Start{"Entry point"} -->|"Timeline tool"| Select["Create range from selected cue or five seconds around playhead"]
+    Start -->|"Subtitle row"| Dialog["Dialog opens with cue range"]
+    Select --> Adjust["Move or resize range with snapping"]
+    Adjust --> PreviewRange["Preview current range once"]
+    Adjust --> Dialog["Configure regeneration"]
+    Dialog --> Settings["Choose session-only model and runtime settings"]
+    Settings --> Validate{"Finite, inside video, positive, and <= 29 seconds?"}
     Validate -->|No| RangeError["Show inline validation error"]
     Validate -->|Yes| Request["Provider posts regenerate request"]
     Request --> Extract["FFmpeg extracts range plus bounded context once"]
@@ -826,18 +834,22 @@ flowchart TD
 
 Regeneration details:
 
-1. A row action is enabled only when a source video is selected and no local model job is active.
-2. The dialog starts with the row's current timestamps and supports arbitrary adjusted ranges up to 29 seconds.
-3. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
-4. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
-5. The current compatible model, language, task, engine, dtype, word-timestamp preference, and formatting preferences are captured when generation begins. The worker enforces compatibility again and returns the resolved model ID.
-6. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
-7. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
-8. Empty, silent, duplicate-only, cancelled, or failed regeneration produces no editor mutation.
-9. Candidate formatting is bounded to the selected range before display. Applying also respects the configured gap from nearest untouched cues.
-10. Preview replaces cues only in the video overlay and clears when range playback finishes or the dialog closes.
-11. Apply removes every cue overlapping the selected range, inserts the chosen candidate, sorts and renumbers, and calls the undoable `commit` path once.
-12. The original option closes the dialog without changing subtitles.
+1. Timeline and row actions are enabled only when a source video is selected and no local model job is active.
+2. Timeline mode starts from the selected cue. Without one, it creates a five-second range centered on the playhead and shifts the range inside video boundaries. Cues longer than 29 seconds use their first valid 29-second window.
+3. The range body preserves duration while moving; start/end handles resize it. Pointer and keyboard edits reuse cue-boundary, playhead, video-boundary, and half-second-grid snapping, with Alt/Option as a temporary bypass.
+4. Preview seeks to the selected start, plays once through the selected end with current subtitles, then stops without clearing the range.
+5. The dialog exposes language, output task, model, execution provider, dtype, and word/segment timestamps. These choices remain in memory for the browser session and never update project or full-transcription settings.
+6. Changing the range or runtime preferences invalidates prior candidates. Generation captures an immutable settings snapshot, including current caption formatting, and uses it for candidate formatting, preview, and apply.
+7. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
+8. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state.
+9. The worker enforces model compatibility again and returns the resolved model ID.
+10. The worker runs greedy decoding, then sampling at temperatures `0.4` and `0.75`; duplicate retries may use `0.9` and `1.0`. Processing stops after three distinct candidates or five total attempts.
+11. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
+12. Empty, silent, duplicate-only, cancelled, or failed regeneration produces no editor mutation.
+13. Candidate formatting is bounded to the selected range before display. Applying also respects the configured gap from nearest untouched cues.
+14. Candidate preview replaces cues only in the video overlay and clears when range playback finishes or the dialog closes.
+15. Apply removes every overlapping cue, inserts the chosen candidate, sorts and renumbers, and calls the undoable `commit` path once. Timeline range edits never enter subtitle history or autosave.
+16. The original option closes the dialog without changing subtitles.
 
 Full transcription and regeneration have separate job references but are mutually exclusive. This avoids running two FFmpeg.wasm/model pipelines concurrently while preserving independent progress and cancellation UI.
 
@@ -1391,7 +1403,7 @@ They cover:
 40. Fixed bounded decoding profiles and normalized candidate deduplication.
 41. Range-constrained segment timing and all-overlap cue replacement.
 42. Neighbor-gap clamping without invented gaps at an open range boundary.
-43. Regeneration dialog defaults, validation, preview, apply, original no-op, and Escape cancellation.
+43. Timeline regeneration initialization, clamping, drag/resize, keyboard, snapping, preview/configure/cancel actions, dialog settings, candidate invalidation, immutable settings snapshots, apply, original no-op, and Escape cancellation.
 44. Registry recognition for all four model IDs and backward compatibility for Tiny/Base.
 45. Distil English/transcription and Turbo transcription compatibility rules.
 46. Deterministic fallback behavior for unknown, non-English, and translation settings.
