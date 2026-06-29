@@ -67,6 +67,49 @@ describe('SubtitleTimeline', () => {
     expect(onSeek).toHaveBeenLastCalledWith(2.75)
   })
 
+  it('toggles magnetic snapping for empty-track clicks', () => {
+    const onSeek = vi.fn()
+    renderTimeline({ onSeek })
+    const track = container.querySelector('.subtitle-timeline__track') as HTMLElement
+    vi.spyOn(track, 'getBoundingClientRect').mockReturnValue(rect({ left: 0, width: 240 }))
+    const disableMagnet = button('Disable timeline magnetic snapping')
+
+    expect(disableMagnet.className).toContain('icon-button--soft')
+    clickAt(track, 66)
+    expect(onSeek).toHaveBeenLastCalledWith(3)
+
+    click(disableMagnet)
+    expect(button('Enable timeline magnetic snapping').className).toContain('icon-button--ghost')
+    clickAt(track, 66)
+    expect(onSeek).toHaveBeenLastCalledWith(2.75)
+    expect(container.querySelector('.subtitle-timeline__snap-guide')).toBeNull()
+  })
+
+  it('disables magnetic snapping for playhead, cue, and boundary drags', () => {
+    const onSeek = vi.fn()
+    const onUpdate = vi.fn()
+    renderTimeline({ onSeek, onUpdate })
+    click(button('Disable timeline magnetic snapping'))
+
+    const playhead = button('Timeline playhead')
+    pointer(playhead, 'pointerdown', 13, 0)
+    pointer(playhead, 'pointermove', 13, 66)
+    expect(onSeek).toHaveBeenLastCalledWith(2.75)
+
+    const cue = timelineCue(1)
+    pointer(cue, 'pointerdown', 14, 100)
+    pointer(cue, 'pointermove', 14, 121)
+    pointer(cue, 'pointerup', 14, 121)
+    expect(onUpdate).toHaveBeenNthCalledWith(1, 'first', { startTime: 1.875, endTime: 3.875 })
+
+    const startHandle = button('Adjust start time for subtitle 1')
+    pointer(startHandle, 'pointerdown', 15, 100)
+    pointer(startHandle, 'pointermove', 15, 113)
+    pointer(startHandle, 'pointerup', 15, 113)
+    expect(onUpdate).toHaveBeenNthCalledWith(2, 'first', { startTime: 1.542, endTime: 3 })
+    expect(container.querySelector('.subtitle-timeline__snap-guide')).toBeNull()
+  })
+
   it('renders dedicated history and split controls with their enabled states', () => {
     const onRedo = vi.fn()
     const onSplitAtPlayhead = vi.fn()

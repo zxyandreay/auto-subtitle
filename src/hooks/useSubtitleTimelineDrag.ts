@@ -23,6 +23,7 @@ type UseSubtitleTimelineDragOptions = {
   minDuration: number
   pixelsPerSecond: number
   playhead: number
+  snappingEnabled: boolean
   onUpdate: (id: string, patch: Pick<SubtitleEntry, 'startTime' | 'endTime'>) => void
 }
 
@@ -32,6 +33,7 @@ export function useSubtitleTimelineDrag({
   minDuration,
   pixelsPerSecond,
   playhead,
+  snappingEnabled,
   onUpdate,
 }: UseSubtitleTimelineDragOptions) {
   const dragRef = useRef<DragState | null>(null)
@@ -42,7 +44,7 @@ export function useSubtitleTimelineDrag({
   playheadRef.current = playhead
 
   const calculate = useCallback(
-    (drag: DragState, clientX: number, snappingDisabled: boolean) => {
+    (drag: DragState, clientX: number, snappingBypassed: boolean) => {
       return calculateTimelineEditWithSnap({
         entry: drag.entry,
         mode: drag.mode,
@@ -56,10 +58,10 @@ export function useSubtitleTimelineDrag({
           playhead: playheadRef.current,
           duration,
         }),
-        snappingDisabled,
+        snappingDisabled: !snappingEnabled || snappingBypassed,
       })
     },
-    [duration, entries, minDuration, pixelsPerSecond],
+    [duration, entries, minDuration, pixelsPerSecond, snappingEnabled],
   )
 
   const beginDrag = useCallback(

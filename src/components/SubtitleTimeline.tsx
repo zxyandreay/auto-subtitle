@@ -1,4 +1,4 @@
-import { LocateFixed, RotateCcw, RotateCw, Scissors } from 'lucide-react'
+import { LocateFixed, Magnet, RotateCcw, RotateCw, Scissors } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSubtitleTimelineDrag } from '../hooks/useSubtitleTimelineDrag'
@@ -63,6 +63,7 @@ export function SubtitleTimeline({
   const [viewportWidth, setViewportWidth] = useState(FALLBACK_VIEWPORT_WIDTH)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
   const [followPlayhead, setFollowPlayhead] = useState(true)
+  const [snappingEnabled, setSnappingEnabled] = useState(true)
   const [playheadDragTime, setPlayheadDragTime] = useState<number>()
   const [playheadSnap, setPlayheadSnap] = useState<TimelineSnapMatch>()
   const [trackClickSnap, setTrackClickSnap] = useState<TimelineSnapMatch>()
@@ -78,6 +79,7 @@ export function SubtitleTimeline({
     minDuration,
     pixelsPerSecond: effectivePixelsPerSecond,
     playhead: currentTime,
+    snappingEnabled,
     onUpdate,
   })
 
@@ -159,11 +161,12 @@ export function SubtitleTimeline({
         duration,
         minDuration,
         pixelsPerSecond: Number.POSITIVE_INFINITY,
+        snappingDisabled: !snappingEnabled || event.altKey,
       })
       onSelect(entry.id)
       onUpdate(entry.id, timing)
     },
-    [duration, minDuration, onSelect, onUpdate],
+    [duration, minDuration, onSelect, onUpdate, snappingEnabled],
   )
 
   const activateCue = useCallback(
@@ -177,7 +180,7 @@ export function SubtitleTimeline({
   )
 
   const calculatePlayheadTime = useCallback(
-    (clientX: number, snappingDisabled: boolean) => {
+    (clientX: number, snappingBypassed: boolean) => {
       const trackLeft = trackRef.current?.getBoundingClientRect().left ?? 0
       const maximum = duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : timelineDuration
       const proposedTime = Math.max(0, Math.min(maximum, (clientX - trackLeft) / effectivePixelsPerSecond))
@@ -185,10 +188,10 @@ export function SubtitleTimeline({
         proposedTime,
         buildTimelineSnapTargets({ entries, duration }),
         effectivePixelsPerSecond,
-        snappingDisabled,
+        !snappingEnabled || snappingBypassed,
       )
     },
-    [duration, effectivePixelsPerSecond, entries, timelineDuration],
+    [duration, effectivePixelsPerSecond, entries, snappingEnabled, timelineDuration],
   )
 
   const beginPlayheadDrag = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -272,10 +275,22 @@ export function SubtitleTimeline({
       Math.max(0, Math.min(maximum, proposedTime)),
       buildTimelineSnapTargets({ entries, duration }),
       effectivePixelsPerSecond,
-      event.altKey,
+      !snappingEnabled || event.altKey,
     )
     onSeek(result.time)
-  }, [currentTime, duration, effectivePixelsPerSecond, entries, onSeek, timelineDuration])
+  }, [currentTime, duration, effectivePixelsPerSecond, entries, onSeek, snappingEnabled, timelineDuration])
+
+  const toggleSnapping = useCallback(() => {
+    if (snappingEnabled) {
+      if (trackClickSnapTimeoutRef.current !== undefined) {
+        window.clearTimeout(trackClickSnapTimeoutRef.current)
+        trackClickSnapTimeoutRef.current = undefined
+      }
+      setPlayheadSnap(undefined)
+      setTrackClickSnap(undefined)
+    }
+    setSnappingEnabled((enabled) => !enabled)
+  }, [snappingEnabled])
 
   const handleTrackClick = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -333,6 +348,13 @@ export function SubtitleTimeline({
             onClick={onSplitAtPlayhead}
           >
             <Scissors size={16} />
+          </IconButton>
+          <IconButton
+            label={snappingEnabled ? 'Disable timeline magnetic snapping' : 'Enable timeline magnetic snapping'}
+            variant={snappingEnabled ? 'soft' : 'ghost'}
+            onClick={toggleSnapping}
+          >
+            <Magnet size={16} />
           </IconButton>
           <label className="subtitle-timeline__zoom">
             <span className="sr-only">Zoom subtitle timeline</span>
