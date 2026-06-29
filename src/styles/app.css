@@ -51,6 +51,10 @@ body {
   color: var(--text);
 }
 
+strong {
+  font-weight: var(--font-weight-semibold);
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 18px;
@@ -97,9 +101,10 @@ body {
 .panel-heading h2,
 .drop-zone h2 {
   color: var(--text);
-  font-size: 18px;
-  letter-spacing: 0;
-  line-height: 1.2;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
   margin: 0;
 }
 
@@ -107,8 +112,8 @@ body {
 .panel-heading p,
 .drop-zone p {
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.35;
+  font-size: var(--font-size-md);
+  line-height: 1.45;
   margin: 3px 0 0;
 }
 
@@ -127,8 +132,8 @@ body {
   border-radius: 999px;
   color: var(--success);
   display: inline-flex;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   min-height: 30px;
   padding: 0 10px;
   white-space: nowrap;
@@ -181,10 +186,11 @@ body {
   border: 1px solid transparent;
   border-radius: 6px;
   display: inline-flex;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
   gap: 7px;
   justify-content: center;
+  line-height: 1.2;
   min-height: 34px;
   transition:
     background 140ms ease,
@@ -310,11 +316,13 @@ body {
 .global-video-drop__message strong {
   color: var(--text);
   font-size: clamp(18px, 3vw, 24px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
 }
 
 .global-video-drop__message span {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 
 .drop-zone__icon {
@@ -360,14 +368,16 @@ body {
 
 .file-facts dt {
   color: var(--subtle);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
 .file-facts dd {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
   margin: 2px 0 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -383,8 +393,8 @@ body {
 .notice,
 .notice-banner {
   border-radius: 6px;
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: var(--font-size-md);
+  line-height: 1.45;
 }
 
 .notice {
@@ -448,8 +458,8 @@ body {
   background: transparent;
   border: 0;
   color: currentColor;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   margin-left: auto;
 }
 
@@ -479,6 +489,7 @@ body {
   flex-direction: column;
   gap: 10px;
   font-size: 14px;
+  font-weight: var(--font-weight-regular);
   justify-content: center;
 }
 
@@ -488,7 +499,7 @@ body {
   bottom: 8%;
   color: #ffffff;
   font-size: clamp(18px, 2.1vw, 30px);
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
   left: 50%;
   line-height: 1.28;
   max-width: min(82%, 920px);
@@ -516,7 +527,8 @@ body {
 
 .time-readout {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -536,7 +548,7 @@ body {
 .player-fullscreen-error {
   background: var(--warning-soft);
   color: var(--warning);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   margin: 0;
   padding: 8px 12px;
 }
@@ -556,12 +568,13 @@ body {
 }
 
 .subtitle-timeline__toolbar > strong {
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 
 .subtitle-timeline__toolbar > span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
   font-variant-numeric: tabular-nums;
 }
 
@@ -670,11 +683,11 @@ body {
   background: color-mix(in srgb, var(--blue) 88%, #0b1320);
   border-radius: 4px;
   color: #ffffff;
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
-  font-weight: 800;
+  font-weight: var(--font-weight-semibold);
   left: 13px;
-  line-height: 1;
+  line-height: 1.1;
   padding: 5px 6px;
   position: absolute;
   top: 4px;
@@ -745,7 +758,8 @@ body {
 
 .subtitle-timeline__cue-text {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
   min-width: 0;
   overflow: hidden;
   padding: 0 4px;
@@ -813,12 +827,12 @@ body {
 }
 
 .player-subtitle-editor__heading strong {
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 
 .player-subtitle-editor__heading span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 
 .player-subtitle-editor__body {
@@ -839,7 +853,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  line-height: 1.4;
+  font-size: var(--font-size-md);
+  line-height: 1.5;
   min-height: 58px;
   padding: 8px;
   resize: vertical;
@@ -931,7 +946,7 @@ body {
 }
 
 .panel-heading--compact h2 {
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 .settings-grid {
@@ -949,9 +964,10 @@ body {
 .tool-row label {
   color: var(--muted);
   display: grid;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   gap: 5px;
+  line-height: 1.35;
 }
 
 .settings-grid input,
@@ -964,6 +980,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
+  font-weight: var(--font-weight-regular);
   min-height: 34px;
   min-width: 0;
   padding: 7px 9px;
@@ -973,9 +990,10 @@ body {
   align-items: center;
   color: var(--muted);
   display: inline-flex;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   gap: 7px;
+  line-height: 1.35;
 }
 
 .toggle-line input {
@@ -992,8 +1010,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: var(--font-size-md);
+  line-height: 1.45;
   margin-top: 12px;
   padding: 10px;
 }
@@ -1022,7 +1040,7 @@ body {
 
 .progress-card strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 
 .progress-card__title {
@@ -1145,14 +1163,16 @@ progress {
 }
 
 .regeneration-dialog__header h2 {
-  font-size: 18px;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
   margin: 0;
 }
 
 .regeneration-dialog__header p,
 .regeneration-generate-row > span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   margin: 3px 0 0;
 }
 
@@ -1183,7 +1203,7 @@ progress {
   border: 1px solid var(--border);
   border-radius: 6px;
   display: grid;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   gap: 8px;
   margin-top: 12px;
   padding: 10px;
@@ -1233,13 +1253,13 @@ progress {
 
 .regeneration-choice > span > span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .regeneration-choice__cue {
   border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
   color: var(--text);
-  line-height: 1.4;
+  line-height: 1.45;
   margin-top: 5px;
   padding-top: 7px;
   white-space: pre-line;
@@ -1247,7 +1267,7 @@ progress {
 
 .regeneration-choice__cue > span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1280,7 +1300,7 @@ progress {
   align-items: center;
   color: var(--muted);
   display: flex;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   gap: 5px;
 }
 
@@ -1335,8 +1355,8 @@ progress {
   border-radius: 6px;
   color: var(--text);
   display: inline-flex;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   height: 34px;
   justify-content: center;
   min-width: 38px;
@@ -1356,7 +1376,8 @@ progress {
 }
 
 .timestamp-field input {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
   font-variant-numeric: tabular-nums;
   width: 100%;
 }
@@ -1367,11 +1388,12 @@ progress {
 
 .timestamp-error {
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 
 .subtitle-row textarea {
-  line-height: 1.45;
+  font-size: var(--font-size-md);
+  line-height: 1.5;
   min-height: 72px;
   resize: vertical;
   width: 100%;
@@ -1387,8 +1409,8 @@ progress {
   background: transparent;
   border: 0;
   color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
   padding: 0;
 }
 
@@ -1402,7 +1424,8 @@ progress {
 
 .issue-list__item {
   border-radius: 5px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
   padding: 6px 8px;
 }
 

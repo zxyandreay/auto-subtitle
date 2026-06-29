@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const appStyles = readFileSync(resolve(process.cwd(), 'src/styles/app.css'), 'utf8')
+const indexStyles = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
 const appSource = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8')
 
 describe('desktop subtitle editor layout', () => {
@@ -26,6 +27,29 @@ describe('desktop subtitle editor layout', () => {
 
   it('starts subtitle auto-scroll disabled', () => {
     expect(appSource).toMatch(/const \[autoScroll, setAutoScroll\] = useState\(false\)/)
+  })
+
+  it('uses the crisp compact typography scale without heavy UI controls', () => {
+    expect(indexStyles).toMatch(/--font-ui:/)
+    expect(indexStyles).toMatch(/--font-size-xs:\s*11px;/)
+    expect(indexStyles).toMatch(/--font-size-sm:\s*12px;/)
+    expect(indexStyles).toMatch(/--font-size-md:\s*13px;/)
+    expect(indexStyles).toMatch(/--font-size-lg:\s*15px;/)
+    expect(indexStyles).toMatch(/--font-size-xl:\s*17px;/)
+    expect(indexStyles).toMatch(/--font-weight-medium:\s*500;/)
+    expect(indexStyles).toMatch(/--font-weight-semibold:\s*600;/)
+    expect(appStyles).toMatch(
+      /\.button,\s*\.icon-button\s*{[^}]*font-weight:\s*var\(--font-weight-semibold\);/,
+    )
+    expect(appStyles).toMatch(
+      /\.settings-grid label,[\s\S]*?\.tool-row label\s*{[^}]*font-weight:\s*var\(--font-weight-semibold\);/,
+    )
+    expect(appStyles).toMatch(
+      /\.settings-grid input,[\s\S]*?\.subtitle-row textarea\s*{[^}]*font-weight:\s*var\(--font-weight-regular\);/,
+    )
+    expect(appStyles).toMatch(
+      /\.subtitle-overlay\s*{[^}]*font-weight:\s*var\(--font-weight-bold\);/,
+    )
   })
 
   it('keeps the global file overlay fixed, non-blocking, and motion-aware', () => {

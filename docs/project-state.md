@@ -233,6 +233,10 @@ flowchart TB
 
 Auto Subtitle uses a caption-bubble symbol with two subtitle lines instead of initials or letter-based branding. `SubtitleLogo` renders the scalable inline header mark using `currentColor`, so it follows the active theme. `public/favicon.svg` carries the same symbol on a solid accent background for the browser tab and other favicon surfaces. `index.html` declares that SVG as the any-size favicon.
 
+### Typography System
+
+`src/index.css` defines a local/system sans-serif stack and the shared 11/12/13/15/17px UI scale. Application text uses 400 for ordinary controls and body copy, 500 for compact metadata and tabular timing figures, and 600 for headings, labels, buttons, and emphasized status text. Headings use slight negative tracking while the remaining uppercase file-fact labels use restrained positive tracking. The video subtitle overlay deliberately remains at weight 700 for contrast against moving imagery; no external font files or network font requests are used.
+
 ## Primary User Flow: Video To Subtitles
 
 ```mermaid

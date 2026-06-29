@@ -18,6 +18,7 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
 - IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
 - Light, dark, and system themes.
+- Crisp compact local/system typography with lighter UI emphasis, tabular timing figures, and a deliberately bold video-caption overlay.
 - Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
 - Keyboard shortcuts for playback, seeking, subtitle timeline nudging and splitting, undo, and redo.
 
