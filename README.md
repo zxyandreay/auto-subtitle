@@ -6,12 +6,27 @@ Auto Subtitle runs Whisper speech recognition and FFmpeg directly in your browse
 
 ## Installation
 
-### Requirements
+### System Requirements
 
-- The current [Node.js LTS release](https://nodejs.org/) with npm
-- A modern desktop browser; a Chromium-based browser is recommended
-- Network access for the initial dependency install and first download of each Whisper model
-- Enough memory for the video, extracted audio, FFmpeg.wasm, and the selected model
+Software requirements:
+
+- A 64-bit Windows, macOS, or Linux system capable of running a current desktop browser
+- [Node.js](https://nodejs.org/) `20.19+` or `22.12+` with npm, as required by Vite 8
+- Current stable Chrome or Edge recommended; the browser must support WebAssembly, Web Workers, and IndexedDB
+- Network access for the initial dependency install and the first download of each Whisper model
+- A display resolution of at least 1280×720 is recommended for the full editor workspace
+
+Suggested hardware profiles:
+
+| | Minimum | Recommended | High-resource models |
+| --- | --- | --- | --- |
+| Best suited for | Tiny model and short clips | Base model and typical HD videos | Large v3 Turbo or Distil Large v3 |
+| CPU | 64-bit, 4 cores | Modern 64-bit, 6+ cores | Modern 64-bit, 8+ cores |
+| System memory | 8 GB RAM | 16 GB RAM | 32 GB RAM |
+| Graphics | No dedicated GPU required; use WASM/CPU | WebGPU-capable integrated or dedicated GPU | WebGPU-capable GPU with 8 GB+ VRAM, or a system with at least 32 GB of unified memory |
+| Free storage | 2 GB plus space for the source video | 5 GB plus space for source videos | 10 GB plus space for source videos |
+
+These are practical planning targets, not hard compatibility limits. The app keeps the video, FFmpeg working data, extracted audio, and model data in browser memory during processing, so long or high-bitrate videos can need substantially more RAM. Use `q8` precision for the large models; `fp32` and CPU/WASM execution consume more memory or can be much slower. Firefox and Safari may work, but codec, WebGPU, WebAssembly, and media-decoding support varies.
 
 Clone the repository:
 
@@ -240,7 +255,7 @@ The transcription provider boundary is intentionally small so another local engi
 
 ## Troubleshooting
 
-- Node.js missing: install Node.js from `https://nodejs.org/` and reopen the launcher.
+- Node.js missing or unsupported: install Node.js 20.19+ or 22.12+ from `https://nodejs.org/` and reopen the launcher.
 - PowerShell blocks `npm.ps1`: the launcher uses `npm.cmd`; manual PowerShell users can run `npm.cmd install`.
 - Model download fails: check network access, browser storage, and whether the model host is reachable.
 - FFmpeg initialization fails: try a Chromium-based browser and restart the dev server.
