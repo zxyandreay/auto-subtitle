@@ -1,8 +1,51 @@
 # Auto Subtitle
 
-Auto Subtitle is a local-first web app for creating, previewing, editing, importing, and exporting subtitles for videos on your computer. It is built with React, TypeScript, Vite, FFmpeg.wasm, and Transformers.js.
+**A local AI subtitle generator and editor for turning video into SRT, WebVTT, and transcript files.**
 
-The selected video is handled as a browser `File` with a temporary object URL. The app does not upload the video, does not call a paid transcription API, and does not require an account, API key, backend, database, analytics, or tracking.
+Auto Subtitle runs Whisper speech recognition and FFmpeg directly in your browser. Generate a subtitle draft from a local video, refine its text and timing in the built-in player and timeline editor, then export `.srt`, `.vtt`, or `.txt` without uploading your media to a transcription service. No account, API key, paid transcription API, backend, analytics, or tracking is required.
+
+## Installation
+
+### Requirements
+
+- The current [Node.js LTS release](https://nodejs.org/) with npm
+- A modern desktop browser; a Chromium-based browser is recommended
+- Network access for the initial dependency install and first download of each Whisper model
+- Enough memory for the video, extracted audio, FFmpeg.wasm, and the selected model
+
+Clone the repository:
+
+```bash
+git clone https://github.com/zxyandreay/auto-subtitle.git
+cd auto-subtitle
+```
+
+On Windows, double-click `local-launch.bat`. The launcher installs dependencies when needed, starts the local app at `http://127.0.0.1:5173`, and opens it in your default browser. Keep its terminal open while using the app; press Enter there to stop the server.
+
+For a manual setup on any supported platform:
+
+```bash
+npm ci
+npm run dev
+```
+
+Then open `http://127.0.0.1:5173` if your browser does not open it automatically.
+
+## How To Use
+
+1. Choose or drop an MP4, WebM, MOV, or MKV video. Codec support depends on your browser and FFmpeg.wasm.
+2. In **Local transcription**, choose the spoken language, output language, Whisper model, processing engine, and precision. The first run downloads the selected model; later runs use the browser cache when available.
+3. Select **Transcribe locally** and keep the page open while the app extracts audio and generates editable subtitle cues.
+4. Review the result in the video preview, magnetic timeline, and subtitle editor. Edit text or timestamps, split or merge cues, adjust formatting, or regenerate a selected range locally.
+5. Use the toolbar to export **SRT**, **VTT**, or a **TXT** transcript. Enable **Include timestamps in TXT export** when you want a timestamped transcript. You can also save an Auto Subtitle JSON project and restore it later.
+
+Generated subtitles are a draft: review names, punctuation, wording, and timing before publishing.
+
+## Screenshot
+
+![Auto Subtitle local AI transcription and timeline editor](docs/images/auto-subtitle-editor.png)
+
+_Preview, time, and edit generated subtitles against the source video before exporting._
 
 ## Features
 
@@ -22,17 +65,6 @@ The selected video is handled as a browser `File` with a temporary object URL. T
 - Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
 - Keyboard shortcuts for playback, seeking, subtitle timeline nudging and splitting, undo, and redo.
 
-## Screenshots
-
-Screenshots are not committed yet. Run the app locally and capture:
-
-- Empty import state
-- Video preview with subtitle overlay
-- Interactive subtitle timeline and player editing panel
-- Fullscreen subtitle editing workspace
-- Subtitle editor with validation issues
-- Transcription failure or progress state
-
 ## Privacy
 
 Auto Subtitle is designed to keep media local:
@@ -49,38 +81,9 @@ When the app is started through `local-launch.bat`, transcription progress and g
 
 Diagnostic events are stored only in this browser's local storage. They may include file metadata, transcription settings, recognized text, speech regions, window timing, coverage/repair decisions, errors, and final subtitle entries, but never audio or video bytes. Use the **Debug log** button in the top toolbar after reproducing a problem to export a JSON report for investigation. The history is bounded to the most recent 1,000 events and approximately 2 MB; oversized text is sampled with its original length retained.
 
-## System Requirements
-
-- Node.js and npm
-- A modern desktop browser
-- Enough memory for FFmpeg.wasm, the selected video, extracted audio, and the selected Whisper model
-- Network access for first-run dependency/model downloads
-
-Chromium-based browsers are recommended for the first release. Firefox and Safari support varies by codec, WebAssembly behavior, WebGPU support, and media decoding.
-
-## Launch On Windows
-
-Double-click:
-
-```bat
-local-launch.bat
-```
-
-The launcher:
-
-- switches to the repository directory
-- checks for Node.js and npm
-- installs dependencies with `npm ci` when possible
-- starts Vite on `http://127.0.0.1:5173`
-- opens the app in the default browser
-- shows local transcription progress and generated caption text in the terminal
-- stops the Vite process tree when you press Enter, lose console input, or close the launcher terminal
-- keeps the terminal open if an error occurs
-
-## Manual Commands
+## Development Commands
 
 ```bash
-npm install
 npm run dev
 npm run typecheck
 npm run lint
@@ -274,4 +277,3 @@ This section is informational and not legal advice.
 - More languages and model choices with clearer size estimates.
 - Side-by-side waveform timing adjustments.
 - More advanced subtitle timing controls for reviewing generated captions.
-- Real sample screenshots in the README.

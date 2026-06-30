@@ -2,13 +2,20 @@
 
 This document describes the current implementation of Auto Subtitle: what the app is, how it is structured, how users move through it, how videos become editable subtitle entries, how local model execution is wired, and where state is stored.
 
-Auto Subtitle is a local-first React web application for generating, editing, importing, previewing, and exporting subtitles for videos selected from the user's computer. The app is intentionally browser-centered: there is no application backend, no user account system, no database service, no cloud transcription API, no analytics, and no upload path for user media.
+Auto Subtitle is a local AI subtitle generator and editor for creating SRT, WebVTT, and TXT transcript files from videos selected from the user's computer. Local Whisper generation, video-synchronized editing, and standards-based export form one browser workflow. There is no application backend, user account system, database service, cloud transcription API, analytics, or upload path for user media.
+
+## Product Positioning
+
+Auto Subtitle is positioned as an end-to-end local subtitle workspace rather than a transcription demo. Its core journey is **video in, local AI draft, human review and timing edits, subtitle or transcript file out**. Privacy is part of that workflow: media processing stays in the browser while users retain direct control over every generated cue before export.
+
+The user-facing installation and usage path is documented at the top of the [README](../README.md). The committed [editor screenshot](images/auto-subtitle-editor.png) shows the video preview, caption overlay, magnetic timeline, and selected-cue editor working together.
 
 ## Current Snapshot
 
 | Area | Current state |
 | --- | --- |
 | Product name | Auto Subtitle |
+| Primary use | Local AI subtitle generation and editing for SRT, WebVTT, and TXT transcripts |
 | Repository | `zxyandreay/auto-subtitle` |
 | Package name | `auto-subtitle` |
 | Runtime | Browser app served by Vite |
@@ -111,6 +118,8 @@ The core design is a single-page app with a worker-backed transcription provider
 ```text
 .
 |-- docs/
+|   |-- images/
+|   |   `-- auto-subtitle-editor.png
 |   `-- project-state.md
 |-- local-launch.bat
 |-- scripts/
