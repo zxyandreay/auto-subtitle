@@ -11,6 +11,7 @@ import { findUncoveredSpeechRanges } from '../transcription/coverage'
 import { reconcileBoundarySegments } from '../transcription/reconciliation'
 import { createRepairWindowPlans, selectRepairSegments } from '../transcription/repair'
 import {
+  DISTIL_LARGE_V3_MODEL_ID,
   getSpeechModelOption,
   resolveSpeechModelRuntimeSettings,
   type SpeechModelOption,
@@ -59,6 +60,19 @@ type AsrCallOptions = {
 type BrowserAsrTranscriber = {
   (audio: Float32Array, options: AsrCallOptions): Promise<unknown>
   dispose?: () => Promise<void> | void
+}
+
+type PipelineDtype =
+  | 'q8'
+  | 'fp32'
+  | {
+      encoder_model: 'q8' | 'fp32'
+      decoder_model_merged: 'q8' | 'fp32'
+    }
+
+type PipelineDtypeResolution = {
+  value?: PipelineDtype
+  label: string
 }
 
 type DecodedAudio = {
@@ -424,30 +438,57 @@ async function regenerate(
 async function loadTranscriber(settings: TranscriptionSettings): Promise<BrowserAsrTranscriber> {
   const runtime = resolveSpeechModelRuntimeSettings(settings)
   const model = getSpeechModelOption(runtime.settings.modelId)
+  const dtype = resolvePipelineDtype(runtime.settings)
+  const technicalDetails = getModelTechnicalDetails(model, runtime.settings, dtype.label)
   const { env, pipeline } = await import('@huggingface/transformers')
   env.allowLocalModels = false
   env.allowRemoteModels = true
   env.useBrowserCache = true
 
   try {
-    return (await pipeline('automatic-speech-recognition', runtime.settings.modelId, {
+    const transcriber = (await pipeline('automatic-speech-recognition', runtime.settings.modelId, {
       device: runtime.settings.executionProvider,
-      dtype: runtime.settings.dtype === 'auto' ? undefined : runtime.settings.dtype,
+      ...(dtype.value ? { dtype: dtype.value } : {}),
       progress_callback: (data: unknown) => {
         const progress = getDownloadProgress(data)
         postProgress(
           'downloading-model',
           progress ? `Model download/cache progress: ${progress.message}` : 'Reading speech model files.',
           progress?.progress,
-          getModelTechnicalDetails(model, runtime.settings),
+          technicalDetails,
         )
       },
     })) as BrowserAsrTranscriber
+
+    postProgress('downloading-model', `${model.shortLabel} speech model is ready.`, 1, technicalDetails)
+    return transcriber
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error)
     throw new Error(
-      `Could not load ${model.shortLabel} with ${runtime.settings.executionProvider}/${runtime.settings.dtype}. ${details}`,
+      `Could not load ${model.shortLabel} with ${runtime.settings.executionProvider}/${dtype.label}. ${details}`,
     )
+  }
+}
+
+
+function resolvePipelineDtype(settings: TranscriptionSettings): PipelineDtypeResolution {
+  if (settings.modelId === DISTIL_LARGE_V3_MODEL_ID) {
+    return {
+      value: {
+        encoder_model: 'q8',
+        decoder_model_merged: 'q8',
+      },
+      label: 'q8 (forced for Distil Large v3)',
+    }
+  }
+
+  if (settings.dtype === 'auto') {
+    return { label: 'auto' }
+  }
+
+  return {
+    value: settings.dtype,
+    label: settings.dtype,
   }
 }
 
@@ -969,8 +1010,12 @@ function postProgress(
   })
 }
 
-function getModelTechnicalDetails(model: SpeechModelOption, settings: TranscriptionSettings): string {
-  return `${model.label} (${model.id}); ${model.highResource ? 'high-resource; ' : ''}engine ${settings.executionProvider}; dtype ${settings.dtype}`
+function getModelTechnicalDetails(
+  model: SpeechModelOption,
+  settings: TranscriptionSettings,
+  effectiveDtype = settings.dtype,
+): string {
+  return `${model.label} (${model.id}); ${model.highResource ? 'high-resource; ' : ''}engine ${settings.executionProvider}; dtype ${effectiveDtype}`
 }
 
 function post(event: WorkerEvent): void {
