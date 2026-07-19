@@ -14,7 +14,7 @@ describe('accurate-local defaults', () => {
       executionProvider: 'auto',
       dtype: 'q8',
       task: 'transcribe',
-      language: 'auto',
+      language: 'english',
       chunkLengthSeconds: 29,
       strideLengthSeconds: 4,
       maxModelInputSeconds: 29,
@@ -77,7 +77,7 @@ describe('accurate-local defaults', () => {
 
   it('creates session regeneration preferences from applicable transcription settings', () => {
     expect(createRegenerationPreferences(DEFAULT_TRANSCRIPTION_SETTINGS)).toEqual({
-      language: 'auto',
+      language: 'english',
       task: 'transcribe',
       modelId: DEFAULT_TRANSCRIPTION_SETTINGS.modelId,
       executionProvider: 'auto',

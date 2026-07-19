@@ -47,6 +47,14 @@ test-results/
 qa-artifacts/
 *.tsbuildinfo
 
+# Local benchmark media, captured runs, and generated reports
+!benchmarks/fixtures.local/
+benchmarks/fixtures.local/*
+!benchmarks/fixtures.local/.gitkeep
+benchmarks/results/*
+!benchmarks/results/.gitkeep
+benchmarks/manifests/*.local.json
+
 # Editor and OS files
 .vscode/*
 !.vscode/extensions.json

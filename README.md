@@ -96,6 +96,8 @@ When the app is started through `local-launch.bat`, transcription progress and g
 
 Diagnostic events are stored only in this browser's local storage. They may include file metadata, transcription settings, recognized text, speech regions, window timing, coverage/repair decisions, errors, and final subtitle entries, but never audio or video bytes. Use the **Debug log** button in the top toolbar after reproducing a problem to export a JSON report for investigation. The history is bounded to the most recent 1,000 events and approximately 2 MB; oversized text is sampled with its original length retained.
 
+Diagnostic persistence is coalesced during busy jobs instead of rewriting the complete history for every event. Reports also include measured worker stage durations, cold/warm model state, approximate worker-message counts and JSON sizes, final formatting time, total job time, and Chromium heap samples when the browser exposes them. These are diagnostic observations, not guaranteed whole-process or GPU-memory measurements.
+
 ## Development Commands
 
 ```bash
@@ -105,7 +107,10 @@ npm run lint
 npm test
 npm run build
 npm run preview
+npm run benchmark:self-test
 ```
+
+The local benchmark scorer is documented in [`benchmarks/README.md`](benchmarks/README.md). It compares locally captured project/debug artifacts with user-supplied, gitignored references; no benchmark media or fabricated accuracy result is committed.
 
 ## Transcription Models
 
@@ -128,21 +133,23 @@ The first use of a model can download its files from Hugging Face. Transformers.
 2. The app creates a temporary object URL for preview.
 3. A Web Worker loads FFmpeg.wasm and Transformers.js.
 4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
-5. The worker analyzes the decoded samples with a deterministic frame-based speech activity detector. It estimates a local noise floor, smooths isolated frames, merges nearby speech, and adds bounded pre/post speech padding.
-6. Detected speech regions are packed into windows near 26 seconds. Boundaries prefer silence, context overlap is normally 1.5 seconds, and every model input is capped at 29 seconds. If speech analysis yields no usable regions, contiguous fixed windows use a 4-second overlap and the same 29-second ceiling.
+5. The worker analyzes the decoded samples with rolling-RMS frames, an adapting local noise floor, separate speech-on/off thresholds, hysteresis, and isolated-frame smoothing. It retains both raw detector boundaries and separately padded model-context regions.
+6. Detected speech regions are packed into windows near 26 seconds. Long regions search frame-level activity around the ideal split and choose a nearby pause or lowest-activity boundary deterministically. Context overlap is normally 1.5 seconds, and every model input is capped at 29 seconds. If speech analysis fails or yields no usable regions, contiguous fixed windows use a 4-second overlap and the same 29-second ceiling.
 7. The compatibility resolver validates the selected model, language, and task, then Transformers.js loads the resolved model from browser cache or the model repository. The ASR pipeline requests word timestamps by default; if the export does not support them, the current call is retried with segment timestamps and later windows stay in segment mode.
-8. Raw model chunks are mapped from exact sample-slice offsets back to the full video timeline. Adjacent-window text is reconciled conservatively so duplicate overlap words are removed while unique boundary words remain.
-9. Speech regions are compared with normalized subtitle coverage. Likely uncovered speech can trigger one bounded repair pass of at most 20 local windows, using the already loaded transcriber.
-10. Text-only ASR output becomes a low-confidence subtitle only when speech evidence supplies a safe interval; text returned over silence is not turned into a cue.
-11. Generated segment timestamps are snapped to nearby speech onsets/offsets with small lead-in/tail padding when this cannot create an overlap.
-12. Partial generated subtitles are shown in the editor while transcription continues, then the existing readability formatter splits, wraps, de-duplicates, and normalizes the final generated cues.
-13. The user reviews, edits, and exports SRT, VTT, TXT, or JSON locally.
+8. The successful request's explicit timestamp mode is passed into normalization. Word mode preserves one or more valid word chunks; segment mode never guesses from chunk count or shape. Chunks are mapped from exact sample-slice offsets back to the full timeline.
+9. A bounded, time-aware suffix/prefix alignment compares a short sequence on both sides of each window boundary. It removes supported duplicate overlap text, retains unique suffixes, preserves usable word timing, and supports character fallback for common no-whitespace scripts.
+10. Raw speech regions are compared with confidence-, word-, text-representation-, and speech-overlap-aware coverage evidence. Likely uncovered speech can trigger one bounded repair pass of at most 20 model-safe local windows.
+11. Text-only ASR output becomes a low-confidence cue only when exactly one raw speech span supplies unambiguous timing. Multi-span, punctuation-only, silence-only, or unreadably dense fallback output is suppressed rather than stretched over silence.
+12. Timing refinement uses usable word timestamps first and raw VAD boundaries second. Display padding is applied once; rapid dialogue may use less than the configured cosmetic gap rather than cutting spoken-word evidence.
+13. The worker sends suffix deltas instead of retransmitting the full accumulated result. The provider validates and reconstructs snapshots, while stable live-preview IDs preserve user edits and deletions when repair inserts an earlier cue.
+14. The readability formatter prefers timestamped words, punctuation and phrase boundaries, enforces duration/CPS/line constraints where timing evidence permits, and never discards queued transcript text at its split-work bound.
+15. The user reviews, edits, and exports SRT, VTT, TXT, or JSON locally.
 
 The 29-second ceiling leaves safety margin below Whisper's fixed input context. The overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
 
 ## Accurate-local Defaults
 
-New and legacy projects are normalized to safe missing-field defaults without changing the project schema. The default profile uses automatic language detection and execution provider selection, `q8` model weights, word timestamps with segment fallback, VAD enabled, a 29-second maximum input, 26-second speech-aware target windows, 1.5-second speech-aware overlap, and 4-second fixed-window fallback overlap.
+New projects default to the balanced Base model, explicit English, automatic supported-engine selection, `q8` model weights, word timestamps with segment fallback, VAD enabled, a 29-second maximum input, 26-second speech-aware target windows, 1.5-second speech-aware overlap, and 4-second fixed-window fallback overlap. Existing saved model selections remain compatible. The installed Transformers.js 4.2 Whisper export does not independently detect language for each window; legacy `auto` language settings therefore resolve to English with a diagnostic warning instead of silently pretending detection occurred. Choose the spoken language explicitly for non-English media.
 
 Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-to-6-second cue duration, 0.08-second inter-cue gap, 42 characters per line, 84 per cue, a 20 CPS target with a 21 CPS hard limit, and safe closure of gaps below 0.5 seconds.
 
@@ -153,7 +160,7 @@ Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-t
 3. Drag the amber range to move it, drag either edge to resize it, or use the timestamp fields for exact values. A range can cover one or many cues but cannot exceed 29 seconds.
 4. Use **Preview range** to play the current section once. The range remains selected when playback stops.
 5. Open **Configure regeneration** and choose the language, output, model, engine, precision, timestamp detail, and **Alternatives** count for this run. You can request one to five alternatives; the default is three. These choices persist for later regenerations in the current browser session without changing full-transcription settings.
-6. Generate alternatives. The worker extracts the range once, loads the selected Whisper model once, and performs up to five bounded sequential decoding passes locally, stopping when it finds the requested number of distinct results.
+6. Generate alternatives. The reusable worker extracts the range once, reuses a compatible low-resource model when it is already warm, or loads the selected model once, then performs up to five bounded sequential decoding passes locally. It stops when it finds the requested number of distinct results.
 7. Compare the unchanged current cues with the generated alternatives, then preview any choice against the video. Empty or duplicate decoding results can produce fewer alternatives than requested.
 8. Apply an alternative to replace all overlapping cues as one undoable edit, or keep the original unchanged.
 
@@ -244,13 +251,14 @@ The transcription provider boundary is intentionally small so another local engi
 - Browser transcription is demanding. Large videos can require significant memory and time.
 - Large v3 Turbo and Distil Large v3 can exceed device memory on lower-resource browsers. WebGPU and `q8` are recommended, but the app does not block CPU/WASM use.
 - The current FFmpeg.wasm path writes the selected file into FFmpeg's in-memory filesystem before extraction. That is not true streaming for arbitrary containers.
-- Transformers.js chunking is used for long audio, but the extracted audio buffer is still held in browser memory.
+- Auto Subtitle performs explicit speech-aware windowing, but the complete decoded `Float32Array` is still held in worker memory.
 - Codec support depends on the browser and FFmpeg.wasm build.
-- WebGPU is optional. The app attempts supported WebAssembly or CPU fallback paths, but speed can be much slower.
+- WebGPU is optional. The supported CPU execution path is WebAssembly (`wasm`); legacy saved `cpu` settings are normalized to it, and speed can be much slower than WebGPU.
 - Word-level timestamps depend on model support and may fall back to coarser chunks.
 - Speech activity analysis can be imperfect with music, sustained background noise, overlapping speakers, or very quiet speech. A missed VAD region cannot trigger coverage repair.
 - Coverage recovery is deliberately limited to one pass and 20 ranges so difficult audio cannot cause an unbounded transcription loop.
-- Range regeneration starts a fresh worker and model pipeline for each request. Browser caching avoids unchanged model downloads, but repeated requests still require local initialization and audio extraction. Requesting more alternatives can require more decoding passes.
+- One worker is reused for compatible sequential jobs and is evicted after two idle minutes, on cancellation/crash, when switching incompatible runtimes, on explicit video/app cleanup, and before memory-heavy full-file extraction. High-resource Turbo/Distil pipelines are released after each job. Range extraction still writes the complete compressed input into FFmpeg's in-memory filesystem, so regeneration is not true streaming.
+- Delta worker messages reduce structured-clone payload size, but the provider and editor still rebuild complete snapshots for live formatting. Very long jobs therefore retain some accumulated main-thread work that needs real-browser profiling.
 - Generated subtitle synchronization is improved by speech-aware windowing, bounded recovery, and deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
 
 ## Troubleshooting

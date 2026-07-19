@@ -13,7 +13,7 @@ import {
   splitEntry,
   splitEntryAtTime,
 } from '../subtitles/formatting'
-import { createProjectExport, exportSrt, exportVtt, parseProjectJson } from '../subtitles/exporters'
+import { createProjectExport, exportSrt, exportTranscript, exportVtt, parseProjectJson } from '../subtitles/exporters'
 import { parseSrt, parseVtt } from '../subtitles/importers'
 import {
   createLiveTranscriptionPreviewState,
@@ -70,6 +70,16 @@ describe('subtitle import and export', () => {
 
     expect(srt).toContain('Recovered locally')
     expect(srt).not.toContain('Invalid timing')
+  })
+
+  it('preserves plain and timestamped TXT transcript export', () => {
+    const entries = [
+      makeSubtitleEntry({ startTime: 1.2, endTime: 2.4, text: 'First\nline' }),
+      makeSubtitleEntry({ startTime: 3, endTime: 4, text: 'Second line' }),
+    ]
+
+    expect(exportTranscript(entries, false)).toBe('First line\nSecond line')
+    expect(exportTranscript(entries, true)).toBe('[00:00:01.200] First line\n[00:00:03.000] Second line')
   })
 
   it('parses SRT and preserves line breaks', () => {
@@ -269,6 +279,17 @@ describe('generated caption optimization', () => {
     expect(entries[0].endTime - entries[0].startTime).toBeGreaterThanOrEqual(generatedPreferences.minDuration)
   })
 
+  it('does not extend low-confidence text-only timing beyond its speech evidence', () => {
+    const entries = formatTranscriptionSegments(
+      [{ startTime: 1, endTime: 1.4, text: 'Maybe', confidence: 0.35 }],
+      generatedPreferences,
+      5,
+    )
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ startTime: 1, endTime: 1.4, confidence: 0.35 })
+  })
+
   it('uses word timestamps to tighten generated caption start and end times', () => {
     const entries = formatTranscriptionSegments(
       [
@@ -290,6 +311,82 @@ describe('generated caption optimization', () => {
     expect(entries).toHaveLength(1)
     expect(entries[0].startTime).toBeCloseTo(0.92, 3)
     expect(entries[0].endTime).toBeCloseTo(2.58, 3)
+  })
+
+  it('preserves punctuation and CJK spacing from word-timestamp chunks', () => {
+    const tokens = ['你', '好', '，', '世', '界', '。']
+    const entries = formatTranscriptionSegments(
+      [{
+        startTime: 0,
+        endTime: 2,
+        text: '你好，世界。',
+        words: tokens.map((text, index) => ({
+          text,
+          startTime: index * 0.2,
+          endTime: index * 0.2 + 0.15,
+        })),
+      }],
+      { ...generatedPreferences, useWordTimestamps: true },
+      3,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, '')).join('')).toBe('你好，世界。')
+  })
+
+  it('splits long no-whitespace segment-timestamp text without losing characters', () => {
+    const text = '这是一个没有空格但需要按照可读长度稳定分段的字幕句子。'.repeat(4)
+    const entries = formatTranscriptionSegments(
+      [{ startTime: 0, endTime: 12, text }],
+      { ...generatedPreferences, maxCharsPerLine: 20, maxCharsPerSubtitle: 40 },
+      15,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, '')).join('')).toBe(text)
+    expect(entries.every((entry) => entry.text.split('\n').every((line) => Array.from(line).length <= 20))).toBe(true)
+  })
+
+  it('keeps combining-mark graphemes intact when splitting no-whitespace text', () => {
+    const text = 'กำลังทดสอบคำบรรยายภาษาไทยที่ไม่มีช่องว่าง'.repeat(3)
+    const entries = formatTranscriptionSegments(
+      [{ startTime: 0, endTime: 12, text }],
+      { ...generatedPreferences, maxCharsPerLine: 12, maxCharsPerSubtitle: 24 },
+      15,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, '')).join('')).toBe(text)
+    expect(entries.every((entry) => !/^\p{M}/u.test(entry.text))).toBe(true)
+  })
+
+  it('does not reintroduce overlap when display padding surrounds rapid word-timed captions', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        {
+          startTime: 0,
+          endTime: 1,
+          text: 'First response',
+          words: [
+            { text: 'First', startTime: 0.4, endTime: 0.65 },
+            { text: 'response', startTime: 0.67, endTime: 1 },
+          ],
+        },
+        {
+          startTime: 1.05,
+          endTime: 2,
+          text: 'Second response',
+          words: [
+            { text: 'Second', startTime: 1.05, endTime: 1.35 },
+            { text: 'response', startTime: 1.37, endTime: 2 },
+          ],
+        },
+      ],
+      { ...generatedPreferences, useWordTimestamps: true },
+      3,
+    )
+
+    expect(entries).toHaveLength(2)
+    expect(entries[0].endTime).toBeLessThanOrEqual(entries[1].startTime)
+    expect(entries[0].endTime).toBeGreaterThan(entries[0].startTime)
+    expect(entries[1].endTime).toBeGreaterThan(entries[1].startTime)
   })
 
   it('avoids abrupt word-timed cuts after very short phrases', () => {
@@ -369,6 +466,71 @@ describe('generated caption optimization', () => {
     expect(entries).toHaveLength(1)
     expect(entries[0].text.replace(/\n/g, ' ')).toBe('This line repeats near the boundary.')
   })
+
+  it('does not pair longer duplicate text with a shorter candidate\'s stale word list', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        {
+          startTime: 0,
+          endTime: 1.5,
+          text: 'keep all words',
+          words: [
+            { text: 'keep', startTime: 0, endTime: 0.3 },
+            { text: 'all', startTime: 0.35, endTime: 0.6 },
+            { text: 'words', startTime: 0.65, endTime: 1 },
+          ],
+        },
+        {
+          startTime: 0.1,
+          endTime: 2,
+          text: 'keep all words here',
+        },
+      ],
+      { ...generatedPreferences, useWordTimestamps: true },
+      4,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ' ')).join(' ')).toBe('keep all words here')
+  })
+
+  it('never drops transcript text when a pathological caption exceeds the split-work guard', () => {
+    const text = Array.from({ length: 700 }, (_, index) => `word${index}.`).join(' ')
+    const entries = formatTranscriptionSegments(
+      [{ startTime: 0, endTime: 700, text }],
+      {
+        ...generatedPreferences,
+        maxCharsPerLine: 24,
+        maxCharsPerSubtitle: 48,
+        minDuration: 0.25,
+        maxDuration: 2,
+        hardMaxCps: 100,
+      },
+      750,
+    )
+    const outputTokens = entries.flatMap((entry) => entry.text.replace(/\n/g, ' ').split(/\s+/)).filter(Boolean)
+
+    expect(outputTokens).toEqual(text.split(/\s+/))
+    expect(entries.every((entry) => entry.endTime - entry.startTime <= 2.001)).toBe(true)
+    const maximumLineLength = Math.max(...entries.flatMap((entry) => entry.text.split('\n').map((line) => line.length)))
+    const longestEntry = entries.find((entry) => entry.text.split('\n').some((line) => line.length === maximumLineLength))
+    expect(maximumLineLength, longestEntry?.text).toBeLessThanOrEqual(24)
+    expect(entries.every((entry) => calculateCharactersPerSecond(entry.text, entry.startTime, entry.endTime) <= 100.01)).toBe(true)
+  })
+
+  it('suppresses unreadable low-confidence text instead of extending it over silence', () => {
+    const entries = formatTranscriptionSegments(
+      [{
+        startTime: 1,
+        endTime: 1.4,
+        text: 'This untimed fallback is much too dense for its speech evidence.',
+        confidence: 0.35,
+      }],
+      generatedPreferences,
+      5,
+    )
+
+    expect(entries).toEqual([])
+  })
 })
 
 describe('live transcription preview merging', () => {
@@ -413,6 +575,125 @@ describe('live transcription preview merging', () => {
     const merged = mergeLiveTranscriptionPreview([], firstGenerated, state)
 
     expect(merged).toEqual([])
+  })
+
+  it('keeps an edited caption attached to its timing when a later repair inserts an earlier cue', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const initial = [
+      makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'opening' }),
+      makeSubtitleEntry({ id: 'generated-2', startTime: 3, endTime: 4, text: 'keep this edit' }),
+    ]
+    const firstPreview = mergeLiveTranscriptionPreview([], initial, state)
+    const editedPreview = firstPreview.map((entry) =>
+      entry.id === 'generated-2' ? { ...entry, text: 'edited by user' } : entry,
+    )
+    markLiveTranscriptionPreviewEdits(firstPreview, editedPreview, state)
+
+    const afterRepair = [
+      makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'opening' }),
+      makeSubtitleEntry({ id: 'generated-2', startTime: 1.5, endTime: 2.2, text: 'recovered words' }),
+      makeSubtitleEntry({ id: 'generated-3', startTime: 3, endTime: 4, text: 'keep this edit' }),
+    ]
+    const merged = mergeLiveTranscriptionPreview(editedPreview, afterRepair, state)
+
+    expect(merged.map((entry) => [entry.startTime, entry.text])).toEqual([
+      [0, 'opening'],
+      [1.5, 'recovered words'],
+      [3, 'edited by user'],
+    ])
+    expect(merged.at(-1)?.id).toBe('generated-2')
+  })
+
+  it('does not let an unrelated overlapping insertion steal an edited caption id', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const initial = [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2, text: 'keep this wording' })]
+    const firstPreview = mergeLiveTranscriptionPreview([], initial, state)
+    const editedPreview = [{ ...firstPreview[0], text: 'edited by user' }]
+    markLiveTranscriptionPreviewEdits(firstPreview, editedPreview, state)
+
+    const merged = mergeLiveTranscriptionPreview(
+      editedPreview,
+      [
+        makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'unrelated insertion' }),
+        makeSubtitleEntry({ id: 'generated-2', startTime: 1, endTime: 2, text: 'keep this wording' }),
+      ],
+      state,
+    )
+
+    expect(merged.map((entry) => entry.text)).toEqual(['unrelated insertion', 'edited by user'])
+    expect(merged[1].id).toBe('generated-1')
+  })
+
+  it('prunes obsolete unedited generated snapshots across partial updates', () => {
+    const state = createLiveTranscriptionPreviewState()
+    let current: ReturnType<typeof makeSubtitleEntry>[] = []
+    for (let index = 0; index < 20; index += 1) {
+      current = mergeLiveTranscriptionPreview(
+        current,
+        [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: `unique${index}` })],
+        state,
+      )
+    }
+
+    expect(state.generatedEntryIds.size).toBeLessThanOrEqual(2)
+    expect(state.generatedSnapshots.size).toBeLessThanOrEqual(2)
+  })
+
+  it('drops a stale generated cue when an unrelated replacement arrives', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const initial = mergeLiveTranscriptionPreview(
+      [],
+      [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'old cue' })],
+      state,
+    )
+    const merged = mergeLiveTranscriptionPreview(
+      initial,
+      [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'entirely different' })],
+      state,
+    )
+
+    expect(merged.map((entry) => entry.text)).toEqual(['entirely different'])
+  })
+
+  it('does not treat reordered words as stable text evidence', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const initial = mergeLiveTranscriptionPreview(
+      [],
+      [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'dog bites man' })],
+      state,
+    )
+    const merged = mergeLiveTranscriptionPreview(
+      initial,
+      [makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 1, text: 'man bites dog' })],
+      state,
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].text).toBe('man bites dog')
+    expect(merged[0].id).not.toBe(initial[0].id)
+  })
+
+  it('does not cross-match generated cue identities when cue order changes', () => {
+    const state = createLiveTranscriptionPreviewState()
+    const initial = mergeLiveTranscriptionPreview(
+      [],
+      [
+        makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2, text: 'alpha cue' }),
+        makeSubtitleEntry({ id: 'generated-2', startTime: 1, endTime: 3, text: 'beta cue' }),
+      ],
+      state,
+    )
+    const merged = mergeLiveTranscriptionPreview(
+      initial,
+      [
+        makeSubtitleEntry({ id: 'generated-1', startTime: 0, endTime: 2.5, text: 'beta cue' }),
+        makeSubtitleEntry({ id: 'generated-2', startTime: 0.5, endTime: 3, text: 'alpha cue' }),
+      ],
+      state,
+    )
+
+    expect(merged[0].id).toBe(initial[1].id)
+    expect(merged[1].id).not.toBe(initial[0].id)
   })
 })
 

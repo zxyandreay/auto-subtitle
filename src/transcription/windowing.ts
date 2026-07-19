@@ -1,10 +1,11 @@
-import type { SpeechRegion } from './speechActivity'
+import type { SpeechActivityFrameSeries, SpeechRegion } from './speechActivity'
 
 export const MAX_WHISPER_WINDOW_SECONDS = 29
 export const MIN_WHISPER_WINDOW_SECONDS = 5
 export const TARGET_SPEECH_WINDOW_SECONDS = 26
 export const SPEECH_AWARE_OVERLAP_SECONDS = 1.5
 export const FALLBACK_OVERLAP_SECONDS = 4
+export const DEFAULT_BOUNDARY_SEARCH_SECONDS = 1.5
 
 export type TranscriptionWindowTiming = {
   sliceStartTime: number
@@ -25,6 +26,8 @@ export type SpeechAwareWindowOptions = {
   targetChunkSeconds: number
   overlapSeconds: number
   hardMinWindowSeconds: number
+  boundarySearchSeconds: number
+  activityFrames?: SpeechActivityFrameSeries
 }
 
 export const DEFAULT_SPEECH_AWARE_WINDOW_OPTIONS: SpeechAwareWindowOptions = {
@@ -32,6 +35,7 @@ export const DEFAULT_SPEECH_AWARE_WINDOW_OPTIONS: SpeechAwareWindowOptions = {
   targetChunkSeconds: TARGET_SPEECH_WINDOW_SECONDS,
   overlapSeconds: SPEECH_AWARE_OVERLAP_SECONDS,
   hardMinWindowSeconds: MIN_WHISPER_WINDOW_SECONDS,
+  boundarySearchSeconds: DEFAULT_BOUNDARY_SEARCH_SECONDS,
 }
 
 export function createTranscriptionWindowPlan(
@@ -93,13 +97,26 @@ export function createSpeechAwareTranscriptionWindowPlan(
     TARGET_SPEECH_WINDOW_SECONDS,
   )
   const coreSeconds = Math.max(0.1, targetWindowSeconds - overlapSeconds * 2)
+  const maximumCoreSeconds = Math.max(0.1, windowSeconds - overlapSeconds * 2)
   const regions = sanitizeRegions(speechRegions, duration)
-  const ownershipSpans = splitLongRegions(regions, coreSeconds)
+  const boundarySearchSeconds = clampFinite(
+    requested.boundarySearchSeconds,
+    0,
+    maximumCoreSeconds / 2,
+    DEFAULT_BOUNDARY_SEARCH_SECONDS,
+  )
+  const ownershipSpans = splitLongRegions(
+    regions,
+    coreSeconds,
+    maximumCoreSeconds,
+    boundarySearchSeconds,
+    requested.activityFrames,
+  )
   const groupedSpans: Array<{ startTime: number; endTime: number }> = []
 
   for (const span of ownershipSpans) {
     const current = groupedSpans.at(-1)
-    if (current && span.endTime - current.startTime <= coreSeconds) {
+    if (current && span.canMergeWithPrevious && span.endTime - current.startTime <= coreSeconds) {
       current.endTime = span.endTime
     } else {
       groupedSpans.push({ ...span })
@@ -123,7 +140,11 @@ export function createSpeechAwareTranscriptionWindowPlan(
       sliceStartTime = Math.max(0, sliceEndTime - hardMinWindowSeconds)
     }
     if (sliceEndTime - sliceStartTime > windowSeconds) {
-      sliceEndTime = sliceStartTime + windowSeconds
+      const excess = sliceEndTime - sliceStartTime - windowSeconds
+      const availableBefore = span.startTime - sliceStartTime
+      const trimBefore = Math.min(excess, availableBefore)
+      sliceStartTime += trimBefore
+      sliceEndTime -= excess - trimBefore
     }
 
     return {
@@ -157,18 +178,103 @@ function sanitizeRegions(regions: SpeechRegion[], duration: number): Array<{ sta
 
 function splitLongRegions(
   regions: Array<{ startTime: number; endTime: number }>,
-  coreSeconds: number,
-): Array<{ startTime: number; endTime: number }> {
-  const spans: Array<{ startTime: number; endTime: number }> = []
+  targetCoreSeconds: number,
+  maximumCoreSeconds: number,
+  boundarySearchSeconds: number,
+  activityFrames?: SpeechActivityFrameSeries,
+): Array<{ startTime: number; endTime: number; canMergeWithPrevious: boolean }> {
+  const spans: Array<{ startTime: number; endTime: number; canMergeWithPrevious: boolean }> = []
   for (const region of regions) {
     let startTime = region.startTime
+    let firstSpan = true
     while (startTime < region.endTime) {
-      const endTime = Math.min(region.endTime, startTime + coreSeconds)
-      spans.push({ startTime, endTime })
+      const remainingDuration = region.endTime - startTime
+      let endTime = region.endTime
+      if (remainingDuration > maximumCoreSeconds) {
+        const idealBoundary = Math.min(startTime + targetCoreSeconds, startTime + maximumCoreSeconds)
+        endTime = chooseLowActivityBoundary(
+          idealBoundary,
+          startTime + 0.1,
+          Math.min(startTime + maximumCoreSeconds, region.endTime - 0.1),
+          boundarySearchSeconds,
+          activityFrames,
+        )
+      }
+      if (!Number.isFinite(endTime) || endTime <= startTime) {
+        endTime = Math.min(region.endTime, startTime + maximumCoreSeconds)
+      }
+      spans.push({ startTime, endTime, canMergeWithPrevious: firstSpan })
       startTime = endTime
+      firstSpan = false
     }
   }
   return spans
+}
+
+function chooseLowActivityBoundary(
+  idealBoundary: number,
+  minimumBoundary: number,
+  maximumBoundary: number,
+  searchSeconds: number,
+  frames?: SpeechActivityFrameSeries,
+): number {
+  const fallback = Math.min(maximumBoundary, Math.max(minimumBoundary, idealBoundary))
+  if (
+    !frames ||
+    frames.sampleRate <= 0 ||
+    frames.startSamples.length !== frames.activity.length ||
+    frames.speech.length !== frames.activity.length ||
+    searchSeconds <= 0
+  ) {
+    return fallback
+  }
+
+  let best: { time: number; speech: number; activity: number; distance: number } | undefined
+  const searchStart = Math.max(minimumBoundary, idealBoundary - searchSeconds)
+  const searchEnd = Math.min(maximumBoundary, idealBoundary + searchSeconds)
+  const firstFrameIndex = lowerBoundSample(frames.startSamples, Math.ceil(searchStart * frames.sampleRate))
+  for (let index = firstFrameIndex; index < frames.startSamples.length; index += 1) {
+    const time = frames.startSamples[index] / frames.sampleRate
+    if (time > searchEnd) {
+      break
+    }
+    const candidate = {
+      time,
+      speech: frames.speech[index] === 0 ? 0 : 1,
+      activity: Number.isFinite(frames.activity[index]) ? frames.activity[index] : 1,
+      distance: Math.abs(time - idealBoundary),
+    }
+    if (
+      !best ||
+      candidate.speech < best.speech ||
+      (candidate.speech === best.speech && candidate.activity < best.activity - Number.EPSILON) ||
+      (candidate.speech === best.speech &&
+        Math.abs(candidate.activity - best.activity) <= Number.EPSILON &&
+        candidate.distance < best.distance - Number.EPSILON) ||
+      (candidate.speech === best.speech &&
+        Math.abs(candidate.activity - best.activity) <= Number.EPSILON &&
+        Math.abs(candidate.distance - best.distance) <= Number.EPSILON &&
+        candidate.time < best.time)
+    ) {
+      best = candidate
+    }
+  }
+
+  return best?.time ?? fallback
+}
+
+function lowerBoundSample(samples: Uint32Array, target: number): number {
+  let low = 0
+  let high = samples.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (samples[middle] < target) {
+      low = middle + 1
+    } else {
+      high = middle
+    }
+  }
+  return low
 }
 
 function clampFinite(value: number, minimum: number, maximum: number, fallback: number): number {

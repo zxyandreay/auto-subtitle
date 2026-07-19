@@ -1,3 +1,5 @@
+import type { DiagnosticEventInput } from '../diagnostics/types'
+import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import type {
   RegenerationRange,
   RegenerationResult,
@@ -5,9 +7,9 @@ import type {
   TranscriptionResult,
   TranscriptionSettings,
   WorkerEvent,
+  WorkerPartialDelta,
   WorkerRequest,
 } from './types'
-import type { DiagnosticEventInput } from '../diagnostics/types'
 
 export type TranscriptionCallbacks = {
   onProgress: (progress: TranscriptionProgress) => void
@@ -25,80 +27,79 @@ export type RegenerationJob = {
   cancel: () => void
 }
 
+const WORKER_IDLE_TIMEOUT_MS = 2 * 60 * 1_000
+const LARGE_MEDIA_WARM_WORKER_EVICTION_BYTES = 256 * 1024 * 1024
+
+type ActiveJobBase = {
+  jobId: string
+  request: Exclude<WorkerRequest, { type: 'cancel' }>
+  callbacks: TranscriptionCallbacks
+  reject: (error: Error) => void
+  partialSegments: RawTranscriptionSegment[]
+  receivedWorkerMessage: boolean
+  workerMessageCount: number
+  workerMessageBytes: number
+  workerMessageCountsByType: Partial<Record<WorkerEvent['type'], number>>
+  workerMessageBytesByType: Partial<Record<WorkerEvent['type'], number>>
+  workerMessageMetricsReported: boolean
+  startupRetries: number
+  settled: boolean
+}
+
+type ActiveTranscriptionJob = ActiveJobBase & {
+  kind: 'transcription'
+  resolve: (result: TranscriptionResult) => void
+}
+
+type ActiveRegenerationJob = ActiveJobBase & {
+  kind: 'regeneration'
+  resolve: (result: RegenerationResult) => void
+}
+
+type ActiveJob = ActiveTranscriptionJob | ActiveRegenerationJob
+
+let sharedWorker: Worker | null = null
+let activeJob: ActiveJob | null = null
+let idleTimer: ReturnType<typeof setTimeout> | null = null
+
 export function startBrowserWhisperTranscription(
   file: File,
   settings: TranscriptionSettings,
   callbacks: TranscriptionCallbacks,
 ): TranscriptionJob {
-  const worker = new Worker(new URL('../workers/transcription.worker.ts', import.meta.url), {
-    type: 'module',
-  })
+  if (activeJob) {
+    return rejectedJob('Another local transcription or regeneration job is already running.')
+  }
+  evictWarmWorkerForLargeMedia(file, callbacks)
 
-  let settled = false
-  let rejectDone: (error: Error) => void = () => undefined
-
+  const jobId = createJobId()
+  let active: ActiveTranscriptionJob
   const done = new Promise<TranscriptionResult>((resolve, reject) => {
-    rejectDone = reject
-
-    worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
-      const data = event.data
-
-      if (data.type === 'progress') {
-        callbacks.onProgress(data.progress)
-        return
-      }
-
-      if (data.type === 'partial') {
-        callbacks.onPartial?.(data.result)
-        return
-      }
-
-      if (data.type === 'diagnostic') {
-        callbacks.onDiagnostic?.(data.event)
-        return
-      }
-
-      settled = true
-      worker.terminate()
-
-      if (data.type === 'complete') {
-        resolve(data.result)
-        return
-      }
-
-      if (data.type === 'error') {
-        reject(new Error(data.error.details ? `${data.error.message}\n${data.error.details}` : data.error.message))
-        return
-      }
-
-      reject(new Error('The transcription worker returned an unexpected result.'))
-    }
-
-    worker.onerror = (event) => {
-      settled = true
-      worker.terminate()
-      reject(new Error(event.message || 'The transcription worker crashed.'))
+    active = {
+      kind: 'transcription',
+      jobId,
+      request: { type: 'start', jobId, file, settings },
+      callbacks,
+      resolve,
+      reject,
+      partialSegments: [],
+      receivedWorkerMessage: false,
+      workerMessageCount: 0,
+      workerMessageBytes: 0,
+      workerMessageCountsByType: {},
+      workerMessageBytesByType: {},
+      workerMessageMetricsReported: false,
+      startupRetries: 0,
+      settled: false,
     }
   })
 
-  worker.postMessage({
-    type: 'start',
-    file,
-    settings,
-  } satisfies WorkerRequest)
-
+  // The Promise executor above always runs synchronously.
+  const job = active!
+  startJob(job)
   return {
     done,
-    cancel: () => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      worker.postMessage({ type: 'cancel' } satisfies WorkerRequest)
-      worker.terminate()
-      rejectDone(new Error('Transcription cancelled by the user.'))
-    },
+    cancel: () => cancelJob(job, 'Transcription cancelled by the user.'),
   }
 }
 
@@ -110,115 +111,385 @@ export function startBrowserWhisperRegeneration(
   alternativeCount: number,
   callbacks: Pick<TranscriptionCallbacks, 'onProgress' | 'onDiagnostic'>,
 ): RegenerationJob {
-  let worker: Worker | null = null
-  let settled = false
-  let receivedWorkerMessage = false
-  let retriedStartup = false
-  let rejectDone: (error: Error) => void = () => undefined
-  const request = {
-    type: 'regenerate',
-    file,
-    settings,
-    range,
-    videoDuration,
-    alternativeCount,
-  } satisfies WorkerRequest
+  if (activeJob) {
+    return rejectedJob('Another local transcription or regeneration job is already running.')
+  }
+  evictWarmWorkerForLargeMedia(file, callbacks)
 
+  const jobId = createJobId()
+  let active: ActiveRegenerationJob
   const done = new Promise<RegenerationResult>((resolve, reject) => {
-    rejectDone = reject
-
-    const startWorker = () => {
-      const activeWorker = new Worker(new URL('../workers/transcription.worker.ts', import.meta.url), {
-        type: 'module',
-      })
-      worker = activeWorker
-
-      activeWorker.onmessage = (event: MessageEvent<WorkerEvent>) => {
-        receivedWorkerMessage = true
-        const data = event.data
-
-        if (data.type === 'progress') {
-          callbacks.onProgress(data.progress)
-          return
-        }
-
-        if (data.type === 'partial') {
-          return
-        }
-
-        if (data.type === 'diagnostic') {
-          callbacks.onDiagnostic?.(data.event)
-          return
-        }
-
-        settled = true
-        activeWorker.terminate()
-
-        if (data.type === 'regeneration-complete') {
-          resolve(data.result)
-          return
-        }
-
-        if (data.type === 'error') {
-          reject(new Error(data.error.details ? `${data.error.message}\n${data.error.details}` : data.error.message))
-          return
-        }
-
-        reject(new Error('The regeneration worker returned an unexpected result.'))
-      }
-
-      activeWorker.onerror = (event) => {
-        activeWorker.terminate()
-
-        if (!settled && !receivedWorkerMessage && !retriedStartup) {
-          retriedStartup = true
-          callbacks.onDiagnostic?.({
-            source: 'app',
-            category: 'regeneration-worker-startup-retry',
-            message: 'The regeneration worker crashed before startup; creating one fresh worker.',
-            level: 'warning',
-            data: getWorkerErrorDetails(event),
-          })
-          try {
-            startWorker()
-          } catch (restartError) {
-            settled = true
-            reject(new Error(
-              restartError instanceof Error
-                ? `The regeneration worker could not restart: ${restartError.message}`
-                : 'The regeneration worker could not restart.',
-            ))
-          }
-          return
-        }
-
-        settled = true
-        reject(createWorkerCrashError(event, 'regeneration'))
-      }
-
-      activeWorker.postMessage(request)
+    active = {
+      kind: 'regeneration',
+      jobId,
+      request: {
+        type: 'regenerate',
+        jobId,
+        file,
+        settings,
+        range,
+        videoDuration,
+        alternativeCount,
+      },
+      callbacks,
+      resolve,
+      reject,
+      partialSegments: [],
+      receivedWorkerMessage: false,
+      workerMessageCount: 0,
+      workerMessageBytes: 0,
+      workerMessageCountsByType: {},
+      workerMessageBytesByType: {},
+      workerMessageMetricsReported: false,
+      startupRetries: 0,
+      settled: false,
     }
-
-    startWorker()
   })
 
+  const job = active!
+  startJob(job)
   return {
     done,
-    cancel: () => {
-      if (settled) {
-        return
-      }
+    cancel: () => cancelJob(job, 'Regeneration cancelled by the user.'),
+  }
+}
 
-      settled = true
-      worker?.postMessage({ type: 'cancel' } satisfies WorkerRequest)
-      worker?.terminate()
-      rejectDone(new Error('Regeneration cancelled by the user.'))
-    },
+/**
+ * Immediately releases the reusable worker and any model pipeline resident in
+ * it. Normal jobs use idle eviction; callers can use this for application or
+ * test teardown and for explicit memory cleanup.
+ */
+export function disposeBrowserWhisperWorker(): void {
+  const job = activeJob
+  activeJob = null
+  terminateSharedWorker()
+  if (job && !job.settled) {
+    reportWorkerMessageMetrics(job)
+    job.settled = true
+    job.reject(new Error('The local transcription worker was disposed.'))
+  }
+}
+
+function startJob(job: ActiveJob): void {
+  clearIdleTimer()
+  activeJob = job
+  try {
+    postJobRequest(job)
+  } catch (error) {
+    activeJob = null
+    job.settled = true
+    terminateSharedWorker()
+    job.reject(toError(error, `The ${job.kind} worker could not start.`))
+  }
+}
+
+function postJobRequest(job: ActiveJob): void {
+  getSharedWorker().postMessage(job.request)
+}
+
+function getSharedWorker(): Worker {
+  if (sharedWorker) {
+    return sharedWorker
+  }
+
+  const worker = new Worker(new URL('../workers/transcription.worker.ts', import.meta.url), {
+    type: 'module',
+  })
+  worker.onmessage = (event: MessageEvent<WorkerEvent>) => handleWorkerMessage(worker, event.data)
+  worker.onerror = (event) => handleWorkerCrash(worker, event)
+  sharedWorker = worker
+  return worker
+}
+
+function handleWorkerMessage(worker: Worker, data: WorkerEvent): void {
+  const job = activeJob
+  if (worker !== sharedWorker || !job || data.jobId !== job.jobId || job.settled) {
+    return
+  }
+
+  recordWorkerMessage(job, data)
+  job.receivedWorkerMessage = true
+
+  try {
+    if (data.type === 'progress') {
+      job.callbacks.onProgress(data.progress)
+      return
+    }
+
+    if (data.type === 'partial') {
+      if (job.kind !== 'transcription') {
+        throw new Error('The regeneration worker returned an unexpected partial result.')
+      }
+      job.partialSegments = applyPartialDelta(job.partialSegments, data.delta)
+      const publicSegments = cloneRawSegments(job.partialSegments)
+      job.callbacks.onPartial?.({
+        segments: publicSegments,
+        text: transcriptText(publicSegments),
+        modelId: data.delta.modelId,
+      })
+      return
+    }
+
+    if (data.type === 'diagnostic') {
+      job.callbacks.onDiagnostic?.(data.event)
+      return
+    }
+
+    if (data.type === 'complete' && job.kind === 'transcription') {
+      settleSuccessfulJob(job, data.result)
+      return
+    }
+
+    if (data.type === 'regeneration-complete' && job.kind === 'regeneration') {
+      settleSuccessfulJob(job, data.result)
+      return
+    }
+
+    if (data.type === 'error') {
+      failJob(
+        job,
+        new Error(data.error.details ? `${data.error.message}\n${data.error.details}` : data.error.message),
+      )
+      return
+    }
+
+    throw new Error(`The ${job.kind} worker returned an unexpected result.`)
+  } catch (error) {
+    failJob(job, toError(error, `The ${job.kind} worker response could not be processed.`))
+  }
+}
+
+function handleWorkerCrash(worker: Worker, event: ErrorEvent): void {
+  if (worker !== sharedWorker) {
+    return
+  }
+
+  const job = activeJob
+  terminateSharedWorker()
+  if (!job || job.settled) {
+    return
+  }
+
+  if (!job.receivedWorkerMessage && job.startupRetries < 1) {
+    job.startupRetries += 1
+    try {
+      job.callbacks.onDiagnostic?.({
+        source: 'app',
+        category: `${job.kind}-worker-startup-retry`,
+        message: `The ${job.kind} worker crashed before startup; creating one fresh worker.`,
+        level: 'warning',
+        data: getWorkerErrorDetails(event),
+      })
+    } catch {
+      // A diagnostic consumer must not prevent the one bounded startup retry.
+    }
+    try {
+      postJobRequest(job)
+    } catch (restartError) {
+      failJob(
+        job,
+        toError(restartError, `The ${job.kind} worker could not restart.`),
+      )
+    }
+    return
+  }
+
+  failJob(job, createWorkerCrashError(event, job.kind))
+}
+
+function settleSuccessfulJob(
+  job: ActiveTranscriptionJob,
+  result: TranscriptionResult,
+): void
+function settleSuccessfulJob(
+  job: ActiveRegenerationJob,
+  result: RegenerationResult,
+): void
+function settleSuccessfulJob(
+  job: ActiveJob,
+  result: TranscriptionResult | RegenerationResult,
+): void {
+  if (job.settled || activeJob !== job) {
+    return
+  }
+
+  reportWorkerMessageMetrics(job)
+  job.settled = true
+  activeJob = null
+  job.partialSegments = []
+  scheduleIdleEviction()
+  if (job.kind === 'transcription') {
+    job.resolve(result as TranscriptionResult)
+  } else {
+    job.resolve(result as RegenerationResult)
+  }
+}
+
+function failJob(job: ActiveJob, error: Error): void {
+  if (job.settled) {
+    return
+  }
+
+  reportWorkerMessageMetrics(job)
+  job.settled = true
+  if (activeJob === job) {
+    activeJob = null
+  }
+  job.partialSegments = []
+  terminateSharedWorker()
+  job.reject(error)
+}
+
+function cancelJob(job: ActiveJob, message: string): void {
+  if (job.settled || activeJob !== job) {
+    return
+  }
+
+  reportWorkerMessageMetrics(job)
+  job.settled = true
+  activeJob = null
+  job.partialSegments = []
+  try {
+    sharedWorker?.postMessage({ type: 'cancel', jobId: job.jobId } satisfies WorkerRequest)
+  } finally {
+    terminateSharedWorker()
+    job.reject(new Error(message))
+  }
+}
+
+function applyPartialDelta(
+  previous: RawTranscriptionSegment[],
+  delta: WorkerPartialDelta,
+): RawTranscriptionSegment[] {
+  if (
+    !Number.isInteger(delta.replaceFromIndex) ||
+    !Number.isInteger(delta.totalSegments) ||
+    delta.replaceFromIndex < 0 ||
+    delta.replaceFromIndex > previous.length ||
+    delta.totalSegments < delta.replaceFromIndex
+  ) {
+    throw new Error('The transcription worker returned an invalid partial-result delta.')
+  }
+
+  const next = [...previous.slice(0, delta.replaceFromIndex), ...delta.segments]
+  if (next.length !== delta.totalSegments) {
+    throw new Error('The transcription worker partial-result delta had an inconsistent segment count.')
+  }
+  return next
+}
+
+function transcriptText(segments: RawTranscriptionSegment[]): string {
+  return segments.map((segment) => segment.text).join(' ').replace(/\s+/g, ' ').trim()
+}
+
+function cloneRawSegments(segments: RawTranscriptionSegment[]): RawTranscriptionSegment[] {
+  return segments.map((segment) => ({
+    ...segment,
+    words: segment.words?.map((word) => ({ ...word })),
+  }))
+}
+
+function recordWorkerMessage(job: ActiveJob, event: WorkerEvent): void {
+  const bytes = approximateJsonBytes(event)
+  job.workerMessageCount += 1
+  job.workerMessageBytes += bytes
+  job.workerMessageCountsByType[event.type] = (job.workerMessageCountsByType[event.type] ?? 0) + 1
+  job.workerMessageBytesByType[event.type] = (job.workerMessageBytesByType[event.type] ?? 0) + bytes
+}
+
+function reportWorkerMessageMetrics(job: ActiveJob): void {
+  if (job.workerMessageMetricsReported) {
+    return
+  }
+  job.workerMessageMetricsReported = true
+  try {
+    job.callbacks.onDiagnostic?.({
+      source: 'app',
+      category: 'worker-message-metrics',
+      message: 'Measured worker-to-main-thread messages for the completed local job.',
+      jobId: job.jobId,
+      data: {
+        jobKind: job.kind,
+        messageCount: job.workerMessageCount,
+        approximateJsonBytes: job.workerMessageBytes,
+        messageCountsByType: job.workerMessageCountsByType,
+        approximateJsonBytesByType: job.workerMessageBytesByType,
+      },
+    })
+  } catch {
+    // Diagnostics must never prevent a transcription job from settling.
+  }
+}
+
+function evictWarmWorkerForLargeMedia(
+  file: File,
+  callbacks: Pick<TranscriptionCallbacks, 'onDiagnostic'>,
+): void {
+  if (!sharedWorker || !Number.isFinite(file.size) || file.size < LARGE_MEDIA_WARM_WORKER_EVICTION_BYTES) {
+    return
+  }
+
+  terminateSharedWorker()
+  try {
+    callbacks.onDiagnostic?.({
+      source: 'app',
+      category: 'warm-worker-evicted-for-large-media',
+      message: 'Released the warm speech model before extracting a large media file.',
+      data: {
+        fileSize: file.size,
+        thresholdBytes: LARGE_MEDIA_WARM_WORKER_EVICTION_BYTES,
+      },
+    })
+  } catch {
+    // Diagnostics must never prevent a transcription job from starting.
+  }
+}
+
+function approximateJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength
+  } catch {
+    return 0
+  }
+}
+
+function scheduleIdleEviction(): void {
+  clearIdleTimer()
+  idleTimer = setTimeout(() => {
+    idleTimer = null
+    if (!activeJob) {
+      terminateSharedWorker()
+    }
+  }, WORKER_IDLE_TIMEOUT_MS)
+}
+
+function clearIdleTimer(): void {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer)
+    idleTimer = null
+  }
+}
+
+function terminateSharedWorker(): void {
+  clearIdleTimer()
+  const worker = sharedWorker
+  sharedWorker = null
+  if (!worker) {
+    return
+  }
+  worker.onmessage = null
+  worker.onerror = null
+  worker.terminate()
+}
+
+function rejectedJob<T>(message: string): { done: Promise<T>; cancel: () => void } {
+  return {
+    done: Promise.reject(new Error(message)),
+    cancel: () => undefined,
   }
 }
 
 function createWorkerCrashError(event: ErrorEvent, jobKind: 'regeneration' | 'transcription'): Error {
-  const label = jobKind === 'regeneration' ? 'regeneration' : 'transcription'
   const location = event.filename
     ? ` (${event.filename}${event.lineno ? `:${event.lineno}${event.colno ? `:${event.colno}` : ''}` : ''})`
     : ''
@@ -226,8 +497,8 @@ function createWorkerCrashError(event: ErrorEvent, jobKind: 'regeneration' | 'tr
 
   return new Error(
     message
-      ? `The ${label} worker crashed: ${message}${location}`
-      : `The ${label} worker crashed before it could report an error${location}.`,
+      ? `The ${jobKind} worker crashed: ${message}${location}`
+      : `The ${jobKind} worker crashed before it could report an error${location}.`,
   )
 }
 
@@ -241,4 +512,15 @@ function getWorkerErrorDetails(event: ErrorEvent): Record<string, unknown> {
       ? { name: event.error.name, message: event.error.message, stack: event.error.stack }
       : undefined,
   }
+}
+
+function toError(error: unknown, fallbackMessage: string): Error {
+  return error instanceof Error ? error : new Error(fallbackMessage)
+}
+
+function createJobId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }

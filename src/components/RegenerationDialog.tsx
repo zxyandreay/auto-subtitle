@@ -49,7 +49,7 @@ type RegenerationDialogProps = {
 
 const ORIGINAL_OPTION_ID = 'original'
 const LANGUAGES = [
-  ['auto', 'Auto detect'],
+  ['auto', 'Auto (English fallback)'],
   ['english', 'English'],
   ['spanish', 'Spanish'],
   ['french', 'French'],
@@ -147,6 +147,9 @@ export function RegenerationDialog({
   const selectedModel = getSpeechModelOption(preferences.modelId)
   const warnings = [
     ...capabilityWarnings,
+    ...(preferences.language === 'auto'
+      ? ['This Transformers.js version cannot detect Whisper language automatically. Auto uses English; choose the spoken language for multilingual audio.']
+      : []),
     ...getSpeechModelWarnings(preferences, { webGpu: capabilities.webGpu, dtype: preferences.dtype }),
   ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
@@ -269,8 +272,7 @@ export function RegenerationDialog({
             >
               <option value="auto">Auto</option>
               <option value="webgpu">WebGPU</option>
-              <option value="wasm">WASM</option>
-              <option value="cpu">CPU</option>
+              <option value="wasm">WASM (CPU)</option>
             </select>
           </label>
           <label>

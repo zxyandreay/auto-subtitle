@@ -163,6 +163,7 @@ export function normalizeOverlaps(
       if (startTime >= endTime) {
         startTime = Math.max(0, endTime - preferences.minDuration)
       }
+
     }
 
     normalized.push({
@@ -335,8 +336,10 @@ export function needsSplitForReadability(
 ): boolean {
   const normalized = normalizeSubtitleText(text).replace(/\n+/g, ' ')
   const duration = endTime - startTime
+  const unbrokenCharacterCount = /\s/u.test(normalized) ? 0 : splitGraphemeClusters(normalized).length
   return (
     normalized.length > getMaxGeneratedCaptionCharacters(preferences) ||
+    unbrokenCharacterCount > Math.max(1, Math.floor(preferences.maxCharsPerLine)) ||
     duration > preferences.maxDuration ||
     calculateCharactersPerSecond(normalized, startTime, endTime) > preferences.hardMaxCps
   )
@@ -445,7 +448,7 @@ function extendSegmentDurationsBeforeSplitting(
   const sorted = sortRawSegments(segments)
 
   return sorted.map((segment, index) => {
-    if (segment.words?.length) {
+    if (segment.words?.length || hasLowConfidenceTiming(segment)) {
       return segment
     }
 
@@ -496,7 +499,7 @@ function splitWordTimedSegment(
   }
 
   return groups.map((group) => {
-    const text = group.map((word) => word.text).join(' ')
+    const text = joinSubtitleWords(group.map((word) => word.text))
     const startTime = normalizeSegmentTime(group[0].startTime - preferences.subtitleLeadIn, 0, duration)
     const endTime = normalizeSegmentTime(
       group[group.length - 1].endTime + preferences.subtitleTailPadding,
@@ -525,6 +528,16 @@ function splitPlainTimedSegment(
   }
 
   const parts = splitTextIntoReadableParts(text, segment.endTime - segment.startTime, preferences)
+  const evidenceDuration = Math.max(0, segment.endTime - segment.startTime)
+  if (
+    hasLowConfidenceTiming(segment) &&
+    countReadableCharacters(text) / Math.max(1, preferences.hardMaxCps) > evidenceDuration
+  ) {
+    // Untimestamped fallback text is intentionally low confidence. If it cannot
+    // be displayed readably inside its one raw-speech span, suppress it instead
+    // of manufacturing extra time over confirmed silence.
+    return []
+  }
   if (parts.length <= 1) {
     return [
       {
@@ -538,11 +551,11 @@ function splitPlainTimedSegment(
   const preferredMinimumDuration = getMinimumGeneratedCaptionDuration(preferences)
   const weights = parts.map((part) => Math.max(preferredMinimumDuration, calculateTotalReadableDuration(part, preferences)))
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
-  const totalDuration = Math.max(0.05 * parts.length, segment.endTime - segment.startTime)
+  const totalDuration = evidenceDuration
   const minimumPartDuration =
     totalDuration >= preferredMinimumDuration * parts.length
       ? preferredMinimumDuration
-      : Math.max(0.05, totalDuration / parts.length)
+      : totalDuration / parts.length
   let cursor = segment.startTime
 
   return parts.map((part, index) => {
@@ -595,6 +608,11 @@ function improveGeneratedCaptionDurations(
         endTime: roundTime(Math.min(duration ?? Number.POSITIVE_INFINITY, maxEnd, Math.max(segment.endTime, desiredEnd, wordTimedEnd))),
         words,
       }
+    }
+
+
+    if (hasLowConfidenceTiming(segment)) {
+      return segment
     }
 
     const desiredEnd = segment.startTime + calculateReadableDuration(segment.text, preferences)
@@ -731,6 +749,15 @@ function normalizeGeneratedCaptionOverlaps(
           }
         }
       }
+
+      if (previous.endTime > next.startTime) {
+        const earliestBoundary = previous.startTime + 0.001
+        const latestBoundary = next.endTime - 0.001
+        const contentMidpoint = (getContentEndTime(previous) + getContentStartTime(next)) / 2
+        const boundary = roundTime(Math.min(latestBoundary, Math.max(earliestBoundary, contentMidpoint)))
+        previous.endTime = roundTime(Math.min(previous.endTime, boundary))
+        next.startTime = roundTime(Math.max(next.startTime, previous.endTime))
+      }
     }
 
     if (next.endTime <= next.startTime) {
@@ -756,9 +783,10 @@ function splitTextIntoReadableParts(
 ): string[] {
   const queue = [normalizeSubtitleText(text).replace(/\n+/g, ' ')]
   const parts: string[] = []
+  const maximumOperations = Math.max(100, text.length * 2 + 1)
   let guard = 0
 
-  while (queue.length && guard < 100) {
+  while (queue.length && guard < maximumOperations) {
     guard += 1
     const current = queue.shift() ?? ''
     const estimatedDuration = estimatePartDuration(current, text, duration)
@@ -786,6 +814,12 @@ function splitTextIntoReadableParts(
     queue.unshift(first)
   }
 
+  // Each successful split strictly shortens its inputs, so the input-derived
+  // bound is enough to finish without discarding or emitting an oversized tail.
+  if (queue.length) {
+    throw new Error('Subtitle text splitting exceeded its deterministic operation bound.')
+  }
+
   return parts
 }
 
@@ -802,10 +836,11 @@ function findBestCaptionTextSplit(text: string, preferences: FormattingPreferenc
 
   const words = text.split(/\s+/).filter(Boolean)
   if (words.length <= 2) {
-    return null
+    return findUnbrokenTextSplit(text, preferences)
   }
 
-  const target = Math.min(getMaxGeneratedCaptionCharacters(preferences), Math.ceil(text.length / 2))
+  const capacity = getMaxGeneratedCaptionCharacters(preferences)
+  const target = text.length > capacity * 2 ? Math.ceil(text.length / 2) : Math.min(capacity, Math.ceil(text.length / 2))
   let best: { index: number; score: number } | null = null
   let offset = 0
 
@@ -813,7 +848,10 @@ function findBestCaptionTextSplit(text: string, preferences: FormattingPreferenc
     offset += words[wordIndex - 1].length + (wordIndex === 1 ? 0 : 1)
     const first = words.slice(0, wordIndex).join(' ')
     const second = words.slice(wordIndex).join(' ')
-    if (!isReasonableCaptionPart(first, preferences) || !isReasonableCaptionPart(second, preferences)) {
+    if (
+      !isViableRecursivePart(first, text.length) ||
+      !isViableRecursivePart(second, text.length)
+    ) {
       continue
     }
 
@@ -836,13 +874,17 @@ function findPunctuationSplit(
 ): number | null {
   let match: RegExpExecArray | null
   let best: { index: number; score: number } | null = null
-  const target = Math.min(getMaxGeneratedCaptionCharacters(preferences), Math.ceil(text.length / 2))
+  const capacity = getMaxGeneratedCaptionCharacters(preferences)
+  const target = text.length > capacity * 2 ? Math.ceil(text.length / 2) : Math.min(capacity, Math.ceil(text.length / 2))
 
   while ((match = pattern.exec(text)) !== null) {
     const index = match.index + match[0].trimEnd().length
     const first = text.slice(0, index).trim()
     const second = text.slice(index).trim()
-    if (!isReasonableCaptionPart(first, preferences) || !isReasonableCaptionPart(second, preferences)) {
+    if (
+      !isViableRecursivePart(first, text.length) ||
+      !isViableRecursivePart(second, text.length)
+    ) {
       continue
     }
 
@@ -855,13 +897,36 @@ function findPunctuationSplit(
   return best?.index ?? null
 }
 
-function isReasonableCaptionPart(text: string, preferences: FormattingPreferences): boolean {
-  const words = text.split(/\s+/).filter(Boolean)
-  if (words.length <= 1 && text.length < preferences.maxCharsPerLine * 0.6) {
-    return false
+function isViableRecursivePart(text: string, sourceLength: number): boolean {
+  return Boolean(text) && text.length < sourceLength
+}
+
+function findUnbrokenTextSplit(text: string, preferences: FormattingPreferences): number | null {
+  if (/\s/u.test(text)) {
+    return null
+  }
+  const characters = splitGraphemeClusters(text)
+  const lineLimit = Math.max(1, Math.floor(preferences.maxCharsPerLine))
+  if (characters.length <= lineLimit) {
+    return null
   }
 
-  return text.length <= getMaxGeneratedCaptionCharacters(preferences)
+  const target = Math.min(lineLimit, Math.ceil(characters.length / 2))
+  const punctuation = /[.!?;:,\u3001\u3002\uff0c\uff01\uff1f\uff1a\uff1b\u2026\u2014]/u
+  let splitCharacterIndex = target
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (let index = 1; index < characters.length; index += 1) {
+    if (!punctuation.test(characters[index - 1])) {
+      continue
+    }
+    const distance = Math.abs(index - target)
+    if (distance < bestDistance) {
+      splitCharacterIndex = index
+      bestDistance = distance
+    }
+  }
+
+  return characters.slice(0, splitCharacterIndex).join('').length
 }
 
 function findBestWordGroupEnd(
@@ -870,7 +935,7 @@ function findBestWordGroupEnd(
   preferences: FormattingPreferences,
 ): number {
   const lastIndex = words.length - 1
-  const remainingText = words.slice(startIndex).map((word) => word.text).join(' ')
+  const remainingText = joinSubtitleWords(words.slice(startIndex).map((word) => word.text))
   const remainingDuration = words[lastIndex].endTime - words[startIndex].startTime
 
   if (!needsSplitForReadability(remainingText, 0, remainingDuration, preferences)) {
@@ -881,7 +946,7 @@ function findBestWordGroupEnd(
 
   for (let index = startIndex; index < lastIndex; index += 1) {
     const group = words.slice(startIndex, index + 1)
-    const text = group.map((word) => word.text).join(' ')
+    const text = joinSubtitleWords(group.map((word) => word.text))
     const groupDuration = group.at(-1)!.endTime - group[0].startTime
     const remainingCount = lastIndex - index
     const nextWord = words[index + 1]
@@ -893,7 +958,7 @@ function findBestWordGroupEnd(
       Math.min(Math.max(0, pauseAfter - preferences.gapBetweenSubtitles), MAX_EXTENSION_PAST_AUDIO_SECONDS)
     const readableShortfall = Math.max(0, calculateReadableDuration(text, preferences) - possibleDisplayDuration)
     const remainingWords = words.slice(index + 1)
-    const remainingText = remainingWords.map((word) => word.text).join(' ')
+    const remainingText = joinSubtitleWords(remainingWords.map((word) => word.text))
     const remainingDisplayDuration = remainingWords.length
       ? words[lastIndex].endTime -
         remainingWords[0].startTime +
@@ -938,6 +1003,7 @@ function chooseDuplicateSegment(
   const otherText = normalizeForDuplicateComparison(other.text)
   const shouldUseLongerText = otherText.includes(preferredText) && other.text.length > preferred.text.length
   const text = shouldUseLongerText ? other.text : preferred.text
+  const textEvidence = shouldUseLongerText ? other : preferred
   const mergedStart = Math.min(first.startTime, second.startTime)
   const mergedEnd = Math.max(first.endTime, second.endTime)
   const mergedDuration = mergedEnd - mergedStart
@@ -952,6 +1018,7 @@ function chooseDuplicateSegment(
     startTime: roundTime(canMergeTiming ? mergedStart : preferred.startTime),
     endTime: roundTime(canMergeTiming ? Math.min(duration ?? Number.POSITIVE_INFINITY, mergedEnd) : preferred.endTime),
     text,
+    words: textEvidence.words,
   }
 }
 
@@ -1074,6 +1141,9 @@ function canExtendCaptionEnd(
   preferences: FormattingPreferences,
   duration?: number,
 ): boolean {
+  if (hasLowConfidenceTiming(segment)) {
+    return false
+  }
   if (targetEnd <= segment.endTime) {
     return false
   }
@@ -1090,8 +1160,59 @@ function canExtendCaptionEnd(
   return targetEnd >= segment.startTime + MIN_GENERATED_CAPTION_DURATION
 }
 
+function hasLowConfidenceTiming(segment: RawTranscriptionSegment): boolean {
+  return segment.confidence !== undefined && segment.confidence < 0.5
+}
+
 function joinCaptionText(first: string, second: string): string {
   return normalizeSubtitleText(`${first} ${second}`).replace(/\n+/g, ' ')
+}
+
+function joinSubtitleWords(words: string[]): string {
+  let output = ''
+  for (const word of words) {
+    const token = normalizeSubtitleText(word).replace(/\n+/g, ' ')
+    if (!token) {
+      continue
+    }
+    const joinsPrevious =
+      !output ||
+      /^[,.;:!?%\])}\u3001\u3002\uff0c\uff01\uff1f]/u.test(token) ||
+      /^(?:['\u2019](?:s|re|ve|ll|d|m|t)|n't\b)/iu.test(token) ||
+      /[([{\u2018\u201c]$/u.test(output) ||
+      (containsCjkCharacter(token[0] ?? '') &&
+        /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}][\u3001\u3002\uff0c\uff01\uff1f\uff1a\uff1b\u2026\u2014\u2019\u201d\uff09\u3011\u300b\u300d\u300f]*$/u.test(output))
+    output += joinsPrevious ? token : ` ${token}`
+  }
+  return output.trim()
+}
+
+function containsCjkCharacter(value: string): boolean {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(value)
+}
+
+function splitGraphemeClusters(value: string): string[] {
+  if (typeof Intl.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    return Array.from(segmenter.segment(value), ({ segment }) => segment)
+  }
+
+  // Modern supported browsers expose Intl.Segmenter. Keep a deterministic
+  // fallback for older embedded runtimes so combining marks and ZWJ sequences
+  // are not split away from their base character.
+  const clusters: string[] = []
+  for (const character of Array.from(value)) {
+    const previous = clusters.at(-1)
+    if (
+      previous &&
+      (/^\p{M}$/u.test(character) || character === '\u200d' || previous.endsWith('\u200d'))
+    ) {
+      clusters[clusters.length - 1] += character
+    } else {
+      clusters.push(character)
+    }
+  }
+  return clusters
 }
 
 function findNaturalSplit(text: string): number {

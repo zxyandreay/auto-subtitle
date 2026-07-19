@@ -25,7 +25,11 @@ import {
 import { normalizeRegenerationAlternativeCount } from '../transcription/regenerationLimits'
 import { normalizeAsrResult, type NormalizedAsrResult } from '../transcription/timestampNormalization'
 import { isWordTimestampUnsupportedError } from '../transcription/timestampSupport'
-import { safelyDetectSpeechRegions, type SpeechRegion } from '../transcription/speechActivity'
+import {
+  analyzeSpeechActivity as analyzeSpeechActivityFrames,
+  type SpeechActivityFrameSeries,
+  type SpeechRegion,
+} from '../transcription/speechActivity'
 import { refineSegmentsToSpeechBoundaries } from '../transcription/timingRefinement'
 import { normalizeTranscriptionSettings } from '../transcription/types'
 import type {
@@ -34,6 +38,7 @@ import type {
   TranscriptionSettings,
   TranscriptionStage,
   WorkerEvent,
+  WorkerEventPayload,
   WorkerRequest,
 } from '../transcription/types'
 import {
@@ -42,6 +47,7 @@ import {
 } from '../transcription/windowing'
 
 let cancelled = false
+let activeJobId: string | null = null
 
 type TimestampMode = true | 'word'
 
@@ -119,14 +125,27 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   const request = event.data
 
   if (request.type === 'cancel') {
+    if (request.jobId !== activeJobId) {
+      return
+    }
     cancelled = true
     postDiagnostic('job-cancelled', 'The worker received a cancellation request.', undefined, 'warning')
     return
   }
 
+  if (activeJobId) {
+    postForJob(request.jobId, {
+      type: 'error',
+      error: { message: 'Another transcription worker job is already running.' },
+    })
+    return
+  }
+
   cancelled = false
-  terminalJobId = createJobId()
+  activeJobId = request.jobId
+  terminalJobId = request.jobId
   lastOverallProgress = 0
+  startJobMetrics(request.type === 'regenerate' ? 'regeneration' : 'transcription')
   postDiagnostic('job-requested', 'A local transcription worker job was requested.', {
     jobKind: request.type === 'regenerate' ? 'regeneration' : 'transcription',
     file: { name: request.file.name, size: request.file.size, type: request.file.type },
@@ -135,18 +154,29 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
     videoDuration: request.type === 'regenerate' ? request.videoDuration : undefined,
     alternativeCount: request.type === 'regenerate' ? request.alternativeCount : undefined,
   })
+  const languageResolvedSettings = resolveAutomaticLanguageFallback(request.settings)
+  const normalized = normalizeTranscriptionSettings(languageResolvedSettings)
+  if (normalized.reason) {
+    postDiagnostic('settings-normalized', 'Resolved saved settings for the browser runtime.', {
+      reason: normalized.reason,
+      requestedExecutionProvider: request.settings.executionProvider,
+      effectiveExecutionProvider: normalized.settings.executionProvider,
+    })
+  }
+  const effectiveSettings = normalized.settings
   const task =
     request.type === 'regenerate'
       ? regenerate(
           request.file,
-          normalizeTranscriptionSettings(request.settings).settings,
+          effectiveSettings,
           request.range,
           request.alternativeCount,
           request.videoDuration,
         )
-      : transcribe(request.file, normalizeTranscriptionSettings(request.settings).settings)
+      : transcribe(request.file, effectiveSettings)
 
-  task.catch((error: unknown) => {
+  void task.catch((error: unknown) => {
+    finishJobMetrics(cancelled ? 'cancelled' : 'failed')
     postDiagnostic('job-failed', 'The worker job failed.', { error: serializeError(error) }, 'error')
     postTerminalLog({
       type: 'error',
@@ -168,6 +198,12 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
         details: error instanceof Error ? error.stack : undefined,
       },
     })
+  }).finally(() => {
+    if (activeJobId === request.jobId) {
+      activeJobId = null
+      terminalJobId = ''
+      jobMetrics = null
+    }
   })
 })
 
@@ -181,6 +217,12 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
     resolutionReason: runtime.reason,
     model,
   })
+  // Full extraction temporarily holds the media input, FFmpeg MEMFS/WASM data,
+  // WAV bytes, and decoded Float32 PCM. Do not overlap that peak with a warm
+  // model from a previous job; bounded regeneration can still reuse it safely.
+  if (cachedTranscriber) {
+    await disposeCachedTranscriber('Released the warm model before full-file audio extraction.')
+  }
   assertNotCancelled()
   postTerminalLog({
     type: 'start',
@@ -210,11 +252,14 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
 
   assertNotCancelled()
   postProgress('analyzing-speech', 'Analyzing speech activity locally.')
-  const speechRegions = analyzeSpeechActivity(audio, effectiveSettings)
+  const speechAnalysis = analyzeSpeechActivityForJob(audio, effectiveSettings)
+  const speechRegions = speechAnalysis.regions
   postDiagnostic('speech-activity', 'Completed local speech activity analysis.', {
     regionCount: speechRegions.length,
     regions: speechRegions,
     vadEnabled: effectiveSettings.vadEnabled,
+    frameCount: speechAnalysis.frames?.activity.length ?? 0,
+    frameHopSamples: speechAnalysis.frames?.hopSamples,
   })
 
   assertNotCancelled()
@@ -222,6 +267,17 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
     'planning-windows',
     speechRegions.length ? 'Planning speech-aware transcription windows.' : 'Planning safe fallback windows.',
   )
+  const windows = createTranscriptionWindows(audio, effectiveSettings, speechRegions, speechAnalysis.frames)
+  postDiagnostic('window-plan', 'Planned model-safe transcription windows.', {
+    audioDurationSeconds: audio.samples.length / audio.sampleRate,
+    sampleRate: audio.sampleRate,
+    speechRegionCount: speechRegions.length,
+    windows: windows.map(({ samples, ...window }) => ({
+      ...window,
+      sampleCount: samples.length,
+      durationSeconds: samples.length / audio.sampleRate,
+    })),
+  })
 
   assertNotCancelled()
   postProgress(
@@ -233,36 +289,32 @@ async function transcribe(file: File, settings: TranscriptionSettings): Promise<
 
   const transcriber = await loadTranscriber(effectiveSettings)
 
-  try {
-    assertNotCancelled()
-    postProgress('transcribing', 'Transcribing speech locally with Whisper.')
-    const result = await transcribeInWindows(transcriber, audio, effectiveSettings, speechRegions)
-    postDiagnostic('transcription-result', 'Completed the worker transcription pipeline.', {
+  assertNotCancelled()
+  postProgress('transcribing', 'Transcribing speech locally with Whisper.')
+  const result = await transcribeInWindows(transcriber, audio, effectiveSettings, speechRegions, windows)
+  postDiagnostic('transcription-result', 'Completed the worker transcription pipeline.', {
+    text: result.text,
+    segments: summarizeSegments(result.segments),
+  })
+
+  assertNotCancelled()
+  postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
+  await releaseHighResourceTranscriber(model)
+  finishJobMetrics('complete')
+  postTerminalLog({
+    type: 'complete',
+    segmentCount: result.segments.length,
+    jobKind: 'transcription',
+  })
+
+  post({
+    type: 'complete',
+    result: {
+      segments: result.segments,
       text: result.text,
-      segments: summarizeSegments(result.segments),
-    })
-
-    assertNotCancelled()
-    postProgress('formatting-subtitles', 'Converting model timestamps into editable subtitle segments.')
-    postTerminalLog({
-      type: 'complete',
-      segmentCount: result.segments.length,
-      jobKind: 'transcription',
-    })
-
-    post({
-      type: 'complete',
-      result: {
-        segments: result.segments,
-        text: result.text,
-        modelId: effectiveSettings.modelId,
-      },
-    })
-  } finally {
-    if ('dispose' in transcriber && typeof transcriber.dispose === 'function') {
-      await transcriber.dispose()
-    }
-  }
+      modelId: effectiveSettings.modelId,
+    },
+  })
 }
 
 async function regenerate(
@@ -289,6 +341,7 @@ async function regenerate(
   if (validationError) {
     throw new Error(validationError)
   }
+  await disposeIncompatibleTranscriber(effectiveSettings)
 
   assertNotCancelled()
   postTerminalLog({
@@ -324,15 +377,22 @@ async function regenerate(
       rms: audioRms,
       threshold: 0.0008,
     }, 'warning')
+    await releaseHighResourceTranscriber(model)
     postRegenerationComplete(range, [], effectiveSettings.modelId, requestedAlternativeCount)
     return
   }
 
   postProgress('analyzing-speech', 'Analyzing speech activity in the selected range.')
-  const speechRegions = analyzeSpeechActivity(audio, effectiveSettings).map((region) => ({
+  const speechRegions = analyzeSpeechActivityForJob(audio, effectiveSettings).regions.map((region) => ({
     ...region,
     startTime: region.startTime + extractionRange.extractionStartTime,
     endTime: region.endTime + extractionRange.extractionStartTime,
+    rawStartTime: region.rawStartTime === undefined
+      ? undefined
+      : region.rawStartTime + extractionRange.extractionStartTime,
+    rawEndTime: region.rawEndTime === undefined
+      ? undefined
+      : region.rawEndTime + extractionRange.extractionStartTime,
   }))
   postDiagnostic('speech-activity', 'Completed speech analysis for the regeneration range.', {
     regionCount: speechRegions.length,
@@ -348,11 +408,10 @@ async function regenerate(
   )
   const transcriber = await loadTranscriber(effectiveSettings)
 
-  try {
-    const candidates: RegenerationCandidate[] = []
-    let timestampMode: TimestampMode = effectiveSettings.formatting.useWordTimestamps ? 'word' : true
+  const candidates: RegenerationCandidate[] = []
+  let timestampMode: TimestampMode = effectiveSettings.formatting.useWordTimestamps ? 'word' : true
 
-    for (const [profileIndex, profile] of REGENERATION_DECODING_PROFILES.entries()) {
+  for (const [profileIndex, profile] of REGENERATION_DECODING_PROFILES.entries()) {
       assertNotCancelled()
       postProgress(
         'transcribing',
@@ -371,6 +430,7 @@ async function regenerate(
       )
       timestampMode = attempt.timestampMode
       const normalized = normalizeAsrResult(attempt.result, {
+        timestampMode: attempt.timestampMode,
         offsetSeconds: extractionRange.extractionStartTime,
         coreStartTime: range.startTime,
         coreEndTime: range.endTime,
@@ -407,30 +467,43 @@ async function regenerate(
         (profileIndex + 1) / REGENERATION_DECODING_PROFILES.length,
       )
 
-      if (candidates.length >= requestedAlternativeCount) {
-        break
-      }
-    }
-
-    assertNotCancelled()
-    postRegenerationComplete(range, candidates, effectiveSettings.modelId, requestedAlternativeCount)
-  } finally {
-    if ('dispose' in transcriber && typeof transcriber.dispose === 'function') {
-      await transcriber.dispose()
+    if (candidates.length >= requestedAlternativeCount) {
+      break
     }
   }
+
+  assertNotCancelled()
+  await releaseHighResourceTranscriber(model)
+  postRegenerationComplete(range, candidates, effectiveSettings.modelId, requestedAlternativeCount)
 }
 
 async function loadTranscriber(settings: TranscriptionSettings): Promise<BrowserAsrTranscriber> {
   const runtime = resolveSpeechModelRuntimeSettings(settings)
   const model = getSpeechModelOption(runtime.settings.modelId)
+  const cacheKey = createTranscriberCacheKey(runtime.settings)
+  if (cachedTranscriber?.key === cacheKey) {
+    if (jobMetrics) {
+      jobMetrics.modelLoad = 'warm'
+    }
+    postDiagnostic('model-cache-hit', 'Reused the compatible in-memory speech model pipeline.', {
+      modelId: runtime.settings.modelId,
+      executionProvider: runtime.settings.executionProvider,
+      dtype: runtime.settings.dtype,
+    })
+    return cachedTranscriber.transcriber
+  }
+
+  if (cachedTranscriber) {
+    await disposeCachedTranscriber('The requested model runtime is incompatible with the warm pipeline.')
+  }
+
   const { env, pipeline } = await import('@huggingface/transformers')
   env.allowLocalModels = false
   env.allowRemoteModels = true
   env.useBrowserCache = true
 
   try {
-    return (await pipeline('automatic-speech-recognition', runtime.settings.modelId, {
+    const transcriber = (await pipeline('automatic-speech-recognition', runtime.settings.modelId, {
       device: runtime.settings.executionProvider,
       dtype: runtime.settings.dtype === 'auto' ? undefined : runtime.settings.dtype,
       progress_callback: (data: unknown) => {
@@ -443,12 +516,67 @@ async function loadTranscriber(settings: TranscriptionSettings): Promise<Browser
         )
       },
     })) as BrowserAsrTranscriber
+    cachedTranscriber = { key: cacheKey, transcriber }
+    if (jobMetrics) {
+      jobMetrics.modelLoad = 'cold'
+    }
+    return transcriber
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error)
     throw new Error(
       `Could not load ${model.shortLabel} with ${runtime.settings.executionProvider}/${runtime.settings.dtype}. ${details}`,
     )
   }
+}
+
+function createTranscriberCacheKey(settings: TranscriptionSettings): string {
+  return [settings.modelId, settings.executionProvider, settings.dtype].join('\u0000')
+}
+
+async function disposeIncompatibleTranscriber(settings: TranscriptionSettings): Promise<void> {
+  if (cachedTranscriber && cachedTranscriber.key !== createTranscriberCacheKey(settings)) {
+    await disposeCachedTranscriber('The requested model runtime is incompatible with the warm pipeline.')
+  }
+}
+
+async function releaseHighResourceTranscriber(model: SpeechModelOption): Promise<void> {
+  if (model.highResource) {
+    await disposeCachedTranscriber('High-resource speech models are released after each job to bound browser memory.')
+  }
+}
+
+async function disposeCachedTranscriber(reason: string): Promise<void> {
+  const cached = cachedTranscriber
+  cachedTranscriber = null
+  if (!cached) {
+    return
+  }
+
+  try {
+    await cached.transcriber.dispose?.()
+    postDiagnostic('model-disposed', 'Disposed the warm speech model pipeline.', { reason })
+  } catch (error) {
+    postDiagnostic(
+      'model-dispose-failed',
+      'The old speech model pipeline reported an error during disposal; loading will continue with a fresh pipeline.',
+      { reason, error: serializeError(error) },
+      'warning',
+    )
+  }
+}
+
+function resolveAutomaticLanguageFallback(settings: TranscriptionSettings): TranscriptionSettings {
+  if (settings.language !== 'auto') {
+    return settings
+  }
+
+  postDiagnostic(
+    'automatic-language-fallback',
+    'This Transformers.js runtime does not detect Whisper language automatically; using English for this legacy setting.',
+    { requestedLanguage: 'auto', effectiveLanguage: 'english' },
+    'warning',
+  )
+  return { ...settings, language: 'english' }
 }
 
 function postRegenerationComplete(
@@ -469,6 +597,7 @@ function postRegenerationComplete(
     })),
   })
   postProgress('formatting-subtitles', 'Preparing regenerated subtitle alternatives.')
+  finishJobMetrics('complete')
   postTerminalLog({
     type: 'complete',
     segmentCount: candidates.reduce((total, candidate) => total + candidate.segments.length, 0),
@@ -486,20 +615,10 @@ async function transcribeInWindows(
   audio: DecodedAudio,
   settings: TranscriptionSettings,
   speechRegions: SpeechRegion[],
+  windows: TranscriptionWindow[],
 ): Promise<NormalizedAsrResult> {
-  const windows = createTranscriptionWindows(audio, settings, speechRegions)
-  postDiagnostic('window-plan', 'Planned model-safe transcription windows.', {
-    audioDurationSeconds: audio.samples.length / audio.sampleRate,
-    sampleRate: audio.sampleRate,
-    speechRegionCount: speechRegions.length,
-    windows: windows.map(({ samples, ...window }) => ({
-      ...window,
-      sampleCount: samples.length,
-      durationSeconds: samples.length / audio.sampleRate,
-    })),
-  })
   let allSegments: RawTranscriptionSegment[] = []
-  const textParts: string[] = []
+  let lastPostedSegments: RawTranscriptionSegment[] = []
   let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
 
   for (const window of windows) {
@@ -516,15 +635,12 @@ async function transcribeInWindows(
     timestampMode = attempt.timestampMode
 
     const normalized = normalizeAsrResult(attempt.result, {
+      timestampMode: attempt.timestampMode,
       offsetSeconds: window.sliceStartTime,
       coreStartTime: window.coreStartTime,
       coreEndTime: window.coreEndTime,
       speechRegions,
     })
-
-    if (normalized.text) {
-      textParts.push(normalized.text)
-    }
 
     const beforeReconciliation = allSegments.length
     allSegments = reconcileBoundarySegments(
@@ -557,7 +673,7 @@ async function transcribeInWindows(
         boundaryTime: window.coreStartTime,
       },
     })
-    postPartialResult(allSegments, textParts, settings.modelId)
+    lastPostedSegments = postPartialResult(allSegments, lastPostedSegments, settings.modelId)
     postCaptionSegments(normalized.segments)
     postProgress(
       'transcribing',
@@ -612,6 +728,7 @@ async function transcribeInWindows(
       )
       timestampMode = attempt.timestampMode
       const normalized = normalizeAsrResult(attempt.result, {
+        timestampMode: attempt.timestampMode,
         offsetSeconds: startSample / audio.sampleRate,
         fallbackStartTime: repairWindow.gapStartTime,
         fallbackEndTime: repairWindow.gapEndTime,
@@ -637,7 +754,7 @@ async function transcribeInWindows(
           (first, second) => first.startTime - second.startTime || first.endTime - second.endTime,
         )
         postCaptionSegments(recovered)
-        postPartialResult(allSegments, textParts, settings.modelId)
+        lastPostedSegments = postPartialResult(allSegments, lastPostedSegments, settings.modelId)
       }
       postProgress(
         'repairing-coverage',
@@ -659,7 +776,7 @@ async function transcribeInWindows(
     before: summarizeSegments(beforeRefinement),
     after: summarizeSegments(allSegments),
   })
-  postPartialResult(allSegments, textParts, settings.modelId)
+  postPartialResult(allSegments, lastPostedSegments, settings.modelId)
 
   return {
     segments: allSegments,
@@ -731,6 +848,7 @@ function createTranscriptionWindows(
   audio: DecodedAudio,
   settings: TranscriptionSettings,
   speechRegions: SpeechRegion[],
+  activityFrames?: SpeechActivityFrameSeries,
 ): TranscriptionWindow[] {
   const duration = audio.samples.length / audio.sampleRate
   const maximumInputSeconds = Math.min(settings.maxModelInputSeconds, settings.chunkLengthSeconds)
@@ -740,6 +858,7 @@ function createTranscriptionWindows(
         targetChunkSeconds: Math.min(settings.targetChunkSeconds, maximumInputSeconds),
         overlapSeconds: settings.speechAwareOverlapSeconds,
         hardMinWindowSeconds: settings.hardMinWindowSeconds,
+        activityFrames,
       })
     : null
   const plan =
@@ -764,20 +883,33 @@ function createTranscriptionWindows(
   })
 }
 
-function analyzeSpeechActivity(audio: DecodedAudio, settings: TranscriptionSettings): SpeechRegion[] {
+function analyzeSpeechActivityForJob(
+  audio: DecodedAudio,
+  settings: TranscriptionSettings,
+): { regions: SpeechRegion[]; frames?: SpeechActivityFrameSeries } {
   if (!settings.vadEnabled) {
-    return []
+    return { regions: [] }
   }
-  return safelyDetectSpeechRegions(audio.samples, audio.sampleRate, {
-    frameMs: settings.vadFrameMs,
-    hopMs: settings.vadHopMs,
-    minSpeechMs: settings.vadMinSpeechMs,
-    mergeGapMs: settings.vadMergeGapMs,
-    prePaddingMs: settings.vadPrePaddingMs,
-    postPaddingMs: settings.vadPostPaddingMs,
-    noiseFloorMultiplier: settings.vadNoiseFloorMultiplier,
-    minimumRmsFloor: settings.vadMinimumRmsFloor,
-  })
+  try {
+    return analyzeSpeechActivityFrames(audio.samples, audio.sampleRate, {
+      frameMs: settings.vadFrameMs,
+      hopMs: settings.vadHopMs,
+      minSpeechMs: settings.vadMinSpeechMs,
+      mergeGapMs: settings.vadMergeGapMs,
+      prePaddingMs: settings.vadPrePaddingMs,
+      postPaddingMs: settings.vadPostPaddingMs,
+      noiseFloorMultiplier: settings.vadNoiseFloorMultiplier,
+      minimumRmsFloor: settings.vadMinimumRmsFloor,
+    })
+  } catch (error) {
+    postDiagnostic(
+      'speech-activity-fallback',
+      'Speech activity analysis failed, so the job will use safe timeline windows.',
+      { error: serializeError(error) },
+      'warning',
+    )
+    return { regions: [] }
+  }
 }
 
 async function extractAudio(
@@ -921,14 +1053,63 @@ function postCaptionSegments(segments: RawTranscriptionSegment[]): void {
   }
 }
 
-function postPartialResult(segments: RawTranscriptionSegment[], textParts: string[], modelId: string): void {
-  post({
+function postPartialResult(
+  segments: RawTranscriptionSegment[],
+  previousSegments: RawTranscriptionSegment[],
+  modelId: string,
+): RawTranscriptionSegment[] {
+  let replaceFromIndex = 0
+  const prefixLimit = Math.min(segments.length, previousSegments.length)
+  while (
+    replaceFromIndex < prefixLimit &&
+    areSegmentsExactlyEqual(segments[replaceFromIndex], previousSegments[replaceFromIndex])
+  ) {
+    replaceFromIndex += 1
+  }
+
+  if (replaceFromIndex === segments.length && replaceFromIndex === previousSegments.length) {
+    return previousSegments
+  }
+
+  const event: WorkerEventPayload = {
     type: 'partial',
-    result: {
-      segments: [...segments],
-      text: textParts.join(' ').replace(/\s+/g, ' ').trim(),
+    delta: {
+      replaceFromIndex,
+      totalSegments: segments.length,
+      segments: segments.slice(replaceFromIndex),
       modelId,
     },
+  }
+  if (jobMetrics) {
+    jobMetrics.partialMessageCount += 1
+    jobMetrics.partialMessageBytes += approximateJsonBytes({ ...event, jobId: activeJobId })
+  }
+  post(event)
+  return segments
+}
+
+function areSegmentsExactlyEqual(first: RawTranscriptionSegment, second: RawTranscriptionSegment): boolean {
+  if (first === second) {
+    return true
+  }
+  if (
+    first.startTime !== second.startTime ||
+    first.endTime !== second.endTime ||
+    first.text !== second.text ||
+    first.confidence !== second.confidence
+  ) {
+    return false
+  }
+  const firstWords = first.words ?? []
+  const secondWords = second.words ?? []
+  return firstWords.length === secondWords.length && firstWords.every((word, index) => {
+    const other = secondWords[index]
+    return (
+      word.text === other.text &&
+      word.startTime === other.startTime &&
+      word.endTime === other.endTime &&
+      word.confidence === other.confidence
+    )
   })
 }
 
@@ -951,6 +1132,7 @@ function postProgress(
   progress?: number,
   technicalDetails?: string,
 ): void {
+  trackJobStage(stage)
   const overallProgress = getOverallProgress(stage, progress)
   post({
     type: 'progress',
@@ -973,8 +1155,99 @@ function getModelTechnicalDetails(model: SpeechModelOption, settings: Transcript
   return `${model.label} (${model.id}); ${model.highResource ? 'high-resource; ' : ''}engine ${settings.executionProvider}; dtype ${settings.dtype}`
 }
 
-function post(event: WorkerEvent): void {
-  self.postMessage(event)
+function post(event: WorkerEventPayload): void {
+  if (!activeJobId) {
+    return
+  }
+  postForJob(activeJobId, event)
+}
+
+function postForJob(jobId: string, event: WorkerEventPayload): void {
+  self.postMessage({ ...event, jobId } satisfies WorkerEvent)
+}
+
+type CachedTranscriber = {
+  key: string
+  transcriber: BrowserAsrTranscriber
+}
+
+type JobMetrics = {
+  jobKind: 'transcription' | 'regeneration'
+  startedAt: number
+  activeStage?: TranscriptionStage
+  stageStartedAt: number
+  stageDurationsMs: Partial<Record<TranscriptionStage, number>>
+  partialMessageCount: number
+  partialMessageBytes: number
+  modelLoad?: 'cold' | 'warm'
+  finished: boolean
+}
+
+let cachedTranscriber: CachedTranscriber | null = null
+let jobMetrics: JobMetrics | null = null
+
+function startJobMetrics(jobKind: JobMetrics['jobKind']): void {
+  const now = performance.now()
+  jobMetrics = {
+    jobKind,
+    startedAt: now,
+    stageStartedAt: now,
+    stageDurationsMs: {},
+    partialMessageCount: 0,
+    partialMessageBytes: 0,
+    finished: false,
+  }
+}
+
+function trackJobStage(stage: TranscriptionStage): void {
+  const metrics = jobMetrics
+  if (!metrics || metrics.finished || metrics.activeStage === stage) {
+    return
+  }
+
+  const now = performance.now()
+  closeTrackedStage(metrics, now)
+  metrics.activeStage = stage
+  metrics.stageStartedAt = now
+}
+
+function finishJobMetrics(outcome: 'complete' | 'cancelled' | 'failed'): void {
+  const metrics = jobMetrics
+  if (!metrics || metrics.finished) {
+    return
+  }
+
+  const now = performance.now()
+  closeTrackedStage(metrics, now)
+  metrics.finished = true
+  const stageDurationsMs = Object.fromEntries(
+    Object.entries(metrics.stageDurationsMs).map(([stage, duration]) => [stage, Math.round(duration)]),
+  )
+  postDiagnostic('job-performance', 'Recorded bounded worker performance measurements.', {
+    jobKind: metrics.jobKind,
+    outcome,
+    totalDurationMs: Math.round(now - metrics.startedAt),
+    stageDurationsMs,
+    modelLoad: metrics.modelLoad,
+    partialMessageCount: metrics.partialMessageCount,
+    approximatePartialMessageBytes: metrics.partialMessageBytes,
+  })
+}
+
+function closeTrackedStage(metrics: JobMetrics, now: number): void {
+  if (!metrics.activeStage) {
+    return
+  }
+  metrics.stageDurationsMs[metrics.activeStage] =
+    (metrics.stageDurationsMs[metrics.activeStage] ?? 0) + Math.max(0, now - metrics.stageStartedAt)
+}
+
+function approximateJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength
+  } catch {
+    return 0
+  }
 }
 
 function postDiagnostic(
@@ -1098,12 +1371,4 @@ function clampProgress(value: number): number {
   }
 
   return Math.max(0, Math.min(1, value))
-}
-
-function createJobId(): string {
-  if ('crypto' in self && 'randomUUID' in self.crypto) {
-    return self.crypto.randomUUID()
-  }
-
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }

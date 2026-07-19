@@ -22,7 +22,7 @@ type TranscriptionPanelProps = {
 }
 
 const LANGUAGES = [
-  ['auto', 'Auto detect'],
+  ['auto', 'Auto (English fallback)'],
   ['english', 'English'],
   ['spanish', 'Spanish'],
   ['french', 'French'],
@@ -48,6 +48,9 @@ export function TranscriptionPanel({
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
   const warnings = [
     ...capabilityWarnings,
+    ...(settings.language === 'auto'
+      ? ['This Transformers.js version cannot detect Whisper language automatically. Auto uses English; choose the spoken language for multilingual audio.']
+      : []),
     ...getSpeechModelWarnings(settings, { webGpu: capabilities.webGpu, dtype: settings.dtype }),
   ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
   const progressPercent =
@@ -122,8 +125,7 @@ export function TranscriptionPanel({
           >
             <option value="auto">Auto</option>
             <option value="webgpu">WebGPU</option>
-            <option value="wasm">WASM</option>
-            <option value="cpu">CPU</option>
+            <option value="wasm">WASM (CPU)</option>
           </select>
         </label>
 

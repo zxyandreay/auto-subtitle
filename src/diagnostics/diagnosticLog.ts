@@ -9,11 +9,13 @@ const STORAGE_KEY = 'auto-subtitle-diagnostics-v1'
 const DEFAULT_MAX_EVENTS = 1_000
 const DEFAULT_MAX_BYTES = 2_000_000
 const DEFAULT_MAX_STRING_LENGTH = 12_000
+const DEFAULT_PERSIST_DELAY_MS = 250
 
 type DiagnosticLogOptions = {
   maxEvents?: number
   maxBytes?: number
   maxStringLength?: number
+  persistDelayMs?: number
   now?: () => Date
   sessionId?: string
 }
@@ -28,10 +30,14 @@ export class DiagnosticLog {
   private readonly maxEvents: number
   private readonly maxBytes: number
   private readonly maxStringLength: number
+  private readonly persistDelayMs: number
   private readonly now: () => Date
   private readonly sessionId: string
   private events: DiagnosticEvent[]
+  private eventSizes: number[]
+  private totalEventBytes: number
   private nextSequence: number
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     storage: Storage | null,
@@ -41,9 +47,13 @@ export class DiagnosticLog {
     this.maxEvents = Math.max(1, options.maxEvents ?? DEFAULT_MAX_EVENTS)
     this.maxBytes = Math.max(1_000, options.maxBytes ?? DEFAULT_MAX_BYTES)
     this.maxStringLength = Math.max(40, options.maxStringLength ?? DEFAULT_MAX_STRING_LENGTH)
+    this.persistDelayMs = Math.max(0, options.persistDelayMs ?? DEFAULT_PERSIST_DELAY_MS)
     this.now = options.now ?? (() => new Date())
     this.sessionId = options.sessionId ?? createSessionId()
     this.events = this.readStoredEvents()
+    this.eventSizes = this.events.map(serializedEventBytes)
+    this.totalEventBytes = serializedArrayBytes(this.eventSizes)
+    this.trimToLimits()
     this.nextSequence = (this.events.at(-1)?.sequence ?? 0) + 1
   }
 
@@ -61,8 +71,11 @@ export class DiagnosticLog {
     }
     this.nextSequence += 1
     this.events.push(event)
+    const eventSize = serializedEventBytes(event)
+    this.eventSizes.push(eventSize)
+    this.totalEventBytes += eventSize + (this.eventSizes.length > 1 ? 1 : 0)
     this.trimToLimits()
-    this.persist()
+    this.schedulePersist()
     return structuredCloneSafe(event)
   }
 
@@ -71,7 +84,10 @@ export class DiagnosticLog {
   }
 
   clear(): void {
+    this.cancelScheduledPersist()
     this.events = []
+    this.eventSizes = []
+    this.totalEventBytes = serializedArrayBytes(this.eventSizes)
     this.nextSequence = 1
     try {
       this.storage?.removeItem(STORAGE_KEY)
@@ -81,6 +97,7 @@ export class DiagnosticLog {
   }
 
   createReport(context?: unknown, environment: DiagnosticEnvironment = readEnvironment()): DiagnosticReport {
+    this.flush()
     return {
       schemaVersion: 1,
       exportedAt: this.now().toISOString(),
@@ -89,6 +106,11 @@ export class DiagnosticLog {
       context: context === undefined ? undefined : sanitizeValue(context, this.maxStringLength),
       events: this.getEvents(),
     }
+  }
+
+  flush(): void {
+    this.cancelScheduledPersist()
+    this.persistNow()
   }
 
   private readStoredEvents(): DiagnosticEvent[] {
@@ -109,15 +131,40 @@ export class DiagnosticLog {
 
   private trimToLimits(): void {
     if (this.events.length > this.maxEvents) {
-      this.events = this.events.slice(-this.maxEvents)
+      const removeCount = this.events.length - this.maxEvents
+      this.events.splice(0, removeCount)
+      this.eventSizes.splice(0, removeCount)
+      this.totalEventBytes = serializedArrayBytes(this.eventSizes)
     }
 
-    while (this.events.length > 1 && serializedBytes(this.events) > this.maxBytes) {
+    while (this.events.length > 1 && this.totalEventBytes > this.maxBytes) {
       this.events.shift()
+      const removedSize = this.eventSizes.shift() ?? 0
+      this.totalEventBytes -= removedSize + 1
     }
   }
 
-  private persist(): void {
+  private schedulePersist(): void {
+    if (!this.storage || this.persistenceTimer !== null) {
+      return
+    }
+
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null
+      this.persistNow()
+    }, this.persistDelayMs)
+  }
+
+  private cancelScheduledPersist(): void {
+    if (this.persistenceTimer === null) {
+      return
+    }
+
+    clearTimeout(this.persistenceTimer)
+    this.persistenceTimer = null
+  }
+
+  private persistNow(): void {
     try {
       this.storage?.setItem(
         STORAGE_KEY,
@@ -140,6 +187,9 @@ export function getDiagnosticLog(): DiagnosticLog {
       storage = null
     }
     sharedLog = new DiagnosticLog(storage)
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', () => sharedLog?.flush(), { once: true })
+    }
   }
   return sharedLog
 }
@@ -204,8 +254,12 @@ function readEnvironment(): DiagnosticEnvironment {
   }
 }
 
-function serializedBytes(events: DiagnosticEvent[]): number {
-  return new TextEncoder().encode(JSON.stringify(events)).byteLength
+function serializedEventBytes(event: DiagnosticEvent): number {
+  return new TextEncoder().encode(JSON.stringify(event)).byteLength
+}
+
+function serializedArrayBytes(eventSizes: number[]): number {
+  return 2 + eventSizes.reduce((total, size) => total + size, 0) + Math.max(0, eventSizes.length - 1)
 }
 
 function structuredCloneSafe<T>(value: T): T {
