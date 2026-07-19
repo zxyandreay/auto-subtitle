@@ -326,7 +326,7 @@ flowchart TD
     TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
     TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core from speech onset"]
     SegmentRetry --> Normalize
-    Normalize --> PartialPreview["Post cumulative partial result to app"]
+    Normalize --> PartialPreview["Post validated suffix delta to app"]
     PartialPreview --> CaptionLog["Post terminal caption events in dev"]
     CaptionLog --> Loop
     Loop -->|No| Complete["Post complete result to app"]
@@ -361,7 +361,8 @@ sequenceDiagram
         Worker->>HF: transcriber(samples, ASR options)
         HF-->>Worker: text and timestamp chunks
         Worker-->>App: progress transcribing
-        Worker-->>Provider: partial cumulative result
+        Worker-->>Provider: partial suffix delta
+        Provider->>Provider: validate delta and reconstruct snapshot
         Provider-->>App: onPartial(result)
         App->>App: merge live generated captions into editor
         Worker--)Vite: dev-only caption and progress events
@@ -380,12 +381,12 @@ Cancellation is user-driven from the `Cancel` button or app teardown:
 
 The worker also checks `assertNotCancelled()` between major steps so cooperative cancellation can stop long flows when the worker has not already been terminated.
 
-Live partial previews use the same local worker path. After each completed audio window, the worker posts a non-terminal `partial` event with the cumulative raw segments. The provider forwards that event through `onPartial`, and the app formats those generated segments into preview subtitles. The editor receives the preview subtitles immediately, so the user can seek, preview, and edit captions before the final transcription result arrives.
+Live partial previews use the same local worker path. After each completed audio window, the worker compares against the previous snapshot and posts a non-terminal `partial` suffix delta with `replaceFromIndex`, replacement segments, and the expected total count. The provider validates the delta, reconstructs the snapshot, and forwards it through `onPartial`. The app formats those generated segments into preview subtitles, so the user can seek, preview, and edit captions before the final result arrives.
 
 The live preview merge keeps user changes stable while the worker continues:
 
 1. Existing subtitles from before transcription are treated as the base that the generated result will replace.
-2. Streamed generated rows are tracked by id.
+2. Streamed generated rows use bounded, ordered text-and-time matching so a repair insertion does not attach an edit to the wrong positional id.
 3. If the user edits a streamed row, later partial updates preserve that edited row.
 4. If the user deletes a streamed row, later partial updates do not re-add that same generated row.
 5. User-added rows created during transcription are kept alongside streamed generated rows.
@@ -442,16 +443,16 @@ The provider listens for typed worker outcomes:
 | Worker event | Provider behavior |
 | --- | --- |
 | `progress` | Calls `callbacks.onProgress(data.progress)`. |
-| `partial` | Full transcription only: forwards cumulative generated segments through `onPartial`. |
-| `complete` | Terminates the worker and resolves the job promise. |
-| `regeneration-complete` | Terminates the worker and resolves the range-regeneration promise. |
+| `partial` | Full transcription only: validates the suffix delta, reconstructs a complete snapshot, and calls `onPartial`. |
+| `complete` | Resolves the job and schedules warm-worker eviction after two idle minutes. |
+| `regeneration-complete` | Resolves the range job and schedules the same bounded idle eviction. |
 | `error` | Terminates the worker and rejects the job promise. |
 
-Range regeneration treats an error before the worker's first message as a startup failure. The provider terminates that worker and creates one fresh worker using the same immutable request. It retries only once and only before any diagnostic, progress, or result message, so model execution failures and out-of-memory crashes are never repeated automatically. A second startup failure rejects with the browser's message and worker source location when available, giving exported diagnostics more evidence than the generic crash fallback.
+Either job kind treats a crash before the worker's first message as a startup failure. The provider terminates that worker and creates one fresh worker using the same immutable request. It retries only once and only before any diagnostic, progress, or result message, so model execution failures and out-of-memory crashes are never repeated automatically. A second startup failure rejects with the browser's message and worker source location when available. Cancellation, crashes, incompatible runtime changes, explicit cleanup, and idle timeout all release the worker. Turbo and Distil pipelines are always disposed after a job; compatible lower-resource pipelines can remain warm for bounded follow-up work.
 
 ### 3. Worker Initialization
 
-The worker receives `{ type: 'start', file, settings }`, resets cancellation state, creates a job id, resets monotonic progress, and starts `transcribe(file, settings)`.
+The worker receives `{ type: 'start', jobId, file, settings }`, rejects concurrent work, resets cancellation and monotonic progress state for that id, and starts `transcribe(file, settings)`. Full-file transcription disposes any previously warm model before FFmpeg extraction so the model does not overlap the input/MEMFS/WAV/Float32 peak. A compatible low-resource model can still be reused for bounded regeneration.
 
 The worker dynamically imports Transformers.js:
 
@@ -559,7 +560,7 @@ Current `executionProvider` choices:
 | `auto` | Let Transformers.js choose an available execution path. |
 | `webgpu` | Prefer WebGPU where available. |
 | `wasm` | Prefer WebAssembly. |
-| `cpu` | Use CPU execution path. |
+| legacy `cpu` | Normalized to the supported WebAssembly CPU path (`wasm`). |
 
 Current `dtype` choices in the UI and type model are `auto`, `q8`, and `fp32`. The accurate-local profile defaults to `q8`; `auto` remains accepted for legacy/imported settings. When dtype is not `auto`, the worker passes it through to the pipeline. High-resource models recommend WebGPU and `q8`; missing WebGPU, CPU/WASM selection, and `fp32` each produce a specific warning but do not block the job.
 
@@ -586,10 +587,10 @@ The app configures the model through these user-facing settings:
 
 | Setting | Worker option | Effect |
 | --- | --- | --- |
-| Spoken language | `language` | `auto` becomes `undefined`; a selected language is passed to the ASR call. |
+| Spoken language | `language` | A selected language is passed to the ASR call. Legacy `auto` resolves to English with a diagnostic because the installed Transformers.js 4.2 Whisper export does not perform independent language detection. |
 | Output | `task` | `transcribe` keeps the source language; `translate` asks Whisper for English output. |
 | Model | `modelId` | Chooses one of the four registered browser-compatible ASR repositories after compatibility resolution. |
-| Engine | `device` | Chooses auto, WebGPU, WASM, or CPU execution provider. |
+| Engine | `device` | Chooses auto, WebGPU, or WASM. Legacy CPU settings normalize to WASM. |
 | Precision | pipeline `dtype` | Chooses auto, q8, or fp32 model weights. |
 | Use word timestamps | `return_timestamps` | Uses `'word'` when enabled; otherwise uses segment timestamps. |
 
@@ -597,7 +598,7 @@ Accurate-local synchronization defaults:
 
 | Setting | Default |
 | --- | --- |
-| Language / task / provider / dtype | `auto` / `transcribe` / `auto` / `q8` |
+| Model / language / task / provider / dtype | Base / `english` / `transcribe` / `auto` / `q8` |
 | Maximum input / speech target | `29.0 s` / `26.0 s` |
 | Speech-aware / fixed fallback overlap | `1.5 s` / `4.0 s` |
 | Hard minimum window | `5.0 s` |
@@ -628,12 +629,12 @@ For Distil Large v3, the resolver overrides the ASR call to explicit English tra
 ```mermaid
 flowchart TD
     Audio["Full decoded Float32Array"] --> Duration["duration = samples.length / sampleRate"]
-    Duration --> VAD["30 ms RMS frames, 10 ms hop, adaptive noise floor"]
-    VAD --> Regions["Smooth, merge, pad, and clamp speech regions"]
+    Duration --> VAD["Rolling 30 ms RMS, 10 ms hop, adaptive hysteresis"]
+    VAD --> Regions["Retain raw evidence and padded model context separately"]
     Regions --> Choice{"Usable speech regions?"}
     Choice -->|Yes| Pack["Pack near 26 s; 1.5 s context overlap"]
     Choice -->|No| Fallback["Contiguous fixed cores; 4 s overlap"]
-    Pack --> Slice["Prefer silence boundaries and preserve speech ownership"]
+    Pack --> Slice["Search frame activity for a nearby pause; preserve ownership"]
     Fallback --> Slice
     Slice --> Limit["Clamp sample count to windowSeconds * sampleRate"]
     Limit --> Samples["samples.subarray(startSample, endSample)"]
@@ -649,27 +650,27 @@ flowchart TD
 
 Speech and windowing details:
 
-1. `detectSpeechRegions` analyzes mono 16 kHz samples with 30 ms RMS frames and a 10 ms hop. An adaptive noise estimate, a nonzero RMS floor, isolated-frame smoothing, a 250 ms minimum, a 350 ms merge gap, and 200/300 ms pre/post padding produce deterministic regions clamped to the audio duration.
-2. Usable regions are packed into ownership spans near the 26-second target. Interior speech-aware windows use 1.5 seconds of context and never exceed the 29-second maximum.
+1. `analyzeSpeechActivity` computes overlapping-frame RMS with a rolling sum, then applies an adapting local noise estimate, separate speech-on/off thresholds, hysteresis, isolated-frame smoothing, a 250 ms minimum, and a 350 ms raw merge gap. Each region retains unpadded `rawStartTime`/`rawEndTime`; 200/300 ms padding is only model context. Compact typed frame arrays are retained for planning.
+2. Usable regions are packed into ownership spans near the 26-second target. A long region searches the configured radius around its ideal boundary and selects the earliest deterministic minimum of speech state, normalized activity, distance, and sample time. Interior windows use 1.5 seconds of context and never exceed 29 seconds.
 3. Long continuous speech is split into contiguous ownership cores with overlap context, so every detected speech instant belongs to at least one core.
 4. If VAD is disabled, fails, or yields no usable regions, the fixed planner covers the complete timeline with a default 4-second overlap and the same 29-second cap.
 5. First and last windows are naturally shorter when context is unavailable at the media boundary; tiny windows are expanded in surrounding silence toward the 5-second hard minimum where possible.
 6. Sample indices use `floor` for slice starts and `ceil` for requested ends, are capped to the exact model sample budget, and derive `sliceStartTime` from the first sample actually passed to Whisper.
 7. ASR timestamps are converted to the full-video timeline by adding that exact sample-derived offset. Chunk starts assign ownership, while crossing chunks keep their full absolute end times.
-8. Adjacent window results within two seconds of a core boundary use conservative normalized-token comparison. Near duplicates are kept once; suffix/prefix overlap is removed from the later text while unique words are retained.
+8. Adjacent window results use a capped linear suffix/prefix alignment over up to three segments per side. Segment or word timing must overlap; one-word segment duplicates are supported while non-overlapping intentional repeats remain. Incoming evidence replaces a full duplicate only when word timing, materially better confidence, or punctuation support is stronger.
 9. Times are rounded to milliseconds.
 
 This design prefers cuts in silence while keeping a fixed-window fallback for difficult audio. VAD affects planning and generated-cue refinement only; it does not modify imported/manual subtitles.
 
 ### Coverage Recovery And Speech-Boundary Refinement
 
-After the first normalized ASR pass, subtitle intervals are merged and compared with detected speech. Coverage uses 100 ms tolerance, ignores gaps below 250 ms, and reports a region only when at least 500 ms and 40% of that speech region remain uncovered.
+After the first normalized ASR pass, coverage is compared only with raw detected speech. Word evidence must represent at least 60% of normalized segment text, remain plausible (at most four seconds per word), and intersect both its segment and raw speech. Low-confidence or mostly-silence segment intervals do not hide a gap. Coverage uses 100 ms tolerance, ignores gaps below 250 ms, and also repairs a large absolute gap even when a long region's uncovered ratio is small.
 
 When repair is enabled, one pass processes at most 20 uncovered ranges. Each range receives 750 ms of context on both sides, remains below 29 seconds, and reuses the already loaded transcriber. Repair results must have valid text/timing, overlap the uncovered range, and differ from nearby existing cues. Accepted timing is clipped away from neighboring cues using the configured 80 ms gap. There is no recursive coverage loop.
 
-If ASR returns non-empty text without usable chunks, normalization creates a `confidence: 0.35` fallback only when at least 500 ms of VAD evidence exists in the owned window or repair range. The cue is bounded to that evidence, receives the normal 80/180 ms lead/tail padding, and is capped at eight seconds. Text-only output over silence remains omitted.
+If ASR returns meaningful text without usable chunks, normalization creates a `confidence: 0.35` fallback only when exactly one raw VAD interval supplies unambiguous evidence in the owned window or repair range. It receives no model-context or display padding and is capped at eight seconds. Multiple disjoint spans, silence, punctuation-only output, and fallback text that cannot meet the hard CPS limit inside its evidence are omitted rather than stretched over silence.
 
-Finally, generated raw segments may snap to a speech onset within 200 ms or an offset within 300 ms. The default 80 ms lead-in and 180 ms tail apply only when movement stays inside the search budget and adjacent proposed cues retain the configured gap. Imported and manually edited subtitles do not enter this worker refinement path.
+Finally, usable word timestamps determine content bounds first; raw VAD onsets/offsets within 200/300 ms are secondary evidence for segment-only output. The default 80 ms lead-in and 180 ms tail are applied once. If rapid real speech leaves less than the configured 80 ms display gap, refinement preserves the spoken-word bounds and uses the available non-overlapping gap. Imported and manually edited subtitles do not enter this path.
 
 ## Timestamp Modes And Fallback
 
@@ -703,7 +704,7 @@ The worker receives an unknown result shape from the pipeline and normalizes def
 8. If the model returned text without usable timestamp chunks, VAD evidence in the owned range can provide a bounded low-confidence interval; without speech evidence, no subtitle is created.
 9. If valid chunks begin in an adjacent overlap, no fallback caption is created. This prevents neighboring speech from appearing early or being recreated late.
 
-When many chunks look word-level, the worker combines them into a single segment with a `words` array. Later formatting can split those words into readable subtitle entries if word timestamps are enabled.
+The actual successful request mode is passed explicitly to normalization. In word mode, one or more valid chunks become a segment with a `words` array; in segment mode, even one- or two-word chunks remain independent segment evidence. Chunk count and shape are never used to guess the mode.
 
 ## Formatting Generated Subtitles
 
@@ -797,7 +798,7 @@ Generated-caption helper responsibilities:
 
 ```mermaid
 flowchart TD
-    Chunk["Completed transcription window"] --> Partial["Worker posts partial cumulative result"]
+    Chunk["Completed transcription window"] --> Partial["Worker posts changed suffix delta"]
     Partial --> Provider["Provider calls onPartial"]
     Provider --> Format["App formats generated segments"]
     Format --> Merge["mergeLiveTranscriptionPreview"]
@@ -812,7 +813,7 @@ flowchart TD
 Live preview details:
 
 1. Partial results are local worker messages; they do not add a backend or external transcription service.
-2. The worker sends cumulative raw segments after each audio window finishes.
+2. The worker sends only the changed suffix plus the replacement index and expected total; the provider validates it before reconstructing the snapshot.
 3. The app formats partial segments with the same generated-caption optimizer used for the final result.
 4. `useUndoableSubtitles.preview` updates the current editor contents without adding automatic worker updates to the undo history.
 5. `mergeLiveTranscriptionPreview` removes the pre-transcription base entries once generated captions arrive, matching final transcription replacement behavior.
@@ -852,7 +853,7 @@ Regeneration details:
 5. The dialog exposes language, output task, model, execution provider, dtype, word/segment timestamps, and an Alternatives selector from one to five. The count defaults to three. These choices remain in memory for the browser session and never update project or full-transcription settings.
 6. Changing the range, runtime preferences, or requested count invalidates prior candidates. Generation captures an immutable settings-and-count snapshot, including current caption formatting, and uses it for candidate formatting, preview, and apply.
 7. Context planning adds up to two seconds on each side only when the complete extracted model input remains within the 29-second safety budget.
-8. `startBrowserWhisperRegeneration` starts a dedicated worker request; it never enters the full-transcription live-preview state. If the worker crashes before its first message, the provider makes one fresh startup attempt and then reports browser error details if that also fails.
+8. `startBrowserWhisperRegeneration` posts a mutually exclusive request to the reusable worker; it never enters the full-transcription live-preview state. A compatible lower-resource pipeline can be reused. If the worker crashes before its first message, the provider makes one fresh startup attempt and reports browser error details if that also fails.
 9. The worker enforces model compatibility again and returns the resolved model ID.
 10. The worker runs greedy decoding, then sampling at temperatures `0.4`, `0.75`, `0.9`, and `1.0`. Processing stops after it finds the requested one-to-five distinct candidates or exhausts all five profiles. Empty and normalized duplicate results can leave the final count below the request.
 11. Word timestamps use the existing segment-timestamp fallback when the model export lacks cross-attention output.
@@ -914,7 +915,7 @@ flowchart LR
 
 ## Browser Diagnostic Reports
 
-`DiagnosticLog` keeps a versioned, browser-local event stream in `localStorage`. It retains at most 1,000 recent events and trims toward an approximately 2 MB serialized budget. Storage failures are non-fatal: the active in-memory log continues even when local storage is disabled or full. Strings, arrays, object depth, chunks, and segment samples are bounded; truncated strings retain their original length plus head/tail samples.
+`DiagnosticLog` keeps a versioned, browser-local event stream in `localStorage`. It retains at most 1,000 recent events and trims toward an approximately 2 MB serialized budget. Event sizes are maintained incrementally, and rapid writes are coalesced for 250 ms; report creation and `pagehide` flush pending data. Storage failures are non-fatal. Strings, arrays, object depth, chunks, and segment samples are bounded; truncated strings retain their original length plus head/tail samples.
 
 The worker emits structured diagnostic events through the existing typed worker bridge. A full transcription report can include:
 
@@ -925,6 +926,7 @@ The worker emits structured diagnostic events through the existing typed worker 
 5. Coverage gaps, repair plans, raw repair output, and accepted/rejected repair segments.
 6. Timing before/after speech-boundary refinement and final formatted editor entries.
 7. Regeneration profiles/candidates, cancellation, failures, and stack traces where available.
+8. Worker stage and total durations, cold/warm model state, changed-suffix message estimates, all worker-event counts/approximate JSON bytes, final main-thread formatting time, total job time/RTF, and a Chromium heap sample when available.
 
 The top-toolbar **Debug log** action adds the current video metadata, settings, progress, subtitle count, and current subtitle summaries, then downloads a JSON report. Recognized text is intentionally included because it is needed to distinguish model hallucination from window reconciliation, repair, or formatting behavior. The UI and report both state that recognized text may be sensitive and that no audio/video bytes are included.
 
@@ -1356,6 +1358,9 @@ The app intentionally keeps errors visible:
 | `preview` | `vite preview --host 127.0.0.1` | Serve production build preview. |
 | `test` | `vitest run` | Run tests. |
 | `typecheck` | `tsc -b` | Typecheck TypeScript project references. |
+| `benchmark` | `node scripts/benchmark.mjs run` | Score a captured local run against gitignored references. |
+| `benchmark:compare` | `node scripts/benchmark.mjs compare` | Produce neutral baseline/candidate deltas with comparability warnings. |
+| `benchmark:self-test` | `node scripts/benchmark.mjs self-test` | Validate deterministic scorer behavior with synthetic data only. |
 
 Vite configuration:
 
@@ -1447,6 +1452,13 @@ They cover:
 71. One-time regeneration worker startup recovery, detailed repeated-crash errors, and fullscreen dialog portal mounting.
 72. Session-local one-to-five regeneration counts, count normalization, candidate invalidation, and immutable worker-request propagation.
 73. Selected-subtitle regeneration entry, idle timeline-button removal, active-range controls, and removal of duplicate buttons from both editors.
+74. Explicit one-to-many word timestamp modes, invalid/partial chunks, boundary ownership, and ambiguous or punctuation-only fallback suppression.
+75. Rolling-RMS/hysteresis VAD, raw-versus-padded boundaries, pause-aware exact-sample window selection, and long-window planning.
+76. Bounded multi-segment/character-script reconciliation, supported one-word overlap, intentional-repeat preservation, and better-evidence duplicate selection.
+77. Confidence/word/speech-aware coverage plus bounded long-gap repair ownership, neighbor safety, and CJK word reconstruction.
+78. Delta worker protocol validation, stale job-id rejection, reusable-worker cleanup, crash recovery, idle eviction, and message telemetry.
+79. Stable live-preview identity across inserted repair cues, unrelated replacements, user edits/deletions, and bounded snapshot retention.
+80. Benchmark WER/CER/timing/coverage/readability/performance metrics, mixed-language aggregation, missing telemetry, comparison integrity, and alignment memory caps through synthetic self-tests.
 
 The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
 
@@ -1482,7 +1494,7 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 11. Generated subtitle timing is improved with word timestamp padding, speech-boundary snapping, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
 12. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
 13. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
-14. Regeneration reinitializes a worker and model pipeline for every request. Browser caching avoids redownloading unchanged files, but initialization and bounded extraction still take time. Higher requested alternative counts may require more decoding passes.
+14. Compatible low-resource pipelines can stay warm for bounded regeneration, but FFmpeg is still initialized per extraction and the complete compressed file is written to MEMFS. Incompatible/high-resource pipelines, cancellation, crashes, explicit cleanup, and idle timeout release worker/model state. Higher alternative counts can require more decoding passes.
 
 ## Extension Points
 

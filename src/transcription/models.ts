@@ -208,7 +208,7 @@ export function getSpeechModelWarnings(
     warnings.push('Full precision may require significantly more memory.')
   }
   if (settings.executionProvider === 'wasm' || settings.executionProvider === 'cpu') {
-    warnings.push('CPU/WASM execution may be very slow for this model.')
+    warnings.push('WASM CPU execution may be very slow for this model.')
   }
   return warnings
 }

@@ -4,6 +4,9 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "benchmark": "node scripts/benchmark.mjs run",
+    "benchmark:compare": "node scripts/benchmark.mjs compare",
+    "benchmark:self-test": "node scripts/benchmark.mjs self-test",
     "dev": "vite --host 127.0.0.1",
     "build": "npm run typecheck && vite build",
     "lint": "oxlint",

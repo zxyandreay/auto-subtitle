@@ -1,7 +1,12 @@
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import type { SpeechRegion } from './speechActivity'
 
+/** Transformers.js uses `true` for segment timestamps and `'word'` for words. */
+export type AsrTimestampMode = 'word' | 'segment' | true
+
 export type AsrTimelineOptions = {
+  /** The mode actually used by the successful ASR request, after any fallback. */
+  timestampMode?: AsrTimestampMode
   offsetSeconds?: number
   coreStartTime?: number
   coreEndTime?: number
@@ -53,21 +58,28 @@ export function normalizeAsrChunks(
     return []
   }
 
-  const looksWordLevel = normalized.length > 3 && normalized.every((chunk) => chunk.text.split(/\s+/).length <= 2)
-  if (!looksWordLevel) {
+  if (options?.timestampMode !== 'word') {
     return normalized
+  }
+
+  const words = [...normalized]
+    .sort((first, second) => first.startTime - second.startTime || first.endTime - second.endTime)
+    .map((chunk) => ({
+      text: chunk.text.trim(),
+      startTime: chunk.startTime,
+      endTime: chunk.endTime,
+    }))
+    .filter((word) => word.text && word.endTime > word.startTime)
+  if (!words.length) {
+    return []
   }
 
   return [
     {
-      startTime: normalized[0].startTime,
-      endTime: normalized.at(-1)!.endTime,
-      text: normalized.map((chunk) => chunk.text).join(' '),
-      words: normalized.map((chunk) => ({
-        text: chunk.text.trim(),
-        startTime: chunk.startTime,
-        endTime: chunk.endTime,
-      })),
+      startTime: words[0].startTime,
+      endTime: words.at(-1)!.endTime,
+      text: joinTimestampedWords(words.map((word) => word.text)),
+      words,
     },
   ]
 }
@@ -113,25 +125,29 @@ function createFallbackSegment(
   options?: AsrTimelineOptions,
 ): RawTranscriptionSegment[] {
   const text = fallbackText.trim()
-  if (text.replace(/\s/g, '').length < 2 || !options?.speechRegions?.length) {
+  if (!/[\p{L}\p{N}]/u.test(text) || !options?.speechRegions?.length) {
     return []
   }
 
   const rangeStart = options.fallbackStartTime ?? options.coreStartTime ?? options.offsetSeconds ?? 0
   const rangeEnd = options.fallbackEndTime ?? options.coreEndTime ?? Number.POSITIVE_INFINITY
-  const evidence = options.speechRegions
+  const evidence = mergeEvidenceRanges(
+    options.speechRegions
     .map((region) => ({
-      startTime: Math.max(rangeStart, region.startTime),
-      endTime: Math.min(rangeEnd, region.endTime),
+      startTime: Math.max(0, rangeStart, region.rawStartTime ?? region.startTime),
+      endTime: Math.min(rangeEnd, region.rawEndTime ?? region.endTime),
     }))
     .filter((region) => region.endTime - region.startTime >= 0.5)
-    .sort((first, second) => second.endTime - second.startTime - (first.endTime - first.startTime))[0]
-  if (!evidence) {
+    .sort((first, second) => first.startTime - second.startTime || first.endTime - second.endTime),
+  )
+  // Text without timestamp chunks cannot be safely distributed across disjoint
+  // speech islands. Suppress it and let the bounded repair path retry smaller spans.
+  if (evidence.length !== 1) {
     return []
   }
 
-  const startTime = Math.max(rangeStart, evidence.startTime - 0.08)
-  const endTime = Math.min(rangeEnd, evidence.endTime + 0.18, startTime + 8)
+  const startTime = evidence[0].startTime
+  const endTime = Math.min(rangeEnd, evidence[0].endTime, startTime + 8)
   if (endTime <= startTime) {
     return []
   }
@@ -170,6 +186,47 @@ function normalizeChunk(chunk: unknown): RawTranscriptionSegment | null {
   }
 
   return { startTime, endTime, text }
+}
+
+function mergeEvidenceRanges(
+  ranges: Array<{ startTime: number; endTime: number }>,
+): Array<{ startTime: number; endTime: number }> {
+  const merged: Array<{ startTime: number; endTime: number }> = []
+  for (const range of ranges) {
+    const previous = merged.at(-1)
+    if (previous && range.startTime <= previous.endTime) {
+      previous.endTime = Math.max(previous.endTime, range.endTime)
+    } else {
+      merged.push({ ...range })
+    }
+  }
+  return merged
+}
+
+function joinTimestampedWords(words: string[]): string {
+  let result = ''
+  for (const word of words) {
+    const token = word.trim()
+    if (!token) {
+      continue
+    }
+    if (
+      !result ||
+      /^[,.;:!?%\])}\u3001\u3002\uff0c\uff01\uff1f]/u.test(token) ||
+      /[([{\u2018\u201c]$/u.test(result) ||
+      (containsCjk(token[0] ?? '') &&
+        /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}][\u3001\u3002\uff0c\uff01\uff1f\uff1a\uff1b\u2026\u2014\u2019\u201d\uff09\u3011\u300b\u300d\u300f]*$/u.test(result))
+    ) {
+      result += token
+    } else {
+      result += ` ${token}`
+    }
+  }
+  return result.trim()
+}
+
+function containsCjk(value: string): boolean {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(value)
 }
 
 function roundSeconds(value: number): number {

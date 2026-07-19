@@ -1,7 +1,7 @@
 import type { FormattingPreferences } from '../types/subtitles'
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import type { DiagnosticEventInput } from '../diagnostics/types'
-import { resolveCompatibleModelId, TINY_MODEL_ID, type SpeechModelId } from './models'
+import { BASE_MODEL_ID, resolveCompatibleModelId, type SpeechModelId } from './models'
 import { DEFAULT_REGENERATION_ALTERNATIVES } from './regenerationLimits'
 
 export type TranscriptionStage =
@@ -60,9 +60,9 @@ export type RegenerationPreferences = Pick<
 }
 
 export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionSettings = {
-  language: 'auto',
+  language: 'english',
   task: 'transcribe',
-  modelId: TINY_MODEL_ID,
+  modelId: BASE_MODEL_ID,
   executionProvider: 'auto',
   chunkLengthSeconds: 29,
   strideLengthSeconds: 4,
@@ -104,13 +104,18 @@ export function normalizeTranscriptionSettings(
   fallback: TranscriptionSettings = DEFAULT_TRANSCRIPTION_SETTINGS,
 ): { settings: TranscriptionSettings; changed: boolean; reason?: string } {
   const record = isRecord(value) ? value : {}
+  const requestedExecutionProvider = isExecutionProvider(record.executionProvider)
+    ? record.executionProvider
+    : fallback.executionProvider
+  const usedLegacyCpuFallback = requestedExecutionProvider === 'cpu'
   const settings: TranscriptionSettings = {
     language: typeof record.language === 'string' ? record.language : fallback.language,
     task: record.task === 'translate' || record.task === 'transcribe' ? record.task : fallback.task,
     modelId: typeof record.modelId === 'string' ? record.modelId : fallback.modelId,
-    executionProvider: isExecutionProvider(record.executionProvider)
-      ? record.executionProvider
-      : fallback.executionProvider,
+    // ONNX Runtime Web exposes its CPU execution path as WASM. Older saved
+    // projects may still contain the legacy `cpu` value, so keep accepting it
+    // above and resolve it to the supported browser device here.
+    executionProvider: usedLegacyCpuFallback ? 'wasm' : requestedExecutionProvider,
     chunkLengthSeconds: clampNumber(record.chunkLengthSeconds, 5, 29, fallback.chunkLengthSeconds),
     strideLengthSeconds: finiteNumberOrDefault(record.strideLengthSeconds, fallback.strideLengthSeconds),
     dtype: record.dtype === 'q8' || record.dtype === 'fp32' || record.dtype === 'auto' ? record.dtype : fallback.dtype,
@@ -140,11 +145,17 @@ export function normalizeTranscriptionSettings(
     formatting: normalizeFormattingPreferences(record.formatting, fallback.formatting),
   }
   const resolved = resolveCompatibleModelId(settings)
+  const reasons = [
+    usedLegacyCpuFallback
+      ? 'The legacy CPU engine setting now uses the browser WASM engine.'
+      : undefined,
+    resolved.reason,
+  ].filter((reason): reason is string => Boolean(reason))
 
   return {
     settings: { ...settings, modelId: resolved.modelId },
-    changed: resolved.changed,
-    reason: resolved.reason,
+    changed: usedLegacyCpuFallback || resolved.changed,
+    reason: reasons.length ? reasons.join(' ') : undefined,
   }
 }
 
@@ -180,12 +191,14 @@ export type RegenerationResult = {
 
 export type WorkerStartRequest = {
   type: 'start'
+  jobId: string
   file: File
   settings: TranscriptionSettings
 }
 
 export type WorkerRegenerateRequest = {
   type: 'regenerate'
+  jobId: string
   file: File
   settings: TranscriptionSettings
   range: RegenerationRange
@@ -195,6 +208,7 @@ export type WorkerRegenerateRequest = {
 
 export type WorkerCancelRequest = {
   type: 'cancel'
+  jobId: string
 }
 
 export type WorkerRequest = WorkerStartRequest | WorkerRegenerateRequest | WorkerCancelRequest
@@ -214,9 +228,16 @@ export type WorkerRegenerationCompleteEvent = {
   result: RegenerationResult
 }
 
+export type WorkerPartialDelta = {
+  replaceFromIndex: number
+  totalSegments: number
+  segments: RawTranscriptionSegment[]
+  modelId: string
+}
+
 export type WorkerPartialEvent = {
   type: 'partial'
-  result: TranscriptionResult
+  delta: WorkerPartialDelta
 }
 
 export type WorkerErrorEvent = {
@@ -262,13 +283,17 @@ export type WorkerDiagnosticEvent = {
   event: DiagnosticEventInput
 }
 
-export type WorkerEvent =
+export type WorkerEventPayload =
   | WorkerProgressEvent
   | WorkerPartialEvent
   | WorkerCompleteEvent
   | WorkerRegenerationCompleteEvent
   | WorkerDiagnosticEvent
   | WorkerErrorEvent
+
+export type WorkerEvent = WorkerEventPayload & {
+  jobId: string
+}
 
 export function normalizeFormattingPreferences(
   value: unknown,

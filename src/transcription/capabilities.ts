@@ -34,7 +34,7 @@ export function getCapabilityWarnings(capabilities: BrowserCapabilities): string
   }
 
   if (!capabilities.webGpu) {
-    warnings.push('WebGPU is unavailable. The app will try a WebAssembly or CPU fallback.')
+    warnings.push('WebGPU is unavailable. The app will use its WebAssembly CPU fallback.')
   }
 
   if (!capabilities.indexedDb) {

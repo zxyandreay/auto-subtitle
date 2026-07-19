@@ -56,7 +56,7 @@ describe('TranscriptionPanel model choices', () => {
     expect(container.textContent).toContain('WebGPU and q8 are recommended')
     expect(container.textContent).toContain('This model is high-resource')
     expect(container.textContent).toContain('Full precision may require significantly more memory')
-    expect(container.textContent).toContain('CPU/WASM execution may be very slow')
+    expect(container.textContent).toContain('WASM CPU execution may be very slow')
     expect(button('Transcribe locally').disabled).toBe(false)
   })
 
@@ -64,6 +64,27 @@ describe('TranscriptionPanel model choices', () => {
     renderPanel({}, { stage: 'downloading-model', message: 'Reading model files from browser cache.' })
 
     expect(container.textContent).toContain('Loading speech model')
+  })
+
+  it('explains the installed engine language fallback instead of claiming automatic detection', () => {
+    renderPanel({ language: 'auto' })
+
+    expect(container.textContent).toContain('Auto (English fallback)')
+    expect(container.textContent).toContain('cannot detect Whisper language automatically')
+    expect(container.textContent).toContain('Auto uses English')
+  })
+
+  it('offers WASM as the browser CPU path without an unsupported CPU device option', () => {
+    renderPanel()
+
+    const engine = [...container.querySelectorAll('label')]
+      .find((label) => label.textContent?.trim().startsWith('Engine'))!
+      .querySelector('select')!
+    expect([...engine.options].map((item) => [item.value, item.textContent])).toEqual([
+      ['auto', 'Auto'],
+      ['webgpu', 'WebGPU'],
+      ['wasm', 'WASM (CPU)'],
+    ])
   })
 
   function renderPanel(

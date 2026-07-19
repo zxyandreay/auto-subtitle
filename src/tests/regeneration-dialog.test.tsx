@@ -68,6 +68,11 @@ describe('RegenerationDialog', () => {
     expect(select('Regeneration output').value).toBe('transcribe')
     expect(select('Regeneration model').options).toHaveLength(4)
     expect(select('Regeneration model').querySelector<HTMLOptionElement>(`option[value="${DISTIL_LARGE_V3_MODEL_ID}"]`)?.disabled).toBe(true)
+    expect([...select('Regeneration engine').options].map((option) => [option.value, option.textContent])).toEqual([
+      ['auto', 'Auto'],
+      ['webgpu', 'WebGPU'],
+      ['wasm', 'WASM (CPU)'],
+    ])
     expect(select('Regeneration timestamp detail').value).toBe('word')
     const alternativeCount = container.querySelector<HTMLSelectElement>('select[aria-label="Regeneration alternative count"]')
     expect(alternativeCount).not.toBeNull()

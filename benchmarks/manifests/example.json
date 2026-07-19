@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "name": "example-local-suite",
+  "description": "Replace the placeholder paths with local, legally usable benchmark material before running.",
+  "cases": [
+    {
+      "id": "example-english",
+      "media": "../fixtures.local/example.mp4",
+      "language": "en",
+      "textMetric": "wer",
+      "normalization": {
+        "unicodeForm": "NFKC",
+        "lowercase": true,
+        "stripPunctuation": true,
+        "collapseWhitespace": true,
+        "cerIgnoreWhitespace": true
+      },
+      "constraints": {
+        "maxCps": 21,
+        "maxLineLength": 42,
+        "maximumLines": 2,
+        "minimumSpeechOverlapRatio": 0.5
+      },
+      "settings": {
+        "language": "english",
+        "task": "transcribe",
+        "modelId": "onnx-community/whisper-base",
+        "executionProvider": "wasm",
+        "dtype": "q8",
+        "useWordTimestamps": true
+      },
+      "reference": {
+        "transcriptFile": "../fixtures.local/example.reference.txt",
+        "wordsFile": "../fixtures.local/example.reference.words.json",
+        "subtitlesFile": "../fixtures.local/example.reference.srt",
+        "speechIntervalsFile": "../fixtures.local/example.reference.speech.json"
+      }
+    }
+  ]
+}

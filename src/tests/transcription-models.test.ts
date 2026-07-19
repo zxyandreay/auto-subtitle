@@ -147,7 +147,7 @@ describe('speech model registry', () => {
     ).toEqual([
       'This model is high-resource. WebGPU is recommended. It may be slow or fail on this device.',
       'Full precision may require significantly more memory.',
-      'CPU/WASM execution may be very slow for this model.',
+      'WASM CPU execution may be very slow for this model.',
     ])
   })
 

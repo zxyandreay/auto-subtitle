@@ -41,6 +41,7 @@ import { createInitialRegenerationRange, replaceEntriesInRange } from './subtitl
 import { applyTheme, loadThemePreference, saveThemePreference, type ThemePreference } from './theme'
 import { detectBrowserCapabilities, getCapabilityWarnings } from './transcription/capabilities'
 import {
+  disposeBrowserWhisperWorker,
   startBrowserWhisperRegeneration,
   startBrowserWhisperTranscription,
   type RegenerationJob,
@@ -243,6 +244,7 @@ function App() {
       }
       jobRef.current?.cancel()
       regenerationJobRef.current?.cancel()
+      disposeBrowserWhisperWorker()
     }
   }, [video?.objectUrl])
 
@@ -446,6 +448,7 @@ function App() {
       videoDuration: number | undefined,
       final: boolean,
     ) => {
+      const formattingStartedAt = performance.now()
       const generatedEntries = formatTranscriptionSegments(
         result.segments,
         transcriptionSettings.formatting,
@@ -459,6 +462,7 @@ function App() {
       const nextEntries = livePreviewState
         ? mergeLiveTranscriptionPreview(subtitlesRef.current, generatedEntries, livePreviewState)
         : generatedEntries
+      const formattingDurationMs = Math.round((performance.now() - formattingStartedAt) * 100) / 100
 
       subtitlesRef.current = nextEntries
       if (final) {
@@ -473,10 +477,24 @@ function App() {
             mergedEditorEntries: summarizeSegments(nextEntries),
             formatting: transcriptionSettings.formatting,
             videoDuration,
+            formattingDurationMs,
+            approximateJsHeapBytes: readApproximateJsHeapBytes(),
           },
         })
         replace(nextEntries)
       } else {
+        recordDiagnosticEvent({
+          source: 'app',
+          category: 'formatted-transcription-preview',
+          message: 'Formatted one incremental transcription preview update.',
+          data: {
+            workerSegmentCount: result.segments.length,
+            formattedEntryCount: generatedEntries.length,
+            mergedEntryCount: nextEntries.length,
+            formattingDurationMs,
+            approximateJsHeapBytes: readApproximateJsHeapBytes(),
+          },
+        })
         preview(nextEntries)
       }
 
@@ -490,6 +508,7 @@ function App() {
       return
     }
 
+    const transcriptionStartedAt = performance.now()
     const resolvedModel = resolveCompatibleModelId(settings)
     const transcriptionSettings = { ...settings, modelId: resolvedModel.modelId }
     if (resolvedModel.changed) {
@@ -540,7 +559,16 @@ function App() {
         source: 'app',
         category: 'transcription-completed',
         message: 'Full transcription completed and settled in the editor.',
-        data: { modelId: result.modelId, subtitleCount: nextEntries.length },
+        data: {
+          modelId: result.modelId,
+          subtitleCount: nextEntries.length,
+          totalDurationMs: Math.round((performance.now() - transcriptionStartedAt) * 100) / 100,
+          audioDurationSeconds: videoDuration,
+          realTimeFactor: videoDuration
+            ? Math.round(((performance.now() - transcriptionStartedAt) / 1_000 / videoDuration) * 10_000) / 10_000
+            : undefined,
+          approximateJsHeapBytes: readApproximateJsHeapBytes(),
+        },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -563,7 +591,11 @@ function App() {
         category: cancelled ? 'transcription-cancelled' : 'transcription-failed',
         message: cancelled ? 'Full transcription was cancelled.' : 'Full transcription failed.',
         level: cancelled ? 'warning' : 'error',
-        data: { error: serializeAppError(error) },
+        data: {
+          error: serializeAppError(error),
+          totalDurationMs: Math.round((performance.now() - transcriptionStartedAt) * 100) / 100,
+          approximateJsHeapBytes: readApproximateJsHeapBytes(),
+        },
       })
     } finally {
       setBusy(false)
@@ -1395,6 +1427,13 @@ function serializeAppError(error: unknown): { name?: string; message: string; st
   return error instanceof Error
     ? { name: error.name, message: error.message, stack: error.stack }
     : { message: String(error) }
+}
+
+function readApproximateJsHeapBytes(): number | undefined {
+  const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory
+  return typeof memory?.usedJSHeapSize === 'number' && Number.isFinite(memory.usedJSHeapSize)
+    ? memory.usedJSHeapSize
+    : undefined
 }
 
 export default App

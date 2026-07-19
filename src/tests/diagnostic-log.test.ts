@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { summarizeAsrResult, summarizeSegments } from '../diagnostics/asrDiagnostics'
 import { DiagnosticLog } from '../diagnostics/diagnosticLog'
 
@@ -31,6 +31,10 @@ class MemoryStorage implements Storage {
 }
 
 describe('diagnostic log', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('persists structured events and restores them in sequence', () => {
     const storage = new MemoryStorage()
     const now = () => new Date('2026-06-28T08:00:00.000Z')
@@ -38,6 +42,7 @@ describe('diagnostic log', () => {
 
     first.record({ source: 'app', category: 'job', message: 'Started', data: { model: 'tiny' } })
     first.record({ source: 'transcription-worker', category: 'window', message: 'Normalized', jobId: 'job-1' })
+    first.flush()
 
     const restored = new DiagnosticLog(storage, { now, sessionId: 'session-two' })
     expect(restored.getEvents()).toMatchObject([
@@ -80,6 +85,23 @@ describe('diagnostic log', () => {
 
     expect(() => log.record({ source: 'app', category: 'safe', message: 'Still recorded' })).not.toThrow()
     expect(log.getEvents()).toHaveLength(1)
+  })
+
+  it('coalesces rapid diagnostic events into one deferred storage write', () => {
+    vi.useFakeTimers()
+    const storage = new MemoryStorage()
+    const write = vi.spyOn(storage, 'setItem')
+    const log = new DiagnosticLog(storage, { sessionId: 'debounced', persistDelayMs: 50 })
+
+    log.record({ source: 'app', category: 'one', message: 'one' })
+    log.record({ source: 'app', category: 'two', message: 'two' })
+    log.record({ source: 'app', category: 'three', message: 'three' })
+
+    expect(write).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(49)
+    expect(write).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(write).toHaveBeenCalledOnce()
   })
 
   it('creates a versioned report with environment and reproduction context', () => {
