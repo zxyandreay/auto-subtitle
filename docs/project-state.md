@@ -8,7 +8,7 @@ Auto Subtitle is a local AI subtitle generator and editor for creating SRT, WebV
 
 Auto Subtitle is positioned as an end-to-end local subtitle workspace rather than a transcription demo. Its core journey is **video in, local AI draft, human review and timing edits, subtitle or transcript file out**. Privacy is part of that workflow: media processing stays in the browser while users retain direct control over every generated cue before export.
 
-The user-facing installation and usage path is documented at the top of the [README](../README.md). The committed [editor screenshot](images/auto-subtitle-editor.png) shows the video preview, caption overlay, magnetic timeline, and selected-cue editor working together.
+The quick-start path is documented in the [README](../README.md), and detailed operating notes live in the [User Guide](USER_GUIDE.md). The committed [editor screenshot](images/auto-subtitle-editor.png) shows the video preview, caption overlay, magnetic timeline, and selected-cue editor working together.
 
 ## Current Snapshot
 
@@ -117,12 +117,20 @@ The core design is a single-page app with a worker-backed transcription provider
 
 ```text
 .
+|-- benchmarks/
+|   |-- README.md
+|   |-- fixtures.local/
+|   |-- manifests/
+|   `-- results/
 |-- docs/
 |   |-- images/
 |   |   `-- auto-subtitle-editor.png
-|   `-- project-state.md
+|   |-- USER_GUIDE.md
+|   |-- project-state.md
+|   `-- transcription-accuracy-performance-audit.md
 |-- local-launch.bat
 |-- scripts/
+|   |-- benchmark.mjs
 |   `-- local-launch.ps1
 |-- src/
 |   |-- App.tsx
@@ -1513,7 +1521,7 @@ Other natural extension points:
 3. Waveform-based timing adjustment.
 4. More import/export formats.
 5. More advanced subtitle timing controls for reviewing generated captions.
-6. Screenshot documentation in the README.
+6. Additional annotated screenshots or short video examples.
 
 ## End-To-End Summary
 

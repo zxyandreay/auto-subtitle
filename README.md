@@ -1,302 +1,165 @@
 # Auto Subtitle
 
-**A local AI subtitle generator and editor for turning video into SRT, WebVTT, and transcript files.**
+**A local-first browser workspace for generating, reviewing, and exporting subtitles from video.**
 
-Auto Subtitle runs Whisper speech recognition and FFmpeg directly in your browser. Generate a subtitle draft from a local video, refine its text and timing in the built-in player and timeline editor, then export `.srt`, `.vtt`, or `.txt` without uploading your media to a transcription service. No account, API key, paid transcription API, backend, analytics, or tracking is required.
+Auto Subtitle is for creators, editors, and developers who want a private subtitle workflow without a cloud transcription account. It runs FFmpeg.wasm and Transformers.js Whisper models in the browser, turns local videos into editable subtitle cues, and keeps timing review, cleanup, range regeneration, diagnostics, and export in one interface.
 
-## Installation
+[User Guide](./docs/USER_GUIDE.md) | [Project State](./docs/project-state.md) | [Benchmark Guide](./benchmarks/README.md) | [Audit](./docs/transcription-accuracy-performance-audit.md) | [License](./LICENSE)
 
-### System Requirements
+![Auto Subtitle local transcription and timeline editor](./docs/images/auto-subtitle-editor.png)
 
-Software requirements:
+## Highlights
 
-- A 64-bit Windows, macOS, or Linux system capable of running a current desktop browser
-- [Node.js](https://nodejs.org/) `20.19+` or `22.12+` with npm, as required by Vite 8
-- Current stable Chrome or Edge recommended; the browser must support WebAssembly, Web Workers, and IndexedDB
-- Network access for the initial dependency install and the first download of each Whisper model
-- A display resolution of at least 1280×720 is recommended for the full editor workspace
+- Generate local Whisper subtitle drafts from MP4, WebM, MOV, or MKV videos.
+- Review and edit subtitles against the source video with a player, caption overlay, magnetic timeline, and row editor.
+- Import SRT, WebVTT, or Auto Subtitle project JSON files.
+- Export SRT, WebVTT, TXT transcripts, or `.auto-subtitle.json` project files.
+- Regenerate selected subtitle ranges up to 29 seconds with multiple local alternatives.
+- Autosave subtitles, settings, formatting, and video metadata in browser IndexedDB.
+- Export bounded debug logs for local troubleshooting without storing audio or video bytes.
+- Score captured local runs with a deterministic benchmark harness and gitignored fixture data.
 
-Suggested hardware profiles:
+## How It Works
 
-| | Minimum | Recommended | High-resource models |
-| --- | --- | --- | --- |
-| Best suited for | Tiny model and short clips | Base model and typical HD videos | Large v3 Turbo or Distil Large v3 |
-| CPU | 64-bit, 4 cores | Modern 64-bit, 6+ cores | Modern 64-bit, 8+ cores |
-| System memory | 8 GB RAM | 16 GB RAM | 32 GB RAM |
-| Graphics | No dedicated GPU required; use WASM/CPU | WebGPU-capable integrated or dedicated GPU | WebGPU-capable GPU with 8 GB+ VRAM, or a system with at least 32 GB of unified memory |
-| Free storage | 2 GB plus space for the source video | 5 GB plus space for source videos | 10 GB plus space for source videos |
+1. Select or drop a local video file.
+2. Choose the spoken language, output task, Whisper model, browser engine, and precision.
+3. The worker extracts mono 16 kHz audio with FFmpeg.wasm and runs Whisper through Transformers.js.
+4. Review, split, merge, retime, format, or regenerate cues in the editor.
+5. Export subtitles, a transcript, a project JSON file, or a debug report.
 
-These are practical planning targets, not hard compatibility limits. The app keeps the video, FFmpeg working data, extracted audio, and model data in browser memory during processing, so long or high-bitrate videos can need substantially more RAM. Use `q8` precision for the large models; `fp32` and CPU/WASM execution consume more memory or can be much slower. Firefox and Safari may work, but codec, WebGPU, WebAssembly, and media-decoding support varies.
+## Tech Stack
 
-Clone the repository:
+- **Frontend:** React 19
+- **Language:** TypeScript
+- **Media and speech:** FFmpeg.wasm, Transformers.js, Whisper ONNX models
+- **Data / Backend:** No application backend; IndexedDB autosave and localStorage preferences/diagnostics
+- **Tooling:** Vite 8, Vitest, oxlint, npm, local benchmark scripts
+- **Deployment:** Local Vite app; no hosted deployment configuration is committed
+
+## Getting Started
+
+### Requirements
+
+- 64-bit Windows, macOS, or Linux with a current desktop browser
+- Node.js `20.19+` or `22.12+` with npm, matching Vite 8's engine requirement
+- Browser support for WebAssembly, Web Workers, and IndexedDB
+- Network access for dependency installation and the first download of each selected Whisper model
+- Enough memory for browser media processing; 8 GB RAM is a practical minimum, and 16 GB or more is recommended for typical use
+
+Chrome or Edge are recommended, especially for WebGPU. Firefox and Safari may work, but codec, WebGPU, WebAssembly, and media-decoding support vary by browser and device.
+
+### Install and Run
 
 ```bash
 git clone https://github.com/zxyandreay/auto-subtitle.git
 cd auto-subtitle
-```
-
-On Windows, double-click `local-launch.bat`. The launcher installs dependencies when needed, starts the local app at `http://127.0.0.1:5173`, and opens it in your default browser. Keep its terminal open while using the app; press Enter there to stop the server.
-
-For a manual setup on any supported platform:
-
-```bash
 npm ci
 npm run dev
 ```
 
-Then open `http://127.0.0.1:5173` if your browser does not open it automatically.
+Open `http://127.0.0.1:5173` if the browser does not open automatically.
 
-## How To Use
+### Windows Quick Launch
 
-1. Choose or drop an MP4, WebM, MOV, or MKV video. Codec support depends on your browser and FFmpeg.wasm.
-2. In **Local transcription**, choose the spoken language, output language, Whisper model, processing engine, and precision. The first run downloads the selected model; later runs use the browser cache when available.
-3. Select **Transcribe locally** and keep the page open while the app extracts audio and generates editable subtitle cues.
-4. Review the result in the video preview, magnetic timeline, and subtitle editor. Edit text or timestamps, split or merge cues, adjust formatting, or regenerate a selected range locally.
-5. Use the toolbar to export **SRT**, **VTT**, or a **TXT** transcript. Enable **Include timestamps in TXT export** when you want a timestamped transcript. You can also save an Auto Subtitle JSON project and restore it later.
+Double-click `local-launch.bat`. The launcher installs dependencies when needed, starts the local app at `http://127.0.0.1:5173`, and opens it in your default browser. Keep the terminal open while using the app, then press Enter there to stop the server.
 
-Generated subtitles are a draft: review names, punctuation, wording, and timing before publishing.
+## Usage
 
-## Screenshot
+1. Choose or drop an MP4, WebM, MOV, or MKV video.
+2. In **Local transcription**, choose the language, output, model, engine, and precision.
+3. Select **Transcribe locally** and keep the page open while audio extraction and transcription run.
+4. Review the generated draft in the video preview, timeline, and subtitle editor.
+5. Export SRT, WebVTT, TXT, or project JSON from the toolbar.
 
-![Auto Subtitle local AI transcription and timeline editor](docs/images/auto-subtitle-editor.png)
+Generated subtitles are a draft. Review names, punctuation, wording, and timing before publishing. See the [User Guide](./docs/USER_GUIDE.md) for model notes, regeneration steps, keyboard shortcuts, import/export details, and troubleshooting.
 
-_Preview, time, and edit generated subtitles against the source video before exporting._
+## Available Scripts
 
-## Features
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the development server on `127.0.0.1:5173` |
+| `npm run typecheck` | Run TypeScript project checks |
+| `npm run lint` | Run oxlint |
+| `npm test` | Run the Vitest test suite |
+| `npm run build` | Typecheck and create a production build |
+| `npm run preview` | Preview the production build on `127.0.0.1:4173` |
+| `npm run benchmark:self-test` | Validate benchmark scorer behavior with synthetic data |
+| `npm run benchmark` | Score a captured local run from a manifest and run descriptor |
+| `npm run benchmark:compare` | Compare two benchmark reports without labeling a winner |
 
-- Page-wide drag-and-drop video import with a responsive supported-file overlay, local privacy messaging, file metadata, size warnings, duration warnings, and validation.
-- Interactive video workspace with play/pause, seek, volume, subtitle visibility, active overlay, fullscreen editing, and a continuously zoomable magnetic subtitle timeline with click/drag seeking and precise playhead splitting.
-- Real browser-local transcription attempt using FFmpeg.wasm for audio extraction and Transformers.js Whisper models for speech recognition.
-- Worker-based transcription lifecycle with meaningful stages, model download progress when available, live editor previews, visible failures, and cancellation.
-- Browser-local diagnostic logging with a bounded persisted history and an exportable JSON report for investigating intermittent transcription behavior.
-- Speech-aware local timing with lightweight VAD, silence-preferred 29-second windows, coverage-gap recovery, speech-boundary snapping, word-timestamp fallback, and conservative overlap-word reconciliation.
-- Deterministic generated-caption cleanup for readable two-line subtitles, word-timestamp timing, reading-speed protection, smoother cuts, short-gap chaining, and overlap-window duplicate reduction.
-- Synchronized player and list editors with playhead-accurate insertion, text and timestamp editing, timeline dragging, validation, search, delete, split, merge, move, range playback, undo, and redo.
-- Local subtitle regeneration for editable ranges up to 29 seconds, with the original plus one to five requested Whisper alternatives, temporary video preview, cancellation, and one-step undoable replacement.
-- SRT and WebVTT import/export, transcript TXT export, and Auto Subtitle JSON project export/import.
-- IndexedDB autosave for subtitles, settings, formatting, project metadata, and video metadata. The original video is not autosaved.
-- Light, dark, and system themes.
-- Crisp compact local/system typography with lighter UI emphasis, tabular timing figures, and a deliberately bold video-caption overlay.
-- Caption-symbol branding shared by the app header and SVG browser-tab icon, without letter-based marks.
-- Keyboard shortcuts for playback, seeking, subtitle timeline nudging and splitting, undo, and redo.
+## Data, Privacy, and Security
 
-## Privacy
+- **Data storage:** Autosave stores project data in IndexedDB under `auto-subtitle`; theme and diagnostic history use localStorage.
+- **Network use:** npm downloads dependencies during setup. Transformers.js can download selected model files from the model host on first use and then use the browser cache when available.
+- **Media handling:** The selected video is kept as a browser `File` plus a temporary object URL. The original video is not copied into the repository, `public/`, IndexedDB, or project JSON exports.
+- **Processing:** FFmpeg.wasm and Transformers.js run in the browser. Extracted audio is held in browser/worker memory during processing.
+- **Authentication:** There is no account system, backend database service, analytics, tracking, Supabase, Firebase, paid transcription API, or external AI API integration.
+- **Diagnostics:** Debug logs may include file metadata, settings, recognized text, timing decisions, worker-stage measurements, errors, and generated subtitle entries. They do not include audio or video bytes.
 
-Auto Subtitle is designed to keep media local:
+When the app is started through `local-launch.bat`, progress and generated caption text are also posted to the local Vite dev server so the launcher terminal can show live progress. That endpoint is served on `127.0.0.1`.
 
-- The selected video is not copied into the repository or `public/`.
-- The app creates a temporary object URL and revokes it when the video is replaced, removed, or the app unmounts.
-- Extracted audio is processed inside browser memory by FFmpeg.wasm.
-- Transcription runs in a Web Worker through Transformers.js.
-- No analytics, tracking, authentication, Supabase, Firebase, or external AI API calls are included.
-
-Model files are downloaded by Transformers.js on first use and cached by the browser when supported. That download goes to the model host, but your video and extracted audio are not uploaded by this app.
-
-When the app is started through `local-launch.bat`, transcription progress and generated caption text are also sent to the local Vite dev server so the launcher terminal can show live progress. This stays on `127.0.0.1`.
-
-Diagnostic events are stored only in this browser's local storage. They may include file metadata, transcription settings, recognized text, speech regions, window timing, coverage/repair decisions, errors, and final subtitle entries, but never audio or video bytes. Use the **Debug log** button in the top toolbar after reproducing a problem to export a JSON report for investigation. The history is bounded to the most recent 1,000 events and approximately 2 MB; oversized text is sampled with its original length retained.
-
-Diagnostic persistence is coalesced during busy jobs instead of rewriting the complete history for every event. Reports also include measured worker stage durations, cold/warm model state, approximate worker-message counts and JSON sizes, final formatting time, total job time, and Chromium heap samples when the browser exposes them. These are diagnostic observations, not guaranteed whole-process or GPU-memory measurements.
-
-## Development Commands
-
-```bash
-npm run dev
-npm run typecheck
-npm run lint
-npm test
-npm run build
-npm run preview
-npm run benchmark:self-test
-```
-
-The local benchmark scorer is documented in [`benchmarks/README.md`](benchmarks/README.md). It compares locally captured project/debug artifacts with user-supplied, gitignored references; no benchmark media or fabricated accuracy result is committed.
-
-## Transcription Models
-
-| Model | Best for | Languages | Translation | Resource level |
-| --- | --- | --- | --- | --- |
-| Tiny (`onnx-community/whisper-tiny`) | Fast tests and lower-resource devices | Multilingual | Yes | Low |
-| Base (`onnx-community/whisper-base`) | Balanced default use | Multilingual | Yes | Medium |
-| Large v3 Turbo (`onnx-community/whisper-large-v3-turbo`) | High-accuracy transcription | Multilingual | No | High |
-| Distil Large v3 (`distil-whisper/distil-large-v3`) | Fast, high-quality English transcription | English only | No | High |
-
-All four models use the same local Transformers.js automatic speech recognition pipeline for full transcription, live partial captions, final results, and range regeneration. Large v3 Turbo and Distil Large v3 are high-resource models; WebGPU with `q8` precision is recommended, while CPU/WASM or `fp32` can be much slower or require substantially more memory.
-
-Distil Large v3 is enabled only for an explicitly selected English language and the transcription task. Large v3 Turbo is transcription-only. If a language or task change makes the selected model incompatible, Auto Subtitle switches to a compatible multilingual model and shows a non-blocking notice. Tiny and Base remain available for both transcription and translation.
-
-The first use of a model can download its files from Hugging Face. Transformers.js uses the browser cache when supported, so later jobs can read unchanged files locally instead of downloading them again. Accuracy still depends on speech clarity, noise, language, accents, overlapping speakers, device performance, browser support, model choice, and subtitle formatting preferences. Generated subtitles should be manually reviewed.
-
-## Browser Processing Workflow
-
-1. The user selects a local video file.
-2. The app creates a temporary object URL for preview.
-3. A Web Worker loads FFmpeg.wasm and Transformers.js.
-4. FFmpeg.wasm extracts mono 16 kHz PCM WAV audio and pads delayed audio-track starts from media time zero.
-5. The worker analyzes the decoded samples with rolling-RMS frames, an adapting local noise floor, separate speech-on/off thresholds, hysteresis, and isolated-frame smoothing. It retains both raw detector boundaries and separately padded model-context regions.
-6. Detected speech regions are packed into windows near 26 seconds. Long regions search frame-level activity around the ideal split and choose a nearby pause or lowest-activity boundary deterministically. Context overlap is normally 1.5 seconds, and every model input is capped at 29 seconds. If speech analysis fails or yields no usable regions, contiguous fixed windows use a 4-second overlap and the same 29-second ceiling.
-7. The compatibility resolver validates the selected model, language, and task, then Transformers.js loads the resolved model from browser cache or the model repository. The ASR pipeline requests word timestamps by default; if the export does not support them, the current call is retried with segment timestamps and later windows stay in segment mode.
-8. The successful request's explicit timestamp mode is passed into normalization. Word mode preserves one or more valid word chunks; segment mode never guesses from chunk count or shape. Chunks are mapped from exact sample-slice offsets back to the full timeline.
-9. A bounded, time-aware suffix/prefix alignment compares a short sequence on both sides of each window boundary. It removes supported duplicate overlap text, retains unique suffixes, preserves usable word timing, and supports character fallback for common no-whitespace scripts.
-10. Raw speech regions are compared with confidence-, word-, text-representation-, and speech-overlap-aware coverage evidence. Likely uncovered speech can trigger one bounded repair pass of at most 20 model-safe local windows.
-11. Text-only ASR output becomes a low-confidence cue only when exactly one raw speech span supplies unambiguous timing. Multi-span, punctuation-only, silence-only, or unreadably dense fallback output is suppressed rather than stretched over silence.
-12. Timing refinement uses usable word timestamps first and raw VAD boundaries second. Display padding is applied once; rapid dialogue may use less than the configured cosmetic gap rather than cutting spoken-word evidence.
-13. The worker sends suffix deltas instead of retransmitting the full accumulated result. The provider validates and reconstructs snapshots, while stable live-preview IDs preserve user edits and deletions when repair inserts an earlier cue.
-14. The readability formatter prefers timestamped words, punctuation and phrase boundaries, enforces duration/CPS/line constraints where timing evidence permits, and never discards queued transcript text at its split-work bound.
-15. The user reviews, edits, and exports SRT, VTT, TXT, or JSON locally.
-
-The 29-second ceiling leaves safety margin below Whisper's fixed input context. The overlap behavior follows the chunk and stride concepts exposed by the [Transformers.js ASR pipeline](https://huggingface.co/docs/transformers.js/v3.0.0/api/pipelines) and [Whisper documentation](https://huggingface.co/docs/transformers/model_doc/whisper).
-
-## Accurate-local Defaults
-
-New projects default to the balanced Base model, explicit English, automatic supported-engine selection, `q8` model weights, word timestamps with segment fallback, VAD enabled, a 29-second maximum input, 26-second speech-aware target windows, 1.5-second speech-aware overlap, and 4-second fixed-window fallback overlap. Existing saved model selections remain compatible. The installed Transformers.js 4.2 Whisper export does not independently detect language for each window; legacy `auto` language settings therefore resolve to English with a diagnostic warning instead of silently pretending detection occurred. Choose the spoken language explicitly for non-English media.
-
-Generated formatting defaults are a 0.08-second lead-in, 0.18-second tail, 1.1-to-6-second cue duration, 0.08-second inter-cue gap, 42 characters per line, 84 per cue, a 20 CPS target with a 21 CPS hard limit, and safe closure of gaps below 0.5 seconds.
-
-## Regenerating A Subtitle Range
-
-1. Select a video and create, import, or generate subtitles.
-2. Select a cue and use **Regenerate selected subtitle** in the player subtitle editor. It creates an adjustable timeline range from that cue. The main subtitle editor's row-level Regenerate action remains available as a direct dialog entry point.
-3. Drag the amber range to move it, drag either edge to resize it, or use the timestamp fields for exact values. A range can cover one or many cues but cannot exceed 29 seconds.
-4. Use **Preview range** to play the current section once. The range remains selected when playback stops.
-5. Open **Configure regeneration** and choose the language, output, model, engine, precision, timestamp detail, and **Alternatives** count for this run. You can request one to five alternatives; the default is three. These choices persist for later regenerations in the current browser session without changing full-transcription settings.
-6. Generate alternatives. The reusable worker extracts the range once, reuses a compatible low-resource model when it is already warm, or loads the selected model once, then performs up to five bounded sequential decoding passes locally. It stops when it finds the requested number of distinct results.
-7. Compare the unchanged current cues with the generated alternatives, then preview any choice against the video. Empty or duplicate decoding results can produce fewer alternatives than requested.
-8. Apply an alternative to replace all overlapping cues as one undoable edit, or keep the original unchanged.
-
-Range movement, resizing, and keyboard edits use the timeline's magnetic cue-boundary, playhead, video-boundary, and half-second-grid snapping. Hold Alt/Option to bypass snapping. Regeneration inherits the current caption-formatting preferences and freezes all settings when generation starts. Full transcription and regeneration cannot run at the same time, avoiding concurrent model and FFmpeg memory pressure.
-
-The regeneration dialog remains available while the media workspace is fullscreen. It is mounted inside the active fullscreen workspace so the browser can display it without forcing fullscreen to close.
-
-## Generated Caption Readability
-
-Generated captions use a deterministic, local-only post-processing pass informed by public subtitle guidance from Netflix, BBC, and DCMP:
-
-- captions target about 20 characters per second, enforce a 21 CPS hard limit during timing decisions, and use the app's readable minimum duration when timing room allows
-- very short generated captions are extended before they are split or exported
-- adjacent abrupt captions can be merged when the combined caption remains within the existing line, duration, and reading-speed limits
-- gaps below about half a second are chained by extending the previous caption when safe, reducing visible flicker without pulling the next caption ahead of its words
-- word-timed cuts are penalized when they would create a very short phrase flash, even if the phrase ends in punctuation
-
-## Import And Export
-
-Supported imports:
-
-- `.srt`
-- `.vtt`
-- `.json` Auto Subtitle project files
-
-Supported exports:
-
-- `.srt` SubRip using `HH:MM:SS,mmm`
-- `.vtt` WebVTT using `HH:MM:SS.mmm`
-- `.txt` readable transcript, with optional timestamps
-- `.auto-subtitle.json` project data without the original video
-
-When importing project JSON, the app validates the schema, normalizes saved model compatibility, and asks you to select the original video again. Saved video name and duration are used as comparison hints only. Existing projects that store Tiny or Base continue to restore unchanged; unknown model IDs fall back to Base.
-
-## Keyboard Shortcuts
-
-- Space: play or pause when focus is not in an input
-- Arrow Left: seek backward 5 seconds
-- Arrow Right: seek forward 5 seconds
-- Ctrl+Z: undo subtitle edits
-- Ctrl+Shift+Z or Ctrl+Y: redo subtitle edits
-- Ctrl+K or Cmd+K: split the selected subtitle at the playhead when both halves will be at least 0.1 seconds
-- Enter on a subtitle row: seek to that subtitle start
-- Enter or Space on a timeline cue: select the cue and seek to its start
-- Arrow Left or Arrow Right on a timeline cue: move it by 0.1 seconds
-- Arrow Left or Arrow Right on a focused timeline handle: adjust that start or end boundary by 0.1 seconds
-- Hold Shift with a timeline Arrow key: use a 0.5-second adjustment
-- Arrow Left or Arrow Right on the focused timeline playhead: seek by 0.1 seconds; Home/End seek to timeline boundaries
-- Hold Alt/Option while clicking the empty timeline or dragging a cue edge, cue body, or playhead: temporarily disable magnetic snapping
-- Arrow Left or Arrow Right on a regeneration range or handle: move or resize it by 0.1 seconds
-- Hold Shift with a regeneration range Arrow key: move or resize it by 0.5 seconds; hold Alt/Option to bypass snapping
-
-## Player Subtitle Editing
-
-The video player includes a horizontally scrollable subtitle timeline with continuous 12–96 pixels-per-second zoom, dedicated Undo/Redo controls, an enabled-by-default Magnet toggle, and an enabled-by-default playhead-follow toggle. The Magnet button controls locking for cue movement, start/end handles, playhead movement, and empty-track clicks; Alt/Option remains a temporary bypass while Magnet is enabled. Cue blocks show their text, timing, active/selected state, and existing validation severity. Clicking a cue selects it and seeks to its start. Clicking empty space in the timeline—including the bands above or below cue cards—seeks magnetically to that point when Magnet is enabled. Drag the cue body to preserve its duration while moving it, or drag either handle to change its start or end. A 10-pixel magnetic threshold snaps either moving edge to any other subtitle boundary, the media playhead, timeline start, known video end, or a lower-priority half-second grid. A guide and target accent show the active snap. Overlaps remain visible as validation errors instead of being silently removed.
-
-The timeline playhead is directly draggable and keyboard accessible. It seeks the media responsively, snaps to subtitle boundaries, shows a timestamp while dragging, works in fullscreen at every zoom level, and never adds subtitle undo history. Cue timing previews remain local and commit once on pointer release, so one completed gesture is one undo step.
-
-Timeline regeneration mode adds a temporary amber selection above the cue track. Its body slides the selected section without changing its duration, its handles resize either boundary, and its toolbar actions preview, configure, or cancel the selection. Range edits are temporary UI state: they do not change subtitle history or project autosave.
-
-Select a cue, place the playhead at least 0.1 seconds inside each edge, then use the timeline Split button or Ctrl/Cmd+K to cut it at the exact millisecond-rounded playhead time. The text uses the same natural split as the main editor, the second half remains selected, and the entire cut is one undoable edit.
-
-Selecting a cue opens the player subtitle editor for text, timestamp, navigation, range playback, duplication, and deletion. **Add subtitle** pauses playback and inserts a focused cue at the exact playhead. Player changes and the main subtitle list share the same undoable subtitle state and synchronize selection immediately. The main list editor's optional Auto-scroll control starts disabled.
-
-Fullscreen targets the whole editing workspace rather than only the video, keeping the timeline, editor, add/delete actions, playback controls, volume, and subtitle visibility available. Tablet layouts stack these tools; narrow layouts use a horizontally scrolling timeline and a collapsible sticky editor panel with touch-sized actions.
-
-Video files can also be dropped anywhere over the app. The page-level overlay accepts the first valid MP4, WebM, MOV, or MKV from a mixed drop, prevents browser navigation, ignores internal/non-file drags, and keeps the file in the existing browser-only object URL flow.
-
-## Architecture
+## Project Structure
 
 ```text
-src/
-  components/       React UI panels and controls
-  hooks/            undoable subtitle history
-  media/            video file validation
-  project/          IndexedDB autosave
-  subtitles/        formatting, import, export, validation
-  tests/            Vitest coverage for subtitle logic
-  transcription/    provider types, capabilities, worker bridge
-  utils/            IDs, downloads, timestamp helpers
-  workers/          FFmpeg.wasm + Transformers.js transcription worker
+auto-subtitle/
+|-- benchmarks/           Local benchmark harness docs, manifests, fixtures, and results
+|-- docs/                 Extended documentation, audit notes, and images
+|-- public/               Favicon and static browser assets
+|-- scripts/              Local launcher and benchmark scripts
+|-- src/
+|   |-- components/       React UI panels and controls
+|   |-- diagnostics/      Browser-local debug log support
+|   |-- media/            Video validation
+|   |-- project/          IndexedDB autosave
+|   |-- subtitles/        Import, export, validation, editing, formatting
+|   |-- tests/            Vitest tests
+|   |-- transcription/    Model registry, settings, timing, repair, provider bridge
+|   `-- workers/          FFmpeg.wasm and Transformers.js worker
+|-- package.json          Scripts and dependencies
+|-- vite.config.ts        Vite, Vitest, and local terminal progress config
+`-- README.md
 ```
 
-The transcription provider boundary is intentionally small so another local engine can be added later without rewriting the editor.
+## Documentation
 
-## Known Limitations
+- [User Guide](./docs/USER_GUIDE.md) covers day-to-day use, model choices, regeneration, shortcuts, and troubleshooting.
+- [Project State](./docs/project-state.md) documents architecture, state flow, transcription internals, storage, and test coverage.
+- [Transcription Accuracy and Performance Audit](./docs/transcription-accuracy-performance-audit.md) records the July 2026 audit scope, confirmed changes, and remaining real-media validation needs.
+- [Benchmark Guide](./benchmarks/README.md) explains how to score local captured runs with gitignored fixtures and references.
 
-- Browser transcription is demanding. Large videos can require significant memory and time.
-- Large v3 Turbo and Distil Large v3 can exceed device memory on lower-resource browsers. WebGPU and `q8` are recommended, but the app does not block CPU/WASM use.
-- The current FFmpeg.wasm path writes the selected file into FFmpeg's in-memory filesystem before extraction. That is not true streaming for arbitrary containers.
-- Auto Subtitle performs explicit speech-aware windowing, but the complete decoded `Float32Array` is still held in worker memory.
-- Codec support depends on the browser and FFmpeg.wasm build.
-- WebGPU is optional. The supported CPU execution path is WebAssembly (`wasm`); legacy saved `cpu` settings are normalized to it, and speed can be much slower than WebGPU.
-- Word-level timestamps depend on model support and may fall back to coarser chunks.
-- Speech activity analysis can be imperfect with music, sustained background noise, overlapping speakers, or very quiet speech. A missed VAD region cannot trigger coverage repair.
-- Coverage recovery is deliberately limited to one pass and 20 ranges so difficult audio cannot cause an unbounded transcription loop.
-- One worker is reused for compatible sequential jobs and is evicted after two idle minutes, on cancellation/crash, when switching incompatible runtimes, on explicit video/app cleanup, and before memory-heavy full-file extraction. High-resource Turbo/Distil pipelines are released after each job. Range extraction still writes the complete compressed input into FFmpeg's in-memory filesystem, so regeneration is not true streaming.
-- Delta worker messages reduce structured-clone payload size, but the provider and editor still rebuild complete snapshots for live formatting. Very long jobs therefore retain some accumulated main-thread work that needs real-browser profiling.
-- Generated subtitle synchronization is improved by speech-aware windowing, bounded recovery, and deterministic post-processing, but it is not guaranteed perfect and should be reviewed manually.
+## Status and Limitations
 
-## Troubleshooting
+**Status:** Active local-first browser application.
 
-- Node.js missing or unsupported: install Node.js 20.19+ or 22.12+ from `https://nodejs.org/` and reopen the launcher.
-- PowerShell blocks `npm.ps1`: the launcher uses `npm.cmd`; manual PowerShell users can run `npm.cmd install`.
-- Model download fails: check network access, browser storage, and whether the model host is reachable.
-- FFmpeg initialization fails: try a Chromium-based browser and restart the dev server.
-- Video cannot be decoded: try MP4/H.264 or WebM/VP9. MOV and MKV support depends heavily on codecs.
-- Empty or silent audio: confirm the source video has an audio track.
-- Browser becomes slow: use a shorter file, the faster model, or close other memory-heavy apps.
-- Regeneration worker fails before loading: the app automatically starts one fresh worker when the first worker crashes before sending any message. If the retry also fails, the error includes the browser's worker message and source location when available; reload the page after a long development hot-reload session and export a new debug log if it persists.
-- Intermittent repeated or silent-area subtitles: reproduce the issue, click **Debug log**, and keep the exported JSON with the affected video timestamp. The report contains recognized text, so review it before sharing.
+- The repository is an app, not a published npm library; `package.json` is marked private.
+- There is no committed hosted deployment or production backend.
+- Browser transcription can require significant memory and time, especially for long videos or high-resource models.
+- FFmpeg.wasm writes the selected file into an in-memory filesystem before extraction; this is not true streaming video processing.
+- The complete decoded audio buffer is held in browser memory during transcription.
+- New projects default to the Base model, explicit English, automatic supported-engine selection, and `q8` model weights. Legacy `auto` language settings resolve to English in the current Transformers.js integration, so choose the spoken language explicitly for non-English media.
+- Word-level timestamps depend on model support and may fall back to segment timestamps.
+- Generated timing is improved by speech-aware windowing, coverage repair, and deterministic formatting, but it is not guaranteed perfect.
+- Automated tests and benchmark self-tests do not run a full real-browser FFmpeg plus Whisper model job.
+- The benchmark harness does not include media, references, model files, or measured accuracy/performance results.
+- Project JSON files do not embed the original video, so restoring a project requires selecting the video again.
 
-## Dependency And License Notes
+## Contributing
 
-Project source code is MIT licensed. See [LICENSE](LICENSE).
+Issues and focused pull requests are welcome. For larger changes, open an issue first and keep generated media, model caches, build output, logs, local environment files, and secrets out of git.
 
-Important dependency/license considerations:
+## License
 
-- React, Vite, Vitest, lucide-react, and the app source are permissively licensed.
+Project source code is MIT licensed. See [LICENSE](./LICENSE) for the complete terms.
+
+Important dependency notes:
+
 - `@huggingface/transformers` is Apache-2.0.
 - `@ffmpeg/ffmpeg` is MIT.
-- `@ffmpeg/core` is GPL-2.0-or-later. If you redistribute production builds that bundle FFmpeg core files, review FFmpeg and dependency licensing obligations for your distribution.
-- Whisper model repositories have their own model cards and terms on Hugging Face. Review the selected model cards before redistribution or commercial packaging.
+- `@ffmpeg/core` is GPL-2.0-or-later. Review FFmpeg and dependency licensing obligations before redistributing builds that bundle FFmpeg core files.
+- Whisper model repositories have their own model cards and terms on Hugging Face.
 
 This section is informational and not legal advice.
 
-## Development Notes
+## Author
 
-- Do not commit `node_modules`, `dist`, model caches, generated media, user videos, extracted audio, subtitle exports, logs, or secrets.
-- Keep transcription failures visible in the UI. Do not replace failed transcription with fabricated subtitles.
-- Keep import/export and manual editing usable even if browser transcription is unavailable.
-
-## Future Improvements
-
-- More memory-efficient audio extraction for browsers that support streaming media pipelines.
-- Optional local model preflight and cache inspection.
-- More languages and model choices with clearer size estimates.
-- Side-by-side waveform timing adjustments.
-- More advanced subtitle timing controls for reviewing generated captions.
+Built by [zxyandreay](https://github.com/zxyandreay).
