@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { createRepairWindowPlans, selectRepairSegments } from '../transcription/repair'
+import {
+  createRepairWindowPlans,
+  selectRepairSegments,
+} from '../transcription/repair'
 
 describe('transcription repair planning', () => {
   it('adds bounded context around uncovered speech', () => {

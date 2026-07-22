@@ -6,6 +6,8 @@ describe('audio extraction arguments', () => {
     expect(buildAudioExtractionArgs('input.mp4', 'audio.wav')).toEqual([
       '-i',
       'input.mp4',
+      '-map',
+      '0:a:0',
       '-vn',
       '-af',
       AUDIO_TIMELINE_FILTER,
@@ -35,6 +37,8 @@ describe('audio extraction arguments', () => {
       'input.mp4',
       '-t',
       '12.25',
+      '-map',
+      '0:a:0',
       '-vn',
       '-af',
       AUDIO_TIMELINE_FILTER,

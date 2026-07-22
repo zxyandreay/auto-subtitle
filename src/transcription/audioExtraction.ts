@@ -18,6 +18,8 @@ export function buildAudioExtractionArgs(
     '-i',
     inputName,
     ...durationArgs,
+    '-map',
+    '0:a:0',
     '-vn',
     '-af',
     AUDIO_TIMELINE_FILTER,

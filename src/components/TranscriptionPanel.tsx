@@ -44,12 +44,16 @@ export function TranscriptionPanel({
   onStart,
   onCancel,
 }: TranscriptionPanelProps) {
+  const settingsDisabled = busy || locked
   const selectedModel = getSpeechModelOption(settings.modelId)
   const cannotRun = !capabilities.webAssembly || !capabilities.webWorkers
   const warnings = [
     ...capabilityWarnings,
     ...(settings.language === 'auto'
       ? ['This Transformers.js version cannot detect Whisper language automatically. Auto uses English; choose the spoken language for multilingual audio.']
+      : []),
+    ...(settings.formatting.useWordTimestamps && !selectedModel.supportsWordTimestamps
+      ? [`${selectedModel.shortLabel} does not expose word alignment timestamps. This model will use segment timestamps without a failed retry.`]
       : []),
     ...getSpeechModelWarnings(settings, { webGpu: capabilities.webGpu, dtype: settings.dtype }),
   ].filter((warning, index, allWarnings) => allWarnings.indexOf(warning) === index)
@@ -70,6 +74,7 @@ export function TranscriptionPanel({
         <label>
           Spoken language
           <select
+            disabled={settingsDisabled}
             value={settings.language}
             onChange={(event) => onSettingsChange({ ...settings, language: event.target.value })}
           >
@@ -84,6 +89,7 @@ export function TranscriptionPanel({
         <label>
           Output
           <select
+            disabled={settingsDisabled}
             value={settings.task}
             onChange={(event) =>
               onSettingsChange({ ...settings, task: event.target.value as TranscriptionSettings['task'] })
@@ -97,6 +103,7 @@ export function TranscriptionPanel({
         <label>
           Model
           <select
+            disabled={settingsDisabled}
             value={settings.modelId}
             onChange={(event) => onSettingsChange({ ...settings, modelId: event.target.value })}
           >
@@ -115,6 +122,7 @@ export function TranscriptionPanel({
         <label>
           Engine
           <select
+            disabled={settingsDisabled}
             value={settings.executionProvider}
             onChange={(event) =>
               onSettingsChange({
@@ -132,6 +140,7 @@ export function TranscriptionPanel({
         <label>
           Chunk length
           <input
+            disabled={settingsDisabled}
             min={15}
             max={29}
             step={1}
@@ -148,8 +157,9 @@ export function TranscriptionPanel({
         </label>
 
         <label>
-          Overlap
+          Fallback overlap
           <input
+            disabled={settingsDisabled}
             min={0}
             max={15}
             step={1}
@@ -168,6 +178,7 @@ export function TranscriptionPanel({
         <label>
           Precision
           <select
+            disabled={settingsDisabled}
             value={settings.dtype}
             onChange={(event) =>
               onSettingsChange({

@@ -44,4 +44,32 @@ describe('diagnostic log toolbar action', () => {
     act(() => button?.click())
     expect(onExportDiagnostics).toHaveBeenCalledOnce()
   })
+
+  it('locks replacement and publication actions during an active job', () => {
+    act(() => {
+      root.render(
+        <ProjectToolbar
+          entryCount={2}
+          hasAutosave
+          locked
+          theme="light"
+          onClearAutosave={() => undefined}
+          onClearSubtitles={() => undefined}
+          onExport={() => undefined}
+          onExportDiagnostics={() => undefined}
+          onImportFile={() => undefined}
+          onRestoreAutosave={() => undefined}
+          onThemeChange={() => undefined}
+        />,
+      )
+    })
+
+    const disabledLabels = ['Import', 'Restore', 'SRT', 'VTT', 'TXT', 'JSON']
+    for (const label of disabledLabels) {
+      const button = [...container.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
+      expect(button?.disabled, label).toBe(true)
+    }
+    expect(container.querySelector<HTMLInputElement>('input[type="file"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Export debug log"]')?.disabled).toBe(false)
+  })
 })

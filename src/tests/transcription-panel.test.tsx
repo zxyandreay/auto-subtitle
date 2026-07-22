@@ -74,6 +74,20 @@ describe('TranscriptionPanel model choices', () => {
     expect(container.textContent).toContain('Auto uses English')
   })
 
+  it('discloses when the selected model cannot provide word timestamps', () => {
+    renderPanel({
+      modelId: DISTIL_LARGE_V3_MODEL_ID,
+      language: 'english',
+      formatting: {
+        ...DEFAULT_TRANSCRIPTION_SETTINGS.formatting,
+        useWordTimestamps: true,
+      },
+    })
+
+    expect(container.textContent).toContain('does not expose word alignment timestamps')
+    expect(container.textContent).toContain('segment timestamps without a failed retry')
+  })
+
   it('offers WASM as the browser CPU path without an unsupported CPU device option', () => {
     renderPanel()
 
@@ -87,14 +101,24 @@ describe('TranscriptionPanel model choices', () => {
     ])
   })
 
+  it('freezes every transcription setting while a job is busy and keeps cancel available', () => {
+    renderPanel({}, { stage: 'transcribing', message: 'Working.' }, true)
+
+    expect([...container.querySelectorAll('select, input')].every((control) => control.hasAttribute('disabled'))).toBe(true)
+    expect(button('Transcribe locally').disabled).toBe(true)
+    expect(button('Cancel').disabled).toBe(false)
+    expect(container.textContent).toContain('Fallback overlap')
+  })
+
   function renderPanel(
     overrides: Partial<TranscriptionSettings> = {},
     progress: TranscriptionProgress = { stage: 'idle', message: 'Ready.' },
+    busy = false,
   ) {
     act(() => {
       root.render(
         <TranscriptionPanel
-          busy={false}
+          busy={busy}
           capabilities={{
             webAssembly: true,
             webWorkers: true,

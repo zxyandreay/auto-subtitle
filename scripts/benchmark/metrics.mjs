@@ -17,6 +17,10 @@ const DEFAULT_CONSTRAINTS = Object.freeze({
 // allocation bounded (~17 MB for one million cells) and report the metric as
 // unavailable instead of risking an out-of-memory failure on a long fixture.
 const MAX_CUE_ALIGNMENT_CELLS = 1_000_000
+const TIMING_TOLERANCES_SECONDS = Object.freeze([0.25, 0.5, 1])
+const MAX_TEXT_DIFFERENCE_ENTRIES = 50
+const MAX_CUE_DIFFERENCE_ENTRIES = 50
+const MAX_DIFFERENCE_TEXT_LENGTH = 160
 
 export function evaluateBenchmarkCase(manifestCase, reference, candidate) {
   const normalization = { ...DEFAULT_NORMALIZATION, ...manifestCase.normalization }
@@ -68,9 +72,16 @@ export function calculateTextMetrics(referenceText, candidateText, normalization
   const candidateCharacters = characterTokens(normalizedCandidate, normalization.cerIgnoreWhitespace)
   const characterDistance = levenshteinDistance(referenceCharacters, candidateCharacters)
   const maximumCharacterCount = Math.max(referenceCharacters.length, candidateCharacters.length)
+  const differenceUnit = primaryMetric === 'cer' ? 'character' : 'word'
+  const differenceReference = differenceUnit === 'character' ? referenceCharacters : referenceWords
+  const differenceCandidate = differenceUnit === 'character' ? candidateCharacters : candidateWords
+  const differenceAlignment = differenceUnit === 'character'
+    ? alignSequences(referenceCharacters, candidateCharacters)
+    : wordAlignment
 
   return {
     primaryMetric,
+    exactTextMatch: String(referenceText ?? '') === String(candidateText ?? ''),
     exactNormalizedMatch: normalizedReference === normalizedCandidate,
     normalizedSimilarity: roundMetric(
       maximumCharacterCount === 0 ? 1 : 1 - characterDistance / maximumCharacterCount,
@@ -92,6 +103,12 @@ export function calculateTextMetrics(referenceText, candidateText, normalization
       referenceCharacterCount: referenceCharacters.length,
       candidateCharacterCount: candidateCharacters.length,
     },
+    differences: summarizeTextDifferences(
+      differenceAlignment,
+      differenceReference,
+      differenceCandidate,
+      differenceUnit,
+    ),
   }
 }
 
@@ -144,8 +161,14 @@ export function calculateCueTimingMetrics(
     return null
   }
 
-  const referenceCues = referenceSubtitles.filter(isUsableTimedText)
-  const candidateCues = candidateSubtitles.filter(isUsableTimedText)
+  const referenceCueEntries = referenceSubtitles
+    .map((cue, originalIndex) => ({ cue, originalIndex }))
+    .filter(({ cue }) => isUsableTimedText(cue))
+  const candidateCueEntries = candidateSubtitles
+    .map((cue, originalIndex) => ({ cue, originalIndex }))
+    .filter(({ cue }) => isUsableTimedText(cue))
+  const referenceCues = referenceCueEntries.map(({ cue }) => cue)
+  const candidateCues = candidateCueEntries.map(({ cue }) => cue)
   if (referenceCues.length === 0) {
     return null
   }
@@ -187,6 +210,13 @@ export function calculateCueTimingMetrics(
       : null,
     onsetErrorSeconds: errorStatistics(onsetErrors),
     offsetErrorSeconds: errorStatistics(offsetErrors),
+    differences: summarizeCueDifferences(
+      referenceCueEntries,
+      candidateCueEntries,
+      matches,
+      normalization,
+      language,
+    ),
   }
 }
 
@@ -276,6 +306,8 @@ export function calculateSubtitleQualityMetrics(subtitles, constraints) {
     0,
   )
   const validCues = subtitles.filter(isValidInterval).slice().sort(compareIntervals)
+  const cueDurations = validCues.map((cue) => cue.endTime - cue.startTime)
+  const interCueGaps = validCues.slice(1).map((cue, index) => cue.startTime - validCues[index].endTime)
   let overlapCount = 0
   let overlapDurationSeconds = 0
 
@@ -297,9 +329,19 @@ export function calculateSubtitleQualityMetrics(subtitles, constraints) {
   let captionLineLengthViolationCount = 0
   let maximumLineCountViolationCount = 0
   let maxObservedLineLength = 0
+  let minimumCueDurationViolationCount = 0
+  let maximumCueDurationViolationCount = 0
+  const minimumCueDurationSeconds = constraints.minimumCueDurationSeconds ?? null
+  const maximumCueDurationSeconds = constraints.maximumCueDurationSeconds ?? null
 
   for (const cue of validCues) {
     const duration = cue.endTime - cue.startTime
+    if (minimumCueDurationSeconds !== null && duration + 1e-9 < minimumCueDurationSeconds) {
+      minimumCueDurationViolationCount += 1
+    }
+    if (maximumCueDurationSeconds !== null && duration - 1e-9 > maximumCueDurationSeconds) {
+      maximumCueDurationViolationCount += 1
+    }
     const characterCount = Array.from(cue.text.replace(/\s/gu, '')).length
     const cps = duration > 0 ? characterCount / duration : Number.POSITIVE_INFINITY
     maxObservedCps = Math.max(maxObservedCps, cps)
@@ -332,6 +374,16 @@ export function calculateSubtitleQualityMetrics(subtitles, constraints) {
     invalidWordTimestampCount,
     overlapCount,
     overlapDurationSeconds: roundMetric(overlapDurationSeconds),
+    cueDurationSeconds: distributionStatistics(cueDurations),
+    interCueGapSeconds: gapStatistics(interCueGaps),
+    minimumCueDurationSeconds,
+    minimumCueDurationViolationCount: minimumCueDurationSeconds === null
+      ? null
+      : minimumCueDurationViolationCount,
+    maximumCueDurationSeconds,
+    maximumCueDurationViolationCount: maximumCueDurationSeconds === null
+      ? null
+      : maximumCueDurationViolationCount,
     cpsViolationCount,
     maxObservedCps: validCues.length ? roundMetric(maxObservedCps) : null,
     maxCps: constraints.maxCps,
@@ -460,6 +512,12 @@ function summarizeTiming(cases, key, matchedCountKey) {
   const endMean = weightedMean(
     available.map((timing) => [timing[endField]?.meanAbsolute ?? null, timing[matchedCountKey]]),
   )
+  const startMaximum = maximumFinite(
+    available.map((timing) => timing[startField]?.maximumAbsolute ?? null),
+  )
+  const endMaximum = maximumFinite(
+    available.map((timing) => timing[endField]?.maximumAbsolute ?? null),
+  )
 
   return {
     availableCaseCount: available.length,
@@ -469,6 +527,10 @@ function summarizeTiming(cases, key, matchedCountKey) {
     matchedCount,
     meanAbsoluteStartOrOnsetErrorSeconds: startMean,
     meanAbsoluteEndOrOffsetErrorSeconds: endMean,
+    maximumAbsoluteStartOrOnsetErrorSeconds: startMaximum,
+    maximumAbsoluteEndOrOffsetErrorSeconds: endMaximum,
+    startOrOnsetWithinTolerances: summarizeTimingTolerances(available, startField),
+    endOrOffsetWithinTolerances: summarizeTimingTolerances(available, endField),
   }
 }
 
@@ -526,12 +588,33 @@ function summarizeDuplicationUnit(values) {
 
 function summarizeSubtitleQuality(cases) {
   const values = cases.map((item) => item.metrics.subtitleQuality)
+  const minimumDurationValues = values.filter((value) => (
+    Number.isFinite(value.minimumCueDurationViolationCount)
+  ))
+  const maximumDurationValues = values.filter((value) => (
+    Number.isFinite(value.maximumCueDurationViolationCount)
+  ))
   return {
     cueCount: sum(values.map((value) => value.cueCount)),
+    validCueCount: sum(values.map((value) => value.validCueCount ?? 0)),
     invalidTimestampCount: sum(values.map((value) => value.invalidTimestampCount)),
     invalidWordTimestampCount: sum(values.map((value) => value.invalidWordTimestampCount)),
     overlapCount: sum(values.map((value) => value.overlapCount)),
     overlapDurationSeconds: roundMetric(sum(values.map((value) => value.overlapDurationSeconds))),
+    cueDurationSeconds: summarizeDistributions(values.map((value) => value.cueDurationSeconds)),
+    interCueGapSeconds: summarizeGapDistributions(values.map((value) => value.interCueGapSeconds)),
+    minimumCueDurationViolationCount: minimumDurationValues.length
+      ? sum(minimumDurationValues.map((value) => value.minimumCueDurationViolationCount))
+      : null,
+    minimumCueDurationEvaluatedCueCount: sum(
+      minimumDurationValues.map((value) => value.validCueCount ?? 0),
+    ),
+    maximumCueDurationViolationCount: maximumDurationValues.length
+      ? sum(maximumDurationValues.map((value) => value.maximumCueDurationViolationCount))
+      : null,
+    maximumCueDurationEvaluatedCueCount: sum(
+      maximumDurationValues.map((value) => value.validCueCount ?? 0),
+    ),
     cpsViolationCount: sum(values.map((value) => value.cpsViolationCount)),
     lineLengthViolationCount: sum(values.map((value) => value.lineLengthViolationCount)),
     captionLineLengthViolationCount: sum(values.map((value) => value.captionLineLengthViolationCount)),
@@ -758,6 +841,55 @@ function countAlignmentOperations(alignment) {
   return counts
 }
 
+function summarizeTextDifferences(alignment, reference, candidate, unit) {
+  const entries = []
+  let totalDifferenceCount = 0
+
+  for (const operation of alignment) {
+    if (operation.type === 'equal') {
+      continue
+    }
+    totalDifferenceCount += 1
+    if (entries.length >= MAX_TEXT_DIFFERENCE_ENTRIES) {
+      continue
+    }
+
+    const entry = {
+      type: operation.type === 'substitute'
+        ? 'substitution'
+        : operation.type === 'delete'
+          ? 'deletion'
+          : 'insertion',
+    }
+    if (operation.referenceIndex !== undefined) {
+      const display = boundedDisplayText(reference[operation.referenceIndex])
+      entry.referenceUnitIndex = operation.referenceIndex
+      entry.referenceText = display.text
+      if (display.truncated) {
+        entry.referenceTextTruncated = true
+      }
+    }
+    if (operation.candidateIndex !== undefined) {
+      const display = boundedDisplayText(candidate[operation.candidateIndex])
+      entry.candidateUnitIndex = operation.candidateIndex
+      entry.candidateText = display.text
+      if (display.truncated) {
+        entry.candidateTextTruncated = true
+      }
+    }
+    entries.push(entry)
+  }
+
+  return {
+    unit,
+    totalDifferenceCount,
+    returnedDifferenceCount: entries.length,
+    omittedDifferenceCount: totalDifferenceCount - entries.length,
+    maximumReturnedDifferences: MAX_TEXT_DIFFERENCE_ENTRIES,
+    entries,
+  }
+}
+
 function flattenTimedWords(words, normalization, language) {
   return words.flatMap((word) => {
     if (!isValidInterval(word) || typeof word.text !== 'string') {
@@ -830,6 +962,151 @@ function alignCues(reference, candidate, normalization, language, useCharacters)
     }
   }
   return matches.reverse()
+}
+
+function summarizeCueDifferences(referenceEntries, candidateEntries, matches, normalization, language) {
+  const entries = []
+  let totalDifferenceCount = 0
+  let matchedDifferenceCount = 0
+  let missingCandidateCueCount = 0
+  let extraCandidateCueCount = 0
+
+  const append = (entry) => {
+    totalDifferenceCount += 1
+    if (entries.length < MAX_CUE_DIFFERENCE_ENTRIES) {
+      entries.push(entry)
+    }
+  }
+  const appendReferenceOnly = (filteredIndex) => {
+    missingCandidateCueCount += 1
+    append({
+      type: 'missing-candidate-cue',
+      reference: cueSnapshot(referenceEntries[filteredIndex]),
+    })
+  }
+  const appendCandidateOnly = (filteredIndex) => {
+    extraCandidateCueCount += 1
+    append({
+      type: 'extra-candidate-cue',
+      candidate: cueSnapshot(candidateEntries[filteredIndex]),
+    })
+  }
+
+  let referenceIndex = 0
+  let candidateIndex = 0
+  for (const match of matches) {
+    while (referenceIndex < match.referenceIndex || candidateIndex < match.candidateIndex) {
+      if (referenceIndex >= match.referenceIndex) {
+        appendCandidateOnly(candidateIndex)
+        candidateIndex += 1
+      } else if (candidateIndex >= match.candidateIndex) {
+        appendReferenceOnly(referenceIndex)
+        referenceIndex += 1
+      } else if (
+        referenceEntries[referenceIndex].cue.startTime
+        <= candidateEntries[candidateIndex].cue.startTime
+      ) {
+        appendReferenceOnly(referenceIndex)
+        referenceIndex += 1
+      } else {
+        appendCandidateOnly(candidateIndex)
+        candidateIndex += 1
+      }
+    }
+
+    const referenceEntry = referenceEntries[match.referenceIndex]
+    const candidateEntry = candidateEntries[match.candidateIndex]
+    const onsetErrorSeconds = roundMetric(
+      candidateEntry.cue.startTime - referenceEntry.cue.startTime,
+    )
+    const offsetErrorSeconds = roundMetric(
+      candidateEntry.cue.endTime - referenceEntry.cue.endTime,
+    )
+    const durationErrorSeconds = roundMetric(
+      (candidateEntry.cue.endTime - candidateEntry.cue.startTime)
+      - (referenceEntry.cue.endTime - referenceEntry.cue.startTime),
+    )
+    const exactTextMatch = referenceEntry.cue.text === candidateEntry.cue.text
+    const exactNormalizedTextMatch = normalizeText(
+      referenceEntry.cue.text,
+      normalization,
+      language,
+    ) === normalizeText(candidateEntry.cue.text, normalization, language)
+
+    if (!exactTextMatch || onsetErrorSeconds !== 0 || offsetErrorSeconds !== 0) {
+      matchedDifferenceCount += 1
+      append({
+        type: 'matched-cue-difference',
+        reference: cueSnapshot(referenceEntry),
+        candidate: cueSnapshot(candidateEntry),
+        text: {
+          exactMatch: exactTextMatch,
+          exactNormalizedMatch: exactNormalizedTextMatch,
+          similarity: roundMetric(match.similarity),
+        },
+        timing: {
+          onsetErrorSeconds,
+          offsetErrorSeconds,
+          durationErrorSeconds,
+        },
+      })
+    }
+    referenceIndex = match.referenceIndex + 1
+    candidateIndex = match.candidateIndex + 1
+  }
+
+  while (referenceIndex < referenceEntries.length || candidateIndex < candidateEntries.length) {
+    if (referenceIndex >= referenceEntries.length) {
+      appendCandidateOnly(candidateIndex)
+      candidateIndex += 1
+    } else if (candidateIndex >= candidateEntries.length) {
+      appendReferenceOnly(referenceIndex)
+      referenceIndex += 1
+    } else if (
+      referenceEntries[referenceIndex].cue.startTime
+      <= candidateEntries[candidateIndex].cue.startTime
+    ) {
+      appendReferenceOnly(referenceIndex)
+      referenceIndex += 1
+    } else {
+      appendCandidateOnly(candidateIndex)
+      candidateIndex += 1
+    }
+  }
+
+  return {
+    totalDifferenceCount,
+    matchedDifferenceCount,
+    missingCandidateCueCount,
+    extraCandidateCueCount,
+    returnedDifferenceCount: entries.length,
+    omittedDifferenceCount: totalDifferenceCount - entries.length,
+    maximumReturnedDifferences: MAX_CUE_DIFFERENCE_ENTRIES,
+    entries,
+  }
+}
+
+function cueSnapshot({ cue, originalIndex }) {
+  const display = boundedDisplayText(cue.text)
+  return {
+    index: originalIndex,
+    startTime: roundMetric(cue.startTime),
+    endTime: roundMetric(cue.endTime),
+    durationSeconds: roundMetric(cue.endTime - cue.startTime),
+    text: display.text,
+    ...(display.truncated ? { textTruncated: true } : {}),
+  }
+}
+
+function boundedDisplayText(value) {
+  const characters = Array.from(String(value ?? ''))
+  if (characters.length <= MAX_DIFFERENCE_TEXT_LENGTH) {
+    return { text: characters.join(''), truncated: false }
+  }
+  return {
+    text: `${characters.slice(0, MAX_DIFFERENCE_TEXT_LENGTH - 1).join('')}…`,
+    truncated: true,
+  }
 }
 
 function cueUnits(text, normalization, language, useCharacters) {
@@ -976,10 +1253,111 @@ function errorStatistics(errors) {
   }
   const absolute = errors.map(Math.abs)
   return {
+    sampleCount: errors.length,
     meanAbsolute: roundMetric(mean(absolute)),
     medianAbsolute: roundMetric(median(absolute)),
+    maximumAbsolute: maximumFinite(absolute),
     meanSigned: roundMetric(mean(errors)),
+    withinTolerances: Object.fromEntries(TIMING_TOLERANCES_SECONDS.map((toleranceSeconds) => {
+      const count = absolute.filter((value) => value <= toleranceSeconds + 1e-9).length
+      return [timingToleranceKey(toleranceSeconds), {
+        toleranceSeconds,
+        count,
+        percentage: roundMetric((count / absolute.length) * 100),
+      }]
+    })),
   }
+}
+
+function summarizeTimingTolerances(values, field) {
+  return Object.fromEntries(TIMING_TOLERANCES_SECONDS.map((toleranceSeconds) => {
+    let count = 0
+    let evaluatedCount = 0
+    for (const value of values) {
+      const statistics = value[field]
+      const tolerance = statistics?.withinTolerances?.[timingToleranceKey(toleranceSeconds)]
+      if (!tolerance) {
+        continue
+      }
+      count += tolerance.count
+      evaluatedCount += statistics.sampleCount ?? 0
+    }
+    return [timingToleranceKey(toleranceSeconds), {
+      toleranceSeconds,
+      count,
+      evaluatedCount,
+      percentage: evaluatedCount === 0 ? null : roundMetric((count / evaluatedCount) * 100),
+    }]
+  }))
+}
+
+function timingToleranceKey(toleranceSeconds) {
+  return `${Math.round(toleranceSeconds * 1000)}ms`
+}
+
+function distributionStatistics(values) {
+  if (values.length === 0) {
+    return {
+      count: 0,
+      minimum: null,
+      maximum: null,
+      mean: null,
+      median: null,
+    }
+  }
+  return {
+    count: values.length,
+    minimum: minimumFinite(values),
+    maximum: maximumFinite(values),
+    mean: roundMetric(mean(values)),
+    median: roundMetric(median(values)),
+  }
+}
+
+function gapStatistics(values) {
+  return {
+    ...distributionStatistics(values),
+    negativeGapCount: values.filter((value) => value < 0).length,
+    zeroGapCount: values.filter((value) => value === 0).length,
+    positiveGapCount: values.filter((value) => value > 0).length,
+  }
+}
+
+function summarizeDistributions(distributions) {
+  const populated = distributions.filter((value) => value && value.count > 0)
+  const count = sum(populated.map((value) => value.count))
+  return {
+    count,
+    minimum: minimumFinite(populated.map((value) => value.minimum)),
+    maximum: maximumFinite(populated.map((value) => value.maximum)),
+    mean: weightedMean(populated.map((value) => [value.mean, value.count])),
+    median: populated.length === 1 ? populated[0].median : null,
+    medianAvailable: populated.length <= 1,
+  }
+}
+
+function summarizeGapDistributions(distributions) {
+  const summary = summarizeDistributions(distributions)
+  return {
+    ...summary,
+    negativeGapCount: sum(distributions.map((value) => value?.negativeGapCount ?? 0)),
+    zeroGapCount: sum(distributions.map((value) => value?.zeroGapCount ?? 0)),
+    positiveGapCount: sum(distributions.map((value) => value?.positiveGapCount ?? 0)),
+  }
+}
+
+function minimumFinite(values) {
+  const finite = values.filter(Number.isFinite)
+  return finite.length
+    ? roundMetric(finite.reduce((minimum, value) => Math.min(minimum, value), finite[0]))
+    : null
+}
+
+function maximumFinite(values) {
+  const finite = values.filter(Number.isFinite)
+  return finite.length
+    ? roundMetric(finite.reduce((maximum, value) => Math.max(maximum, value), finite[0]))
+    : null
 }
 
 function weightedMean(values) {

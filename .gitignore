@@ -31,6 +31,10 @@ commit-and-push.bat
 *.mp3
 *.m4a
 *.flac
+*.auto-subtitle.json
+*.auto-subtitle (*).json
+*debug-log*.json
+*-debug-*.json
 output/
 exports/
 temp/

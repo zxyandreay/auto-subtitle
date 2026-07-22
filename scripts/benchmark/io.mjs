@@ -329,10 +329,23 @@ function validateConstraints(constraints, prefix, issues) {
     issues.push(`${prefix} must be an object`)
     return
   }
-  for (const field of ['maxCps', 'maxLineLength', 'maximumLines']) {
+  for (const field of [
+    'maxCps',
+    'maxLineLength',
+    'maximumLines',
+    'minimumCueDurationSeconds',
+    'maximumCueDurationSeconds',
+  ]) {
     if (constraints[field] !== undefined && !positiveNumber(constraints[field])) {
       issues.push(`${prefix}.${field} must be a positive finite number`)
     }
+  }
+  if (
+    positiveNumber(constraints.minimumCueDurationSeconds)
+    && positiveNumber(constraints.maximumCueDurationSeconds)
+    && constraints.minimumCueDurationSeconds > constraints.maximumCueDurationSeconds
+  ) {
+    issues.push(`${prefix}.minimumCueDurationSeconds must not exceed maximumCueDurationSeconds`)
   }
   if (
     constraints.minimumSpeechOverlapRatio !== undefined
@@ -726,6 +739,12 @@ function normalizedConstraints(value = {}) {
     maxLineLength: value.maxLineLength ?? 42,
     maximumLines: value.maximumLines ?? 2,
     minimumSpeechOverlapRatio: value.minimumSpeechOverlapRatio ?? 0.5,
+    ...(value.minimumCueDurationSeconds === undefined
+      ? {}
+      : { minimumCueDurationSeconds: value.minimumCueDurationSeconds }),
+    ...(value.maximumCueDurationSeconds === undefined
+      ? {}
+      : { maximumCueDurationSeconds: value.maximumCueDurationSeconds }),
   }
 }
 

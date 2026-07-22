@@ -1,10 +1,11 @@
 # Transcription accuracy and performance audit
 
 - Audit date: 2026-07-19
+- Follow-up implementation update: 2026-07-23
 - Pre-change baseline: `996148a357b9b53c24f0a1cae6acf02cf6813a0a`
 - Scope: the browser-local FFmpeg.wasm and Transformers.js transcription path, its deterministic post-processing, live editor integration, diagnostics, and local benchmark tooling.
 
-This audit is specific to this repository. It covers `src/workers/transcription.worker.ts`, every module under `src/transcription/` involved in extraction through timing repair, `src/subtitles/formatting.ts`, `src/subtitles/livePreview.ts`, `src/diagnostics/`, the related tests, `README.md`, `docs/project-state.md`, `package.json`, and `vite.config.ts`. The installed lockfile resolves `@huggingface/transformers` to 4.2.0, `@ffmpeg/ffmpeg` to 0.12.15, `@ffmpeg/core` to 0.12.10, and `@ffmpeg/util` to 0.12.2.
+This audit is specific to this repository. It covers `src/workers/transcription.worker.ts`, every module under `src/transcription/` involved in extraction through timing repair, `src/subtitles/formatting.ts`, `src/subtitles/livePreview.ts`, transactional subtitle state and metadata invalidation, `src/diagnostics/`, the related tests, the optional benchmark capture/scorer, and the project documentation. The installed lockfile resolves `@huggingface/transformers` to 4.2.0, `@ffmpeg/ffmpeg` to 0.12.15, `@ffmpeg/core` to 0.12.10, and `@ffmpeg/util` to 0.12.2.
 
 Terminology used below:
 
@@ -24,20 +25,22 @@ The application remains a fully local single-page browser application. Model fil
 | --- | --- |
 | Video selection | `src/App.tsx` retains the browser `File` in `VideoFileState` and creates an object URL for the local player. Validation remains in `src/media/video.ts`. |
 | Job boundary | `startBrowserWhisperTranscription` or `startBrowserWhisperRegeneration` in `src/transcription/browserWhisperProvider.ts` assigns a job ID and posts the `File` plus a frozen settings snapshot to the reusable module worker. Only one transcription or regeneration may run at a time. |
-| Audio extraction | `extractAudio` in `src/workers/transcription.worker.ts` creates an FFmpeg instance, calls `fetchFile(file)`, writes the media to FFmpeg's in-memory filesystem, and executes arguments from `buildAudioExtractionArgs` in `src/transcription/audioExtraction.ts`. The `aresample=async=1:first_pts=0` filter preserves a zero-based media timeline and inserts/resamples delayed audio as FFmpeg requires. Output is mono 16 kHz, signed 16-bit PCM WAV. |
+| Audio extraction | `extractAudio` in `src/workers/transcription.worker.ts` creates an FFmpeg instance, calls `fetchFile(file)`, writes the media to FFmpeg's in-memory filesystem, and executes arguments from `buildAudioExtractionArgs` in `src/transcription/audioExtraction.ts`. `-map 0:a:0` selects the first audio stream deterministically. The `aresample=async=1:first_pts=0` filter preserves a zero-based media timeline and inserts/resamples delayed audio as FFmpeg requires. Output is mono 16 kHz, signed 16-bit PCM WAV; no denoising or loudness normalization is applied. |
 | PCM decode | `decodePcmWav` validates RIFF/WAVE and converts every PCM16 sample into a worker-owned `Float32Array`. A sampled whole-buffer RMS check rejects effectively empty audio instead of fabricating captions. |
 | Speech analysis | `analyzeSpeechActivity` in `src/transcription/speechActivity.ts` computes rolling frame RMS, a locally adapting noise floor, separate speech-on and speech-off thresholds, hysteresis, and isolated-frame smoothing. It returns compact typed frame arrays plus raw speech boundaries and separately padded model-context regions. Failure returns no regions and activates safe fixed-window planning. |
-| Window planning | `createSpeechAwareTranscriptionWindowPlan` in `src/transcription/windowing.ts` packs detected speech into core ownership spans. Long regions search a bounded radius around the ideal split and choose a deterministic non-speech or lowest-activity frame. Slice overlap supplies context, core ownership remains non-overlapping, and no slice can exceed the 29-second model budget. `createTranscriptionWindowPlan` is the contiguous fixed-window fallback. |
-| Model resolution | `resolveSpeechModelRuntimeSettings` in `src/transcription/models.ts` preserves Tiny, Base, Large v3 Turbo, and Distil Large v3 compatibility rules. New settings default to Base, explicit English, `q8`, word timestamps, and automatic supported-device selection. Legacy `cpu` settings normalize to the actual browser CPU path, `wasm`. |
+| Window planning | `createSpeechAwareTranscriptionWindowPlan` in `src/transcription/windowing.ts` packs detected speech into model-safe core ownership spans. Long regions search a bounded radius around the ideal split and choose a deterministic non-speech or lowest-activity frame. Slice overlap supplies context, core ownership remains non-overlapping, and no slice can exceed the 29-second model budget. `createTranscriptionWindowPlan` is the contiguous fixed-window fallback. |
+| Model resolution | `resolveSpeechModelRuntimeSettings` in `src/transcription/models.ts` preserves Tiny, Base, Large v3 Turbo, and Distil Large v3 compatibility rules and records word-timestamp capability. New settings default to Base, explicit English, `q8`, word timestamps, and automatic supported-device selection. Legacy `cpu` settings normalize to the actual browser CPU path, `wasm`. |
 | Model loading | `loadTranscriber` in `src/workers/transcription.worker.ts` creates a Transformers.js automatic-speech-recognition pipeline keyed by model ID, execution provider, and dtype. Compatible low-resource pipelines can remain warm for bounded regeneration. Incompatible and high-resource pipelines are disposed; the outer worker also has an explicit and idle cleanup path. |
-| Whisper inference | `transcribeInWindows` supplies one already bounded `Float32Array.subarray` to Transformers.js at a time with internal pipeline chunking disabled. It requests `return_timestamps: 'word'` by default. `transcribeWindowWithTimestampFallback` retries only a recognized word-timestamp capability failure with segment timestamps (`true`) and keeps that actual mode for later calls. |
+| Whisper inference | `transcribeInWindows` supplies one already bounded `Float32Array.subarray` to Transformers.js at a time with internal pipeline chunking disabled. It requests `return_timestamps: 'word'` only when the preference is enabled and the model registry supports it. Distil Large v3 uses segment timestamps directly; `transcribeWindowWithTimestampFallback` retries only a recognized unexpected word-timestamp capability failure and keeps segment mode for later calls. The worker leaves `max_new_tokens` unset so the installed library retains its seek-based timestamp continuation. |
 | Timestamp normalization | `normalizeAsrResult` and `normalizeAsrChunks` in `src/transcription/timestampNormalization.ts` receive the actual successful timestamp mode. Window-relative timestamps are offset to the media timeline, chunks are owned by onset-based core boundaries, word chunks are merged only in explicit word mode, and malformed chunks are discarded. |
 | Text-only fallback | If a result contains text but no usable chunks, `createFallbackSegment` requires exactly one merged raw-speech evidence span. The cue is bounded to that span and eight seconds, marked with algorithmic confidence `0.35`, and suppressed when evidence is absent, punctuation-only, or split across multiple speech islands. |
-| Boundary reconciliation | `reconcileBoundarySegments` in `src/transcription/reconciliation.ts` compares at most three segments and 512 normalized units on each side of a core boundary. It uses ordered suffix/prefix matching, requires overlapping time evidence, prefers usable word timing and materially stronger confidence, retains punctuation from better-supported duplicates, and uses a character fallback for several no-whitespace scripts. |
+| Hallucination safety | Text without usable chunks requires unambiguous raw-speech evidence, and coverage repair is bounded. The pipeline does not delete sparse repeated segment text solely from RMS activity and repetition because that evidence cannot distinguish noise hallucinations from legitimate chants, stutters, or emphatic dialogue. |
+| Boundary reconciliation | `reconcileBoundarySegments` in `src/transcription/reconciliation.ts` compares at most three segments and 512 normalized units on each side of a core boundary. It uses ordered suffix/prefix matching, prefers usable word timing and materially stronger confidence, retains punctuation, and uses a character fallback for several no-whitespace scripts. A segment-only suffix that crossed into the owned core is explicitly marked, allowing a nearby duplicated context prefix to be trimmed without requiring falsely overlapping segment timestamps; unmarked adjacent repeats remain. |
 | Coverage check and repair | `findUncoveredSpeechRanges` in `src/transcription/coverage.ts` compares raw speech with reliable word ranges or speech-overlapping segment evidence. Low-confidence, implausibly long, poorly represented, and mostly-silence evidence cannot hide a miss. `createRepairWindowPlans` and `selectRepairSegments` in `src/transcription/repair.ts` perform one bounded pass of at most 20 model-safe ranges and retain only content owned by each gap. |
 | Timing refinement | `refineSegmentsToSpeechBoundaries` in `src/transcription/timingRefinement.ts` uses monotonic word timestamps first and nearby raw VAD starts/ends second. Onset and offset use separate search radii. Display padding is applied once, results are rounded to milliseconds, and adjacent cues are made non-overlapping without cutting valid rapid-dialogue word evidence solely to manufacture a cosmetic gap. |
-| Streaming preview | `postPartialResult` sends a changed-suffix delta. `applyPartialDelta` in the provider validates and reconstructs the accumulated segment snapshot. `formatTranscriptionSegments` formats it on the main thread, and `mergeLiveTranscriptionPreview` assigns timing/text-stable generated IDs so edits, deletions, and later repair insertions do not become attached to the wrong cue. |
-| Editor and output | Generated and imported data still converge on `SubtitleEntry[]`. The existing editor, range regeneration, undo/redo, autosave, validation, SRT/VTT/TXT exporters, and Auto Subtitle JSON project import/export remain downstream of that shared representation. |
+| Generated cue formatting | `optimizeGeneratedCaptions` applies length, CPS, pause, punctuation, duration, overlap, and line rules. After overlap normalization, one final segment-only smoothing pass can merge a newly squeezed micro-cue with a compatible neighbor, followed by another non-overlap pass. Word-timed localization and meaningful pauses are protected. |
+| Streaming preview | `postPartialResult` sends a changed-suffix delta. `applyPartialDelta` validates and reconstructs the accumulated snapshot. `formatTranscriptionSegments` and `mergeLiveTranscriptionPreview` produce stable editable rows, while `useUndoableSubtitles` stages them in an id-scoped transaction. User edits remain visible; success commits once, and cancellation/failure restores committed history. |
+| Editor and output | Generated and imported data still converge on `SubtitleEntry[]`. Autosave reads committed entries rather than an active preview. Semantic text edits or incompatible timing edits invalidate stale ASR words/confidence, while import/export remains schema-compatible. |
 
 ### Installed Transformers.js behavior
 
@@ -103,11 +106,19 @@ These are plausible risks, not measured regressions or improvements:
 
 - Segment-timestamp captions without whitespace now have a punctuation-preferred grapheme-cluster fallback, but natural break quality for Thai, Khmer, Lao, Myanmar, and mixed-script text still needs real-media/reference validation; preserving text and line limits does not prove a linguistically natural split.
 
+- Segment-only output cannot expose a pause hidden inside one broad model segment. The formatter can protect inter-segment gaps and use punctuation, but word-timed pause quality still depends on the selected model export.
+
+- Deterministic first-stream selection prevents accidental FFmpeg auto-selection changes, but files with multiple language/commentary tracks still require remuxing because the UI has no audio-track selector.
+
+- An experimental duration-scaled `max_new_tokens` ceiling was rejected after review of the installed Transformers.js implementation showed that setting it bypasses Whisper's timestamp seek loop. Model-safe audio windows remain the non-destructive work bound.
+
+- An experimental repeated low-information filter was rejected because legitimate repeated cues over sustained activity can satisfy the same evidence pattern as music hallucinations. Uncertain text is retained for review rather than silently deleted.
+
 ## 4. Baseline benchmark design
 
 ### Committed harness
 
-The new local harness is intentionally split from inference:
+The local tooling keeps browser capture separate from deterministic scoring:
 
 ```text
 benchmarks/
@@ -120,6 +131,7 @@ benchmarks/
     .gitkeep
 scripts/
   benchmark.mjs
+  capture-benchmark.mjs
   benchmark/
 ```
 
@@ -131,7 +143,7 @@ The workflow is:
 
 2. Create a local manifest with legally usable media plus human-checked transcript, word, cue, and speech-interval references as available.
 
-3. Run the app through `local-launch.bat`, transcribe without editing the generated output, export Auto Subtitle JSON, and copy only measured diagnostic telemetry into a local telemetry file.
+3. Start the app through `local-launch.bat`. Either capture manually or run `npm run benchmark:capture -- --video <path> --out-dir <ignored-path> --case-id <id> ...` to drive one unedited job through installed Chrome or Edge and validate its project, diagnostics, settings, and telemetry.
 
 4. Score a capture with `npm run benchmark -- --manifest <manifest.local.json> --run <run.local.json> --out <result.json>`.
 
@@ -151,13 +163,19 @@ The scorer hashes media with SHA-256, fingerprints the suite and references, che
 
 - Mean and median absolute word-start and word-end error, signed mean error, matched count, and match coverage from deterministic monotonic word alignment.
 
-- Mean and median absolute cue onset and offset error plus signed mean error from bounded monotonic cue alignment.
+- Mean, median, and maximum absolute cue onset and offset error plus signed mean error from bounded monotonic cue alignment.
+
+- Counts and percentages of matched cue starts and ends within 250 ms, 500 ms, and 1,000 ms tolerances.
 
 - Missed reference speech duration and candidate cue duration outside reference speech.
 
 - Raw and reference-discounted adjacent duplicate-unit and repeated-phrase rates, with word and character summaries kept separate.
 
-- Subtitle overlap count/duration, invalid cue and word timestamps, CPS violations, maximum line-length violations, and excess-line violations.
+- Subtitle overlap count/duration, invalid cue and word timestamps, CPS violations, maximum line-length violations, excess-line violations, cue-duration distribution, and adjacent-gap distribution.
+
+- Optional minimum/maximum cue-duration violations when a benchmark manifest supplies those readability constraints.
+
+- Bounded normalized text and cue-difference samples for inspection without allowing a pathological transcript or segmentation mismatch to make the report unbounded.
 
 ### Performance and memory telemetry
 
@@ -177,7 +195,7 @@ Current diagnostic mappings are documented in `benchmarks/README.md`:
 
 Two telemetry caveats matter when interpreting a capture. First, `transcription-completed.data.audioDurationSeconds` is currently populated from the selected video's metadata duration, not independently from the decoded PCM length; treat it as media-timeline duration and use the worker's `decoded-audio.data.durationSeconds` when an audio-only denominator is required. Second, heap samples are taken during preview/final formatting and failure settlement, not continuously during FFmpeg extraction or model inference, so their maximum can miss the actual allocation peak.
 
-The harness does not run Whisper itself. That is deliberate: it keeps the deterministic scorer fast, avoids model/network dependencies in tests, and requires the actual browser path to produce performance evidence.
+The scorer does not run Whisper itself. That keeps comparison deterministic and fast. The optional capture command supplies the actual browser path and requires a running loopback app, installed Chrome or Edge, local media, and an available/cached model; neither command is part of the normal unit-test suite.
 
 ## 5. Implemented changes
 
@@ -188,6 +206,15 @@ Impact labels are expected direction based on the mechanism, not measured real-m
 | Change | Accuracy impact | Timing impact | Performance impact | Implementation / regression risk | Browser compatibility | Memory / download cost | Testability | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Benchmark scorer and telemetry | Indirect, enables measurement | Indirect | Small diagnostic overhead | Low / low | Node scorer plus existing browser APIs | Negligible / none | High | Implemented |
+| Optional browser capture and bounded report detail | Indirect, captures reproducible evidence | Indirect | Capture runs the real local workload | Low / low | Installed Chrome or Edge plus loopback app | Reuses browser/model cache / none added to app | High mapping coverage; local integration required | Implemented |
+| Deterministic first audio stream and bounded speech packing | Medium when source selection or fragmented speech matters | Medium | Adaptive grouping avoids one model call per short detected region while respecting the combined-span budget | Low / low | Existing FFmpeg and pure planning logic | None / none | High | Implemented |
+| Model capability-aware timestamp request | Neutral text | Medium | Avoids one known failed Distil request | Low / low | Registry plus existing fallback | None / none | High | Implemented |
+| Duration-scaled Whisper token ceiling | Can truncate dense output by bypassing timestamp seek | Neutral timing | Apparent speed gain was unsafe | Low / high | Existing generation option | None / none | Review exposed library interaction | Rejected and removed |
+| Repeated low-information activity filter | Can delete legitimate repetition | Can remove correctly timed cues | Can avoid calls only by suppressing evidence | Medium / high | Pure logic and RMS VAD | None / none | Counterexample reproduced | Rejected and removed |
+| Context-marked prefix trimming | Reduces duplicated overlap text | Preserves unique crossing suffixes | Bounded comparison work | Medium / medium | Pure logic | One internal boolean / none | High | Implemented |
+| Final segment-only micro-cue smoothing | Neutral recognition | Improves duration/readability after overlap repair | Small bounded second pass | Low / low | Pure logic | None / none | High | Implemented |
+| Pause/punctuation-aware cue boundaries | Neutral recognition | Medium | Small bounded scoring work | Medium / low | Pure logic | None / none | High | Implemented |
+| Transactional live preview and stale ASR invalidation | Preserves manual correction evidence | Preserves committed timing on failure | Small reducer/snapshot work | Medium / medium | React state and plain objects | Bounded draft alongside committed state / none | High reducer coverage | Implemented |
 | Explicit ASR timestamp mode | High for short word results | High | Neutral | Low / low | Matches installed ASR type | None / none | High | Implemented |
 | Conservative text-only fallback | High hallucination safety | High silence-placement safety | May add bounded repair calls | Low / low | Pure logic | None / none | High | Implemented |
 | Rolling adaptive RMS and raw boundaries | Medium, condition-dependent | Medium | High VAD CPU reduction expected from complexity | Medium / medium | Typed arrays and standard JS | About 6.1 MB/hour of retained frame arrays at 10 ms hop / none | High | Implemented |
@@ -203,6 +230,10 @@ Impact labels are expected direction based on the mechanism, not measured real-m
 ### Timestamp, fallback, and language behavior
 
 - `AsrTimestampMode` and `AsrTimelineOptions.timestampMode` make word versus segment normalization explicit. The worker passes the mode that actually succeeded after fallback.
+
+- Model metadata now declares whether word timestamps are supported. Distil Large v3 begins directly in segment mode; a recognized unexpected alignment/cross-attention error still retries once and changes later calls in that job to segment mode.
+
+- The worker leaves `max_new_tokens` unset for timestamped Whisper calls. This retains Transformers.js seek-based continuation when a slice is not fully transcribed in one pass and avoids a hidden truncation/performance tradeoff.
 
 - One through many word chunks are retained, malformed neighboring chunks do not invalidate valid chunks, segment chunks remain segments, and punctuation/CJK word joining avoids inserted spaces that change the transcript.
 
@@ -222,7 +253,7 @@ Impact labels are expected direction based on the mechanism, not measured real-m
 
 - `chooseLowActivityBoundary` deterministically prefers non-speech, then lower activity, then proximity to the target, then the earlier exact frame. It searches only the configured radius and retains duration splitting for continuous speech or missing frame data.
 
-- Core spans remain contiguous within a long region, slice overlap remains contextual, and sample-derived slice lengths remain capped at the configured maximum and the hard 29-second ceiling.
+- Separate detected regions are packed together while their combined ownership span fits the target core budget. The 1.5-second value is contextual overlap around that ownership span, not a maximum silence gap. Core spans remain contiguous within a long region, slice overlap remains contextual, and sample-derived slice lengths remain capped at the configured maximum and the hard 29-second ceiling.
 
 ### Reconciliation, coverage, repair, and timing
 
@@ -252,7 +283,23 @@ Impact labels are expected direction based on the mechanism, not measured real-m
 
 - `stabilizeGeneratedEntryIds` uses bounded timing, ordered-text similarity, and monotonic previous-cue ownership. A repair insertion before an edited cue therefore does not shift positional IDs, and reordered candidates cannot cross-match identities and misattach the user's edit.
 
+- Word-timed grouping now considers an internal pause of at least 350 ms a natural split even when the whole cue fits its hard limits, grades punctuation plus shorter clause pauses, and lets a pause of at least 750 ms override the normal penalty against a one-word side. Segment-only punctuation splitting avoids avoidable one-word cues.
+
+- Later duration extension, fragment smoothing, and gap closing preserve measured word/segment pauses of at least 350 ms instead of flattening them into mechanically continuous captions.
+
+- Full transcription previews now live in an id-scoped subtitle transaction. Partial worker updates and manual edits alter only its draft; success becomes one undoable commit, while cancellation or failure exposes the untouched committed entries and history. Autosave reads committed entries.
+
+- `invalidateStaleAsrMetadata` removes word/confidence evidence after semantic text changes or timing edits that no longer contain the words, while retaining safe wrapping/padding and fresh regenerated metadata.
+
+- No text-only repeated-cue filter runs after ASR. The attempted RMS-plus-repetition heuristic was removed after a legitimate repeated-dialogue counterexample demonstrated possible data loss.
+
+- Segment-only chunks that begin in left overlap but retain at least 0.5 seconds inside the owned core are kept with `boundaryContextPrefix` evidence. Reconciliation may trim a matching nearby prefix only when it has at least two units. A single repeated word is retained because coarse segment timing cannot prove it belongs to overlap context.
+
+- After normal overlap resolution, the formatter performs a final smoothing pass only for segment-timed neighbors. It merges an abrupt micro-cue only when the gap, meaningful-boundary, combined length, maximum duration, and hard-CPS checks all pass, then normalizes overlap again.
+
 ### Worker lifecycle, messages, reliability, and diagnostics
+
+- Full and range extraction now pass `-map 0:a:0`, so FFmpeg always uses the first audio stream rather than relying on implicit stream selection. Mono 16 kHz conversion and delayed-track compensation are unchanged.
 
 - One provider worker handles sequential transcription and regeneration jobs, tags all messages with job IDs, rejects concurrent work, ignores stale events, retries one pre-message startup crash, and terminates immediately on cancellation or a reported crash.
 
@@ -266,6 +313,8 @@ Impact labels are expected direction based on the mechanism, not measured real-m
 
 - `DiagnosticLog` keeps its existing 1,000-event and approximately 2 MB limits, but tracks event sizes incrementally and coalesces persistence for 250 ms. `flush()` and a `pagehide` handler preserve final local state without rewriting the complete history for every event.
 
+- The benchmark report includes maximum timing errors, 250/500/1,000 ms tolerance bands, cue duration/gap summaries, optional duration-constraint violations, and bounded normalized text/cue difference samples. The optional Playwright capture command validates project/settings/diagnostic consistency and writes ignored local artifacts without modifying the source video or reference.
+
 ### Deterministic regression coverage
 
 Focused tests now cover:
@@ -276,6 +325,8 @@ Focused tests now cover:
 
 - internal pauses, out-of-radius silence, continuous speech, exact sample positions, deterministic ties, and late-window planning in `src/tests/transcription-windowing.test.ts`;
 
+- model-safe window packing and direct model capability handling in `src/tests/transcription-windowing.test.ts`, `src/tests/transcription-settings.test.ts`, and `src/tests/transcription-models.test.ts`;
+
 - word-first timing, conflicting VAD, correct unchanged timing, rapid dialogue, overlaps, multi-segment and no-whitespace reconciliation, legitimate repetition, confidence, punctuation, and bounded long comparisons in `src/tests/timing-refinement.test.ts`;
 
 - confidence/word/text/speech-overlap coverage and large absolute misses in `src/tests/transcription-coverage.test.ts`;
@@ -285,6 +336,10 @@ Focused tests now cover:
 - delta reconstruction, all-message metrics, worker reuse, large-media eviction, concurrency, cancellation, crash recovery, and idle cleanup in `src/tests/browser-whisper-provider.test.ts`;
 
 - low-confidence timing, readable splitting without text loss, word-timestamp CJK captions, long no-whitespace and combining-mark text, post-padding overlap, duplicate metadata, stable monotonic edit/delete IDs, and SRT/VTT/TXT/project compatibility in `src/tests/subtitle-utils.test.ts`;
+
+- meaningful-pause segmentation, one-word avoidance, transactional commit/rollback/stale-id behavior, immutable settings snapshots, and ASR metadata invalidation in the subtitle utility, undoable-subtitle, settings-snapshot, and subtitle-editing suites;
+
+- marked overlap-context prefix trimming, intentional-repeat preservation, and final segment-only micro-cue smoothing in the timestamp, timing-refinement, and subtitle utility suites;
 
 - coalesced bounded persistence in `src/tests/diagnostic-log.test.ts` and legacy settings/UI behavior in the model, settings, transcription-panel, and regeneration-dialog suites.
 
@@ -326,9 +381,9 @@ Selected baseline production asset sizes reported by Vite were 32,232.41 kB for 
 
 ### Post-change deterministic evidence
 
-`npm.cmd run benchmark:self-test` passed 36 checks. Those checks validate WER/CER accounting, timestamp statistics, cue matching limits, missed-speech/silence calculations, duplicate metrics, readability violations, missing-stage treatment, RTF, message telemetry, fingerprints, setting-source checks, missing-environment handling, and comparison direction. Its values are synthetic scorer inputs, not application benchmark results.
+At the 2026-07-23 follow-up, `npm.cmd run benchmark:self-test` passed 66 checks. The added checks cover bounded difference details, maximum timing error, tolerance bands, cue-duration and gap distributions, optional duration constraints, and their suite/comparison aggregation. `npm.cmd run benchmark:capture -- --self-test` passed 10 diagnostic-to-telemetry mapping and validation checks without opening a browser. All values are synthetic tooling inputs, not application benchmark results.
 
-The final branch-wide gate passed after the implementation and documentation edits:
+The following table is the historical branch-wide gate recorded at the original audit checkpoint; it is not a substitute for the final validation of the follow-up implementation:
 
 | Check | Post-change result |
 | --- | --- |
@@ -339,19 +394,65 @@ The final branch-wide gate passed after the implementation and documentation edi
 | `npm.cmd run benchmark:self-test` | Passed; 36 deterministic scorer checks |
 | `local-launch.bat` smoke test | Passed with `AUTO_SUBTITLE_NO_BROWSER=1`; Vite reported ready on `127.0.0.1:5173` in 477 ms and stopped cleanly on Enter |
 
-The FFmpeg WASM, ONNX Runtime WASM, and Transformers JavaScript production artifacts remained 32,232.41 kB, 23,567.05 kB, and 516.60 kB respectively. The raw main application JavaScript artifact changed from 320.13 kB to 329.87 kB (+9.74 kB, about 3.0%). Hashed filenames and gzip sizes are build artifacts, not runtime-memory or throughput measurements. The test-count and build-size changes are reported for reproducibility, not as accuracy or speed gains.
+At that original checkpoint, the FFmpeg WASM, ONNX Runtime WASM, and Transformers JavaScript production artifacts remained 32,232.41 kB, 23,567.05 kB, and 516.60 kB respectively. The raw main application JavaScript artifact changed from 320.13 kB to 329.87 kB (+9.74 kB, about 3.0%). Hashed filenames and gzip sizes are build artifacts, not runtime-memory or throughput measurements. The test-count and build-size changes are historical reproducibility data, not accuracy or speed gains.
 
-### Real-media before/after status
+### Private Matrix reference benchmark
 
-No local real-media fixture or human reference transcript was available in this environment. Consequently:
+The follow-up used one private English Matrix clip and its manually corrected Auto Subtitle project JSON as the reference. The video, reference JSON, generated projects, diagnostic logs, reports, model files, and final build artifacts remain ignored and are not committed. The values below reproduce the deterministic scorer's baseline and final outputs at their recorded precision; they are not claims about other media. Here, **Baseline** and **Final** identify the two captured subtitle outputs, not an additional source-control revision beyond the audit baseline named above.
 
-- no WER, CER, normalized-similarity, word/cue timestamp error, missed-speech, silence-placement, or duplicate-rate delta is reported;
+#### Text and cue alignment
 
-- no inference, extraction, VAD, formatting, total-time, RTF, peak-memory, cold/warm-load, or message-byte before/after number is reported;
+| Metric | Baseline | Final |
+| --- | ---: | ---: |
+| Word error rate | `0.305263` | `0.115789` |
+| Word errors | `58` (`8` substitutions, `33` deletions, `17` insertions) | `22` (`0` substitutions, `0` deletions, `22` insertions) |
+| Character error rate | `0.2625` | `0.061111` |
+| Normalized transcript similarity | `0.7375` | `0.942408` |
+| Candidate cue count | `35` | `37` |
+| Matched cue count | `23` | `27` |
 
-- no claim of measured accuracy, synchronization, speed, or memory improvement is made.
+The final-code output substantially reduced text error on this fixture and eliminated measured substitutions and deletions. Its 22 remaining word errors were insertions: an isolated repair hallucination, one repeated five-word phrase in the pill-choice section, and several music/outro fragments. The safer pipeline retains those uncertain repetitions because the rejected RMS-plus-text filter could erase legitimate speech.
 
-The harness and exact capture instructions are now present so these measurements can be produced without committing media.
+#### Cue timing
+
+| Metric | Baseline | Final | Direction on this fixture |
+| --- | ---: | ---: | --- |
+| Mean absolute onset error | `1.253217 s` | `1.005407 s` | Better |
+| Median absolute onset error | `0.542 s` | `0.708 s` | Worse |
+| Maximum absolute onset error | `9.146 s` | `9.146 s` | Unchanged |
+| Matched onsets within 500 ms | `47.826087%` | `40.740741%` | Worse |
+| Mean absolute offset error | `1.443087 s` | `0.991 s` | Better |
+| Median absolute offset error | `0.52 s` | `0.724 s` | Worse |
+| Maximum absolute offset error | `10.001 s` | `4.747 s` | Better |
+| Matched offsets within 500 ms | `47.826087%` | `40.740741%` | Worse |
+
+Timing was mixed. Mean onset and offset error improved and maximum offset error fell, but both median errors and both 500 ms match percentages worsened; maximum onset error was unchanged. The matched set also grew from 23 to 27 cues, so the summaries do not contain identical pairs. Distil Large v3 does not provide word timestamps in this app, and this segment-only result does not support a blanket synchronization-improvement claim.
+
+#### Speech coverage and readability
+
+| Metric | Baseline | Final |
+| --- | ---: | ---: |
+| Missed reference speech | `17.4118%` (`11.548 s`) | `3.4709%` (`2.302 s`) |
+| Candidate duration outside reference speech | `49.3645%` (`53.4 s`) | `47.9055%` (`58.873 s`) |
+| Mostly-silence cues | `14` | `13` |
+| Overlaps / invalid cues | `0` / `0` | `0` / `0` |
+| Minimum-duration violations | `2` | `0` |
+| CPS violations | `1` | `0` |
+
+Reference-speech coverage and deterministic readability checks improved for this sample, but absolute cue duration outside the reference grew by 5.473 seconds to 58.873 seconds and 13 cues remained mostly over silence. The lower outside-speech ratio comes from the candidate's longer total cue duration, not less false-positive time. These figures expose the residual music hallucinations and show why the final transcript still requires review.
+
+#### Indicative performance
+
+| Metric | Baseline | Final |
+| --- | ---: | ---: |
+| Total job time | `2,420,817.29 ms` | `1,290,337.85 ms` |
+| Total real-time factor | `15.059353` | `8.026898` |
+| Primary inference time | `1,037,229 ms` | `721,643 ms` |
+| Coverage-repair time | `1,274,655 ms` | `464,144 ms` |
+
+The harness verified the same media, settings, browser/version, hardware-concurrency metadata, and cold model-load state. Nevertheless, these runtime numbers remain indicative because developer tests overlapped part of the baseline run. The final capture kept other workloads idle and retained Transformers.js seek-based timestamp decoding; its roughly 46.7% lower total time cannot be attributed to one change or generalized to other devices.
+
+This benchmark supports a large text-accuracy, reference-coverage, and readability improvement for one private English fixture, with mixed cue-timing results. It does not reduce absolute false-positive cue time, does not eliminate music hallucinations, and does not establish general accuracy or performance across other speakers, languages, accents, noise conditions, models, browsers, or devices.
 
 ## 8. Memory and performance findings
 
@@ -429,7 +530,7 @@ This table documents expected algorithm behavior, not measured recognition quali
 | Condition | Expected current behavior | Remaining risk |
 | --- | --- | --- |
 | Quiet speech | Hysteresis helps retain a quieter trailing phoneme once speech is active; the adaptive floor can recover as quiet observations accumulate. | Speech below the minimum RMS floor or after sustained loud noise can still be missed. |
-| Loud background music | Sustained high RMS is likely to be treated as active. Minimum duration does not distinguish music from speech. | Can create broad speech regions and hallucination opportunities; model and coverage evidence still need real-media evaluation. |
+| Loud background music | Sustained high RMS is likely to be treated as active. Text-only fallback still requires localized speech evidence, and repair is bounded. | RMS alone cannot distinguish music from repeated dialogue, so uncertain recognized text is retained; the Matrix fixture produced music-related insertions. |
 | Constant fan / air-conditioner | The local floor can adapt upward and stop classifying a stable source as new speech. | Strong modulation or a floor clamped by the current thresholds can remain active. |
 | Sudden sound effect | One isolated active frame is smoothed out and a run shorter than 250 ms is rejected. | Longer effects can be treated as speech. |
 | Clipped audio | Finite samples produce high RMS and likely continuous activity. | No clipping detector or restoration exists; ASR quality can be poor. |
@@ -442,21 +543,21 @@ This table documents expected algorithm behavior, not measured recognition quali
 
 ### Subtitle segmentation findings
 
-`formatTranscriptionSegments` still enforces maximum line/subtitle length, duration, CPS, non-overlap, and balanced line scoring. It prefers punctuation and natural phrase boundaries and uses actual word boundaries when word timing exists. Small dependency-free penalties discourage splitting articles from nouns, prepositions from objects, auxiliaries from verbs, numbers from units, and obvious name-like sequences.
+`formatTranscriptionSegments` still enforces maximum line/subtitle length, duration, CPS, non-overlap, and balanced line scoring. It prefers punctuation and natural phrase boundaries and uses actual word boundaries when word timing exists. A measured pause of at least 350 ms is a preferred split and is protected from later merging/gap closing; punctuation with about 200 ms of pause is secondary evidence. Small dependency-free penalties discourage one-word sides and splitting articles from nouns, prepositions from objects, auxiliaries from verbs, numbers from units, and obvious name-like sequences. A pause of at least 750 ms can justify a naturally isolated one-word phrase.
 
-Formatting may apply the explicitly configured 80 ms display lead-in before a first word and 180 ms tail after a last word; it does not alter the stored word evidence or apply VAD context padding again. It will accept less than the configured 80 ms inter-cue display gap for rapid dialogue rather than trim spoken-word evidence. No speaker diarization is present, so speaker changes cannot be a segmentation signal.
+Formatting may apply the explicitly configured 80 ms display lead-in before a first word and 180 ms tail after a last word; it does not alter the stored word evidence or apply VAD context padding again. It will accept less than the configured 80 ms inter-cue display gap for rapid dialogue rather than trim spoken-word evidence. After overlap normalization, a second segment-only smoothing pass can merge a newly squeezed micro-cue only when no meaningful boundary is lost and combined duration, text length, and CPS stay valid. No speaker diarization is present, so speaker changes cannot be a segmentation signal.
 
 ## 10. Remaining limitations
 
-1. No real FFmpeg-plus-Whisper browser job runs in Vitest. Model download, ONNX execution, FFmpeg worker memory, browser codecs, WebGPU behavior, and end-to-end cancellation still require Playwright/manual browser coverage.
+1. No real FFmpeg-plus-Whisper browser job runs in Vitest. The optional Playwright capture command can exercise that path locally, but model download, ONNX execution, FFmpeg worker memory, browser codecs, WebGPU behavior, and end-to-end cancellation are not normal CI coverage.
 
-2. No real-media benchmark was available for this audit. Recognition, timing, VAD, browser memory, and throughput changes remain unquantified outside deterministic mechanisms.
+2. The follow-up has one private English Matrix benchmark. It showed large text/reference-coverage gains and mixed timing, while absolute false-positive cue time increased. Baseline runtime was confounded by overlapping tests. One fixture is not evidence for other languages, speakers, audio conditions, models, browsers, or devices.
 
 3. The complete compressed media is still loaded into FFmpeg's in-memory filesystem. Full decoded PCM remains resident for the complete transcription and bounded repair pass. During compatible regeneration below the 256 MiB input guard, a warm Tiny/Base pipeline can overlap that compressed-input/MEMFS allocation. This is not streaming, and the fixed guard still needs device profiling.
 
 4. Audio-only PCM conversion can temporarily require roughly 345.6 MB per hour for WAV plus Float32 data, before FFmpeg, input media, model, tensor, VAD, browser, and app overhead.
 
-5. RMS VAD cannot reliably distinguish speech from music, long effects, or all environmental noise. Missed VAD speech cannot be found by coverage repair.
+5. RMS VAD cannot reliably distinguish speech from music, long effects, or all environmental noise. A destructive repetition heuristic was rejected because it could erase legitimate dialogue; music hallucinations therefore remain possible. Missed VAD speech cannot be found by coverage repair.
 
 6. Automatic language detection is not implemented. Legacy auto settings deliberately fall back to English, and users must select a known non-English language.
 
@@ -482,6 +583,12 @@ Formatting may apply the explicitly configured 80 ms display lead-in before a fi
 
 17. Generated subtitles always require human review. When transcription fails or timing evidence is ambiguous, the implementation prefers an explicit failure, empty result, or bounded retry over fabricated captions.
 
+18. Files with several audio streams use the first stream. There is no UI track selector, and an intended secondary language/commentary track must be remuxed first.
+
+19. Segment-only timestamps cannot reveal pauses inside one broad ASR segment. Punctuation/proportional timing remains a fallback rather than acoustic alignment.
+
+20. Whisper's timestamp seek loop can still take substantial time on noisy or difficult windows. The app does not impose a generic token cap because doing so bypasses that continuation path in the installed library.
+
 ## 11. Recommended future work
 
 Recommendations are ordered to preserve the audit's measurement-first, isolated-change strategy.
@@ -500,7 +607,7 @@ Recommendations are ordered to preserve the audit's measurement-first, isolated-
 
 7. **Refine segment-mode no-whitespace splitting.** Build on the grapheme-safe `findUnbrokenTextSplit` with optional lightweight script-specific sentence cues. Expand the combining-mark regression beyond Thai to Khmer, Lao, Myanmar, emoji/ZWJ, and mixed-script long segments while preserving exact text, timing, CPS, and line limits.
 
-8. **Add local browser integration tests.** Keep a tiny redistributable generated-tone/synthetic-speech fixture only if licensing permits, or provide an ignored Playwright fixture protocol. Test FFmpeg extraction, worker startup/crash/cancel, model cache cold/warm labeling, and output schema without making CI download large models by default.
+8. **Extend optional local browser capture into a sustainable integration suite.** Keep a tiny redistributable generated-tone/synthetic-speech fixture only if licensing permits, or retain the ignored Playwright fixture protocol. Test FFmpeg extraction, worker startup/crash/cancel, model cache cold/warm labeling, and output schema without making CI download large models by default.
 
 9. **Expand diagnostics only where actionable.** Record the selected boundary reason and aggregate VAD threshold/activity percentiles, plus repair outcome categories. Continue bounding all data and never serialize PCM, media bytes, weights, or unlimited transcript text.
 

@@ -24,6 +24,45 @@ export function updateSubtitleEntry(
   return sortAndRenumber(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
 }
 
+/**
+ * Removes ASR evidence that no longer describes a manually edited cue.
+ * Line wrapping and cue padding that still contains every timestamped word are
+ * harmless. Entries with a new ID are left alone so regenerated cues retain
+ * the fresh word timings and confidence supplied by the transcription worker.
+ */
+export function invalidateStaleAsrMetadata(
+  previousEntries: SubtitleEntry[],
+  nextEntries: SubtitleEntry[],
+): SubtitleEntry[] {
+  const previousById = new Map(previousEntries.map((entry) => [entry.id, entry]))
+
+  return nextEntries.map((entry) => {
+    const previous = previousById.get(entry.id)
+    if (!previous || (entry.words === undefined && entry.confidence === undefined)) {
+      return entry
+    }
+
+    const semanticTextChanged = semanticSubtitleText(previous.text) !== semanticSubtitleText(entry.text)
+    const timingChanged = previous.startTime !== entry.startTime || previous.endTime !== entry.endTime
+    const hasFreshWordMetadata = Boolean(entry.words?.length && !sameSubtitleWords(previous.words, entry.words))
+    const timingRemainsCompatible =
+      !timingChanged ||
+      Boolean(
+        entry.words?.length &&
+        entry.words.every(
+          (word) => word.startTime >= entry.startTime - 0.001 && word.endTime <= entry.endTime + 0.001,
+        ),
+      )
+
+    if ((!semanticTextChanged && timingRemainsCompatible) || hasFreshWordMetadata) {
+      return entry
+    }
+
+    const { confidence: _confidence, words: _words, ...withoutStaleMetadata } = entry
+    return withoutStaleMetadata
+  })
+}
+
 export function deleteSubtitleEntry(entries: SubtitleEntry[], id: string): DeleteSubtitleResult {
   const sorted = sortAndRenumber(entries)
   const removedIndex = sorted.findIndex((entry) => entry.id === id)
@@ -85,4 +124,28 @@ export function splitSubtitleEntryAtTime(
     ]),
     selectedId: second.id,
   }
+}
+
+function semanticSubtitleText(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
+}
+
+function sameSubtitleWords(first: SubtitleEntry['words'], second: SubtitleEntry['words']): boolean {
+  if (first === second) {
+    return true
+  }
+  return (
+    first?.length === second?.length &&
+    Boolean(
+      first?.every((word, index) => {
+        const other = second?.[index]
+        return (
+          word.text === other?.text &&
+          word.startTime === other.startTime &&
+          word.endTime === other.endTime &&
+          word.confidence === other.confidence
+        )
+      }),
+    )
+  )
 }

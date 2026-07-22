@@ -24,6 +24,7 @@ export type SpeechModelOption = {
   supportsTranslate: boolean
   supportsFullTranscription: boolean
   supportsRegeneration: boolean
+  supportsWordTimestamps: boolean
   recommendedExecutionProvider: 'auto' | 'webgpu' | 'wasm'
   recommendedDtype?: 'auto' | 'q8' | 'fp32'
   highResource: boolean
@@ -50,6 +51,7 @@ export const SPEECH_MODELS: SpeechModelOption[] = [
     supportsTranslate: true,
     supportsFullTranscription: true,
     supportsRegeneration: true,
+    supportsWordTimestamps: true,
     recommendedExecutionProvider: 'auto',
     recommendedDtype: 'auto',
     highResource: false,
@@ -66,6 +68,7 @@ export const SPEECH_MODELS: SpeechModelOption[] = [
     supportsTranslate: true,
     supportsFullTranscription: true,
     supportsRegeneration: true,
+    supportsWordTimestamps: true,
     recommendedExecutionProvider: 'auto',
     recommendedDtype: 'auto',
     highResource: false,
@@ -82,6 +85,7 @@ export const SPEECH_MODELS: SpeechModelOption[] = [
     supportsTranslate: false,
     supportsFullTranscription: true,
     supportsRegeneration: true,
+    supportsWordTimestamps: true,
     recommendedExecutionProvider: 'webgpu',
     recommendedDtype: 'q8',
     highResource: true,
@@ -99,6 +103,7 @@ export const SPEECH_MODELS: SpeechModelOption[] = [
     supportsTranslate: false,
     supportsFullTranscription: true,
     supportsRegeneration: true,
+    supportsWordTimestamps: false,
     recommendedExecutionProvider: 'webgpu',
     recommendedDtype: 'q8',
     highResource: true,

@@ -155,6 +155,8 @@ async function runSelfTest() {
       maxLineLength: 42,
       maximumLines: 2,
       minimumSpeechOverlapRatio: 0.5,
+      minimumCueDurationSeconds: 0.5,
+      maximumCueDurationSeconds: 1.1,
     },
   }
   const reference = {
@@ -213,13 +215,45 @@ async function runSelfTest() {
   const checks = []
   checkClose(metrics.text.wer.rate, 1 / 3, 'WER counts one inserted token', checks)
   checkEqual(metrics.text.wer.insertions, 1, 'WER insertion breakdown', checks)
+  checkEqual(metrics.text.differences.totalDifferenceCount, 1, 'readable text difference count', checks)
+  checkEqual(metrics.text.differences.entries[0].type, 'insertion', 'readable text difference type', checks)
   checkClose(metrics.wordTiming.startErrorSeconds.meanAbsolute, 0.1, 'mean word-start absolute error', checks)
   checkClose(metrics.wordTiming.endErrorSeconds.medianAbsolute, 0.1, 'median word-end absolute error', checks)
+  checkClose(metrics.wordTiming.startErrorSeconds.maximumAbsolute, 0.1, 'maximum word-start error', checks)
+  checkEqual(
+    metrics.wordTiming.startErrorSeconds.withinTolerances['250ms'].count,
+    3,
+    'word starts within 250 ms count',
+    checks,
+  )
   checkEqual(metrics.cueTiming.matchedCueCount, 2, 'monotonic cue matching', checks)
+  checkClose(metrics.cueTiming.offsetErrorSeconds.maximumAbsolute, 0.25, 'maximum cue-offset error', checks)
+  checkEqual(
+    metrics.cueTiming.offsetErrorSeconds.withinTolerances['250ms'].percentage,
+    100,
+    'cue offsets within 250 ms percentage',
+    checks,
+  )
+  checkEqual(metrics.cueTiming.differences.totalDifferenceCount, 2, 'per-cue difference count', checks)
   checkClose(metrics.speechCoverage.missedSpeechDurationSeconds, 0.1, 'missed speech duration', checks)
   checkClose(metrics.speechCoverage.candidateOverSilenceDurationSeconds, 0.4, 'silence placement duration', checks)
   checkEqual(metrics.subtitleQuality.invalidTimestampCount, 1, 'invalid cue count', checks)
   checkEqual(metrics.subtitleQuality.overlapCount, 1, 'overlap count', checks)
+  checkClose(metrics.subtitleQuality.cueDurationSeconds.minimum, 0.4, 'minimum cue duration', checks)
+  checkClose(metrics.subtitleQuality.cueDurationSeconds.maximum, 1.15, 'maximum cue duration', checks)
+  checkClose(metrics.subtitleQuality.interCueGapSeconds.minimum, -0.05, 'minimum inter-cue gap', checks)
+  checkEqual(
+    metrics.subtitleQuality.minimumCueDurationViolationCount,
+    1,
+    'minimum cue-duration violation count',
+    checks,
+  )
+  checkEqual(
+    metrics.subtitleQuality.maximumCueDurationViolationCount,
+    1,
+    'maximum cue-duration violation count',
+    checks,
+  )
   checkClose(metrics.performance.realTimeFactor, 1, 'real-time factor', checks)
   checkEqual(metrics.performance.workerMessages.count, 10, 'worker message count', checks)
 
@@ -242,6 +276,50 @@ async function runSelfTest() {
   )
   checkEqual(quality.cpsViolationCount, 1, 'CPS violation count', checks)
   checkEqual(quality.lineLengthViolationCount, 1, 'line-length violation count', checks)
+  checkClose(quality.cueDurationSeconds.mean, 5.5, 'cue-duration mean', checks)
+  checkClose(quality.interCueGapSeconds.mean, 1, 'inter-cue gap mean', checks)
+  checkEqual(quality.maximumCueDurationViolationCount, 1, 'standalone maximum-duration violation', checks)
+
+  const boundedTextDifferences = calculateTextMetrics(
+    '',
+    Array.from({ length: 60 }, (_, index) => `extra${index}`).join(' '),
+    manifestCase.normalization,
+    'en',
+    'wer',
+  ).differences
+  checkEqual(boundedTextDifferences.totalDifferenceCount, 60, 'full text difference count', checks)
+  checkEqual(boundedTextDifferences.returnedDifferenceCount, 50, 'bounded text difference details', checks)
+  checkEqual(boundedTextDifferences.omittedDifferenceCount, 10, 'omitted text difference count', checks)
+  const longTextDifference = calculateTextMetrics(
+    '',
+    'x'.repeat(200),
+    manifestCase.normalization,
+    'en',
+    'wer',
+  ).differences.entries[0]
+  checkEqual(longTextDifference.candidateTextTruncated, true, 'long difference text is marked truncated', checks)
+  checkEqual(Array.from(longTextDifference.candidateText).length, 160, 'long difference text is bounded', checks)
+
+  const cueDifferenceReference = Array.from({ length: 60 }, (_, index) => ({
+    text: `word${index}`,
+    startTime: index * 2,
+    endTime: index * 2 + 1,
+  }))
+  const cueDifferenceCandidate = cueDifferenceReference.map((cue) => ({
+    ...cue,
+    startTime: cue.startTime + 0.1,
+    endTime: cue.endTime + 0.1,
+  }))
+  const boundedCueDifferences = calculateCueTimingMetrics(
+    cueDifferenceReference,
+    cueDifferenceCandidate,
+    manifestCase.normalization,
+    'en',
+    'wer',
+  ).differences
+  checkEqual(boundedCueDifferences.totalDifferenceCount, 60, 'full cue difference count', checks)
+  checkEqual(boundedCueDifferences.returnedDifferenceCount, 50, 'bounded cue difference details', checks)
+  checkEqual(boundedCueDifferences.omittedDifferenceCount, 10, 'omitted cue difference count', checks)
 
   const wordCaseMetrics = evaluateBenchmarkCase(
     { ...manifestCase, id: 'word-summary', textMetric: 'wer' },
@@ -296,6 +374,26 @@ async function runSelfTest() {
   checkEqual(incompleteStageSummary.measuredCaseCount, 1, 'stage measured-case count', checks)
   checkEqual(incompleteStageSummary.missingCaseCount, 1, 'stage missing-case count', checks)
 
+  const syntheticSummary = summarizeCaseMetrics([{ id: manifestCase.id, metrics }])
+  checkClose(
+    syntheticSummary.cueTiming.maximumAbsoluteEndOrOffsetErrorSeconds,
+    0.25,
+    'suite maximum cue-offset error',
+    checks,
+  )
+  checkEqual(
+    syntheticSummary.cueTiming.endOrOffsetWithinTolerances['250ms'].count,
+    2,
+    'suite cue-offset tolerance count',
+    checks,
+  )
+  checkEqual(
+    syntheticSummary.subtitleQuality.minimumCueDurationViolationCount,
+    1,
+    'suite minimum-duration violation count',
+    checks,
+  )
+
   const manyCues = Array.from({ length: 1_000 }, (_, index) => ({
     text: `cue ${index}`,
     startTime: index * 2,
@@ -328,16 +426,32 @@ async function runSelfTest() {
       settingsSourcesMatch: false,
       metrics,
     }],
-    summary: { text: { wer: 0.5 } },
+    summary: {
+      text: { wer: 0.5 },
+      cueTiming: {
+        endOrOffsetWithinTolerances: {
+          '250ms': { toleranceSeconds: 0.25, count: 1, evaluatedCount: 2, percentage: 50 },
+        },
+      },
+    },
   }
   const candidateReport = structuredClone(baseReport)
   candidateReport.run.label = 'candidate'
   candidateReport.summary.text.wer = 0.25
+  candidateReport.summary.cueTiming.endOrOffsetWithinTolerances['250ms'].percentage = 100
   const comparison = compareBenchmarkReports(baseReport, candidateReport)
   checkClose(
     comparison.summaryNumericDeltas['text.wer'].candidateMinusBaseline,
     -0.25,
     'comparison uses candidate minus baseline',
+    checks,
+  )
+  checkClose(
+    comparison.summaryNumericDeltas[
+      'cueTiming.endOrOffsetWithinTolerances.250ms.percentage'
+    ].candidateMinusBaseline,
+    50,
+    'comparison includes tolerance percentages',
     checks,
   )
   checkEqual(
@@ -390,6 +504,10 @@ async function runSelfTest() {
         media: 'fixture.bin',
         language: 'en',
         textMetric: 'wer',
+        constraints: {
+          minimumCueDurationSeconds: 0.5,
+          maximumCueDurationSeconds: 6,
+        },
         settings: { modelId: 'self-test' },
         reference: { transcriptFile: 'reference.txt' },
       }],
@@ -407,6 +525,18 @@ async function runSelfTest() {
     const loadedSuite = await loadBenchmarkSuite(manifestPath, runPath)
     checkEqual(loadedSuite.cases.length, 1, 'manifest and run schema loading', checks)
     checkEqual(loadedSuite.cases[0].media.sha256.length, 64, 'streamed media SHA-256 fingerprint', checks)
+    checkClose(
+      loadedSuite.cases[0].manifestCase.constraints.minimumCueDurationSeconds,
+      0.5,
+      'optional minimum-duration constraint loading',
+      checks,
+    )
+    checkClose(
+      loadedSuite.cases[0].manifestCase.constraints.maximumCueDurationSeconds,
+      6,
+      'optional maximum-duration constraint loading',
+      checks,
+    )
     checkEqual(loadedSuite.cases[0].settingsSourcesMatch, false, 'descriptor/artifact settings conflict detection', checks)
     checkEqual(
       loadedSuite.warnings.some((warning) => warning.includes('descriptor settings conflict')),
@@ -441,6 +571,33 @@ async function runSelfTest() {
       matchingSettingsSuite.cases[0].settingsSourcesMatch,
       true,
       'descriptor settings may be a matching subset of artifact settings',
+      checks,
+    )
+    await writeFile(manifestPath, JSON.stringify({
+      schemaVersion: 1,
+      name: 'invalid-duration-constraints',
+      cases: [{
+        id: 'io-self-test',
+        media: 'fixture.bin',
+        language: 'en',
+        constraints: {
+          minimumCueDurationSeconds: 7,
+          maximumCueDurationSeconds: 6,
+        },
+        reference: { transcriptFile: 'reference.txt' },
+      }],
+    }), 'utf8')
+    let invalidDurationConstraintRejected = false
+    try {
+      await loadBenchmarkSuite(manifestPath, runPath)
+    } catch (error) {
+      invalidDurationConstraintRejected = error instanceof BenchmarkInputError
+        && error.issues.some((issue) => issue.includes('must not exceed'))
+    }
+    checkEqual(
+      invalidDurationConstraintRejected,
+      true,
+      'inverted duration constraints are rejected',
       checks,
     )
   } finally {

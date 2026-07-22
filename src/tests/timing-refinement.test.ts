@@ -158,6 +158,53 @@ describe('adjacent-window reconciliation', () => {
     expect(reconciled[1].startTime).toBeGreaterThanOrEqual(reconciled[0].endTime)
   })
 
+  it('preserves a nearby single-word repeat even when coarse context marks it', () => {
+    const reconciled = reconcileBoundarySegments(
+      [{ startTime: 10, endTime: 12.4, text: 'we tested every latch and lock.' }],
+      [{
+        startTime: 13.1,
+        endTime: 15.8,
+        text: 'lock, then we recorded the results.',
+        boundaryContextPrefix: true,
+      }],
+      13.1,
+    )
+
+    expect(reconciled.map((segment) => segment.text)).toEqual([
+      'we tested every latch and lock.',
+      'lock, then we recorded the results.',
+    ])
+    expect(reconciled[1].startTime).toBeGreaterThan(reconciled[0].endTime)
+  })
+
+  it('trims a nearby two-word prefix explicitly retained from window context', () => {
+    const reconciled = reconcileBoundarySegments(
+      [{ startTime: 10, endTime: 12.4, text: 'the checklist says inspect the final lock.' }],
+      [{
+        startTime: 13.1,
+        endTime: 15.8,
+        text: 'final lock, then record the result.',
+        boundaryContextPrefix: true,
+      }],
+      13.1,
+    )
+
+    expect(reconciled.map((segment) => segment.text)).toEqual([
+      'the checklist says inspect the final lock,',
+      'then record the result.',
+    ])
+  })
+
+  it('does not trim an adjacent intentional repeat without overlap-context evidence', () => {
+    const reconciled = reconcileBoundarySegments(
+      [{ startTime: 0, endTime: 1, text: 'Please touch' }],
+      [{ startTime: 1.1, endTime: 2.1, text: 'touch the screen' }],
+      1,
+    )
+
+    expect(reconciled.map((segment) => segment.text)).toEqual(['Please touch', 'touch the screen'])
+  })
+
   it('preserves boundary punctuation when trimming a duplicated prefix', () => {
     const reconciled = reconcileBoundarySegments(
       [{

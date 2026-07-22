@@ -56,6 +56,13 @@ describe('RegenerationDialog', () => {
     expect(button('Generate alternatives').disabled).toBe(true)
   })
 
+  it('locks range inputs while regeneration is running', () => {
+    renderDialog({ busy: true })
+
+    expect(input('Regeneration start time').disabled).toBe(true)
+    expect(input('Regeneration end time').disabled).toBe(true)
+  })
+
   it('shows applicable regeneration-only settings and disables incompatible models', () => {
     renderDialog({
       preferences: {

@@ -26,6 +26,7 @@ type ComparisonUnit = {
   normalized: string
   startIndex: number
   segmentIndex: number
+  boundaryContextPrefix?: boolean
   segmentStartTime?: number
   segmentEndTime?: number
   startTime?: number
@@ -84,9 +85,19 @@ export function reconcileBoundarySegments(
     overlap === 1 &&
     unitsForSegment(existingUnits, matchedExisting[0]?.segmentIndex).length === 1 &&
     unitsForSegment(incomingUnits, matchedIncoming[0]?.segmentIndex).length === 1
-  const hasEnoughTextEvidence = overlap >= minimumOverlap || singleWordTimestampMatch || singleSegmentUnitMatch
+  const boundaryContextMatch = hasBoundaryContextMatch(
+    overlap,
+    matchedExisting,
+    matchedIncoming,
+    settings.boundarySearchSeconds,
+  )
+  const hasEnoughTextEvidence =
+    overlap >= minimumOverlap || singleWordTimestampMatch || singleSegmentUnitMatch || boundaryContextMatch
 
-  if (!hasEnoughTextEvidence || !hasOverlappingTimingEvidence(matchedExisting, matchedIncoming)) {
+  if (
+    !hasEnoughTextEvidence ||
+    (!hasOverlappingTimingEvidence(matchedExisting, matchedIncoming) && !boundaryContextMatch)
+  ) {
     return appendMonotonic(existing, sortedIncoming)
   }
 
@@ -158,6 +169,7 @@ function buildComparisonUnits(
     for (const unit of segmentUnits) {
       unit.segmentStartTime = segment.startTime
       unit.segmentEndTime = segment.endTime
+      unit.boundaryContextPrefix = segment.boundaryContextPrefix
     }
     assignWordTiming(segmentUnits, segment.words, takeSuffix)
     if (takeSuffix) {
@@ -301,6 +313,35 @@ function hasOverlappingTimingEvidence(
   const existingRange = rangeForUnitSegments(existingUnits)
   const incomingRange = rangeForUnitSegments(incomingUnits)
   return existingRange !== undefined && incomingRange !== undefined && rangesOverlap(existingRange, incomingRange)
+}
+
+function hasBoundaryContextMatch(
+  overlap: number,
+  existingUnits: ComparisonUnit[],
+  incomingUnits: ComparisonUnit[],
+  boundarySearchSeconds: number,
+): boolean {
+  const firstIncoming = incomingUnits[0]
+  if (!overlap || !firstIncoming?.boundaryContextPrefix) {
+    return false
+  }
+  // Coarse segment timing cannot prove that one repeated lexical unit belongs
+  // to overlap context. Require two units before bypassing timing evidence so
+  // an intentional repeated word is never deleted on the marker alone.
+  if (overlap < 2) {
+    return false
+  }
+  const existingRange = rangeForUnitSegments(existingUnits)
+  const incomingRange = rangeForUnitSegments(incomingUnits)
+  if (!existingRange || !incomingRange) {
+    return false
+  }
+  const separation = Math.max(
+    0,
+    incomingRange.startTime - existingRange.endTime,
+    existingRange.startTime - incomingRange.endTime,
+  )
+  return separation <= Math.max(0, boundarySearchSeconds)
 }
 
 function timeRangeForUnits(units: ComparisonUnit[]): { startTime: number; endTime: number } | undefined {

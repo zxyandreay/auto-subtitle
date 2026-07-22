@@ -156,6 +156,31 @@ describe('subtitle editing logic', () => {
     expect(shifted[0].endTime).toBe(0.6)
   })
 
+  it('shifts retained word timestamps with their subtitle cue', () => {
+    const shifted = shiftEntries(
+      [
+        makeSubtitleEntry({
+          startTime: 0,
+          endTime: 4,
+          text: 'shift these words',
+          confidence: 0.91,
+          words: [
+            { text: 'shift', startTime: 1, endTime: 1.5 },
+            { text: 'words', startTime: 2.5, endTime: 3 },
+          ],
+        }),
+      ],
+      500,
+      10,
+    )
+
+    expect(shifted[0].words).toEqual([
+      { text: 'shift', startTime: 1.5, endTime: 2 },
+      { text: 'words', startTime: 3, endTime: 3.5 },
+    ])
+    expect(shifted[0].confidence).toBe(0.91)
+  })
+
   it('splits and merges subtitle entries', () => {
     const entry = makeSubtitleEntry({
       startTime: 10,
@@ -244,6 +269,139 @@ describe('generated caption optimization', () => {
     expectGeneratedLinesToRespectPreferences(entries)
   })
 
+  it('uses punctuation without isolating an avoidable one-word segment-only caption', () => {
+    const preferences = {
+      ...generatedPreferences,
+      maxCharsPerLine: 24,
+      maxCharsPerSubtitle: 48,
+    }
+    const text =
+      'Yes. This explanation is intentionally detailed so the segment must split into natural readable captions.'
+    const entries = formatTranscriptionSegments(
+      [{ startTime: 0, endTime: 8, text }],
+      preferences,
+      10,
+    )
+
+    expect(entries.length).toBeGreaterThan(1)
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ' ')).join(' ')).toBe(text)
+    expect(entries.some((entry) => entry.text.replace(/\n/g, ' ') === 'Yes.')).toBe(false)
+    expect(entries.every((entry) => entry.text.replace(/\n/g, ' ').length <= 48)).toBe(true)
+    expect(entries.every((entry) => entry.endTime - entry.startTime <= preferences.maxDuration + 0.001)).toBe(true)
+    expect(
+      entries.every((entry) => (
+        calculateCharactersPerSecond(entry.text, entry.startTime, entry.endTime) <= preferences.hardMaxCps + 0.01
+      )),
+    ).toBe(true)
+  })
+
+  it('keeps a meaningful ASR gap between segment-only fallback captions', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        { startTime: 0, endTime: 0.25, text: 'Actually,' },
+        { startTime: 0.8, endTime: 2, text: 'this begins a separate spoken clause.' },
+      ],
+      generatedPreferences,
+      4,
+    )
+
+    expect(entries).toHaveLength(2)
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ' '))).toEqual([
+      'Actually,',
+      'this begins a separate spoken clause.',
+    ])
+    expect(entries[1].startTime - entries[0].endTime).toBeGreaterThanOrEqual(0.349)
+  })
+
+  it('still merges a one-word fallback fragment when there is no meaningful pause', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        { startTime: 0, endTime: 0.25, text: 'Actually,' },
+        { startTime: 0.4, endTime: 2, text: 'it continues.' },
+      ],
+      generatedPreferences,
+      4,
+    )
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0].text.replace(/\n/g, ' ')).toBe('Actually, it continues.')
+  })
+
+  it('splits word-timed text at a long internal pause even when the whole caption fits', () => {
+    const entries = formatTranscriptionSegments(
+      [{
+        startTime: 0,
+        endTime: 2,
+        text: 'We can wait. Now continue.',
+        words: [
+          { text: 'We', startTime: 0, endTime: 0.2 },
+          { text: 'can', startTime: 0.22, endTime: 0.4 },
+          { text: 'wait.', startTime: 0.42, endTime: 0.65 },
+          { text: 'Now', startTime: 1.5, endTime: 1.7 },
+          { text: 'continue.', startTime: 1.72, endTime: 2 },
+        ],
+      }],
+      { ...generatedPreferences, useWordTimestamps: true },
+      4,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ' '))).toEqual([
+      'We can wait.',
+      'Now continue.',
+    ])
+    expect(entries[1].startTime - entries[0].endTime).toBeGreaterThanOrEqual(0.349)
+  })
+
+  it('prefers a punctuated word boundary when word-timed text must be split', () => {
+    const text = 'A natural clause ends here. The remaining explanation keeps going for several more words.'
+    const tokens = text.split(' ')
+    const entries = formatTranscriptionSegments(
+      [{
+        startTime: 0,
+        endTime: tokens.length * 0.32,
+        text,
+        words: tokens.map((word, index) => ({
+          text: word,
+          startTime: index * 0.32,
+          endTime: index * 0.32 + 0.24,
+        })),
+      }],
+      {
+        ...generatedPreferences,
+        maxCharsPerLine: 22,
+        maxCharsPerSubtitle: 44,
+        minDuration: 0.5,
+        hardMaxCps: 100,
+      },
+      6,
+    )
+
+    expect(entries.length).toBeGreaterThan(1)
+    expect(entries[0].text.replace(/\n/g, ' ')).toBe('A natural clause ends here.')
+    expect(entries.every((entry) => entry.text.replace(/\n/g, ' ').length <= 44)).toBe(true)
+  })
+
+  it('preserves Unicode word text when a long pause creates a natural boundary', () => {
+    const entries = formatTranscriptionSegments(
+      [{
+        startTime: 0,
+        endTime: 2,
+        text: '前半です。後半です。',
+        words: [
+          { text: '前半です。', startTime: 0, endTime: 0.45 },
+          { text: '後半です。', startTime: 1.35, endTime: 1.8 },
+        ],
+      }],
+      { ...generatedPreferences, useWordTimestamps: true },
+      3,
+    )
+
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ''))).toEqual([
+      '前半です。',
+      '後半です。',
+    ])
+  })
+
   it('protects reading speed by extending or splitting very dense captions', () => {
     const segment: RawTranscriptionSegment = {
       startTime: 0,
@@ -277,6 +435,23 @@ describe('generated caption optimization', () => {
 
     expect(entries).toHaveLength(1)
     expect(entries[0].endTime - entries[0].startTime).toBeGreaterThanOrEqual(generatedPreferences.minDuration)
+  })
+
+  it('merges a micro-cue created while resolving overlapping segment timestamps', () => {
+    const entries = formatTranscriptionSegments(
+      [
+        { startTime: 10, endTime: 12.44, text: 'Once the gate closes, the route is fixed.' },
+        { startTime: 12.31, endTime: 12.81, text: 'Choose the left path.' },
+        { startTime: 12.81, endTime: 14.81, text: 'The journey begins.' },
+      ],
+      generatedPreferences,
+      20,
+    )
+
+    expect(entries.every((entry) => entry.endTime - entry.startTime >= generatedPreferences.minDuration)).toBe(true)
+    expect(entries.map((entry) => entry.text.replace(/\n/g, ' ')).join(' ')).toBe(
+      'Once the gate closes, the route is fixed. Choose the left path. The journey begins.',
+    )
   })
 
   it('does not extend low-confidence text-only timing beyond its speech evidence', () => {

@@ -2,11 +2,12 @@ import type { FormattingPreferences } from '../types/subtitles'
 
 type FormattingPanelProps = {
   preferences: FormattingPreferences
+  disabled?: boolean
   onChange: (preferences: FormattingPreferences) => void
   onReformat: () => void
 }
 
-export function FormattingPanel({ preferences, onChange, onReformat }: FormattingPanelProps) {
+export function FormattingPanel({ preferences, disabled = false, onChange, onReformat }: FormattingPanelProps) {
   return (
     <section className="formatting-panel" aria-label="Subtitle formatting preferences">
       <div className="panel-heading panel-heading--compact">
@@ -20,6 +21,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label>
           Characters per line
           <input
+            disabled={disabled}
             min={24}
             max={60}
             type="number"
@@ -30,6 +32,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label>
           Characters per subtitle
           <input
+            disabled={disabled}
             min={36}
             max={140}
             type="number"
@@ -40,6 +43,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label>
           Minimum duration
           <input
+            disabled={disabled}
             min={0.4}
             max={3}
             step={0.1}
@@ -51,6 +55,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label>
           Maximum duration
           <input
+            disabled={disabled}
             min={2}
             max={12}
             step={0.5}
@@ -62,6 +67,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label>
           Minimum gap
           <input
+            disabled={disabled}
             min={0}
             max={0.5}
             step={0.01}
@@ -73,6 +79,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         <label className="toggle-line toggle-line--panel">
           <input
             checked={preferences.useWordTimestamps}
+            disabled={disabled}
             type="checkbox"
             onChange={(event) => onChange({ ...preferences, useWordTimestamps: event.target.checked })}
           />
@@ -80,7 +87,7 @@ export function FormattingPanel({ preferences, onChange, onReformat }: Formattin
         </label>
       </div>
 
-      <button className="button button--soft" type="button" onClick={onReformat}>
+      <button className="button button--soft" disabled={disabled} type="button" onClick={onReformat}>
         Reapply formatting
       </button>
     </section>

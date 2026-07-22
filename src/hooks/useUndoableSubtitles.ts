@@ -6,12 +6,20 @@ type HistoryState = {
   past: SubtitleEntry[][]
   present: SubtitleEntry[]
   future: SubtitleEntry[][]
+  transaction?: {
+    id: number
+    draft: SubtitleEntry[]
+  }
 }
 
 type HistoryAction =
   | { type: 'commit'; entries: SubtitleEntry[] }
-  | { type: 'preview'; entries: SubtitleEntry[] }
   | { type: 'replace'; entries: SubtitleEntry[] }
+  | { type: 'begin-transaction'; id: number }
+  | { type: 'stage-transaction'; id: number; entries: SubtitleEntry[] }
+  | { type: 'edit-transaction'; id: number; entries: SubtitleEntry[] }
+  | { type: 'commit-transaction'; id: number; entries: SubtitleEntry[] }
+  | { type: 'rollback-transaction'; id: number }
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'clear' }
@@ -33,8 +41,24 @@ export function useUndoableSubtitles() {
     dispatch({ type: 'replace', entries })
   }, [])
 
-  const preview = useCallback((entries: SubtitleEntry[]) => {
-    dispatch({ type: 'preview', entries })
+  const beginTransaction = useCallback((id: number) => {
+    dispatch({ type: 'begin-transaction', id })
+  }, [])
+
+  const stageTransaction = useCallback((id: number, entries: SubtitleEntry[]) => {
+    dispatch({ type: 'stage-transaction', id, entries })
+  }, [])
+
+  const editTransaction = useCallback((id: number, entries: SubtitleEntry[]) => {
+    dispatch({ type: 'edit-transaction', id, entries })
+  }, [])
+
+  const commitTransaction = useCallback((id: number, entries: SubtitleEntry[]) => {
+    dispatch({ type: 'commit-transaction', id, entries })
+  }, [])
+
+  const rollbackTransaction = useCallback((id: number) => {
+    dispatch({ type: 'rollback-transaction', id })
   }, [])
 
   const clear = useCallback(() => {
@@ -50,21 +74,30 @@ export function useUndoableSubtitles() {
   }, [])
 
   return {
-    subtitles: state.present,
-    canUndo: state.past.length > 0,
-    canRedo: state.future.length > 0,
+    subtitles: state.transaction?.draft ?? state.present,
+    committedSubtitles: state.present,
+    transactionActive: Boolean(state.transaction),
+    canUndo: !state.transaction && state.past.length > 0,
+    canRedo: !state.transaction && state.future.length > 0,
     commit,
-    preview,
     replace,
     clear,
     undo,
     redo,
+    beginTransaction,
+    stageTransaction,
+    editTransaction,
+    commitTransaction,
+    rollbackTransaction,
   }
 }
 
 function historyReducer(state: HistoryState, action: HistoryAction): HistoryState {
   switch (action.type) {
     case 'commit': {
+      if (state.transaction) {
+        return state
+      }
       const next = sortAndRenumber(action.entries)
       if (sameSubtitleEntries(state.present, next)) {
         return state
@@ -75,21 +108,69 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
         future: [],
       }
     }
-    case 'preview':
+    case 'begin-transaction':
+      if (state.transaction) {
+        return state
+      }
       return {
-        past: state.past,
-        present: sortAndRenumber(action.entries),
+        ...state,
+        transaction: {
+          id: action.id,
+          draft: state.present,
+        },
+      }
+    case 'stage-transaction':
+    case 'edit-transaction':
+      if (state.transaction?.id !== action.id) {
+        return state
+      }
+      return {
+        ...state,
+        transaction: {
+          ...state.transaction,
+          draft: sortAndRenumber(action.entries),
+        },
+      }
+    case 'commit-transaction': {
+      if (state.transaction?.id !== action.id) {
+        return state
+      }
+      const next = sortAndRenumber(action.entries)
+      if (sameSubtitleEntries(state.present, next)) {
+        const { transaction: _transaction, ...committedState } = state
+        return committedState
+      }
+      return {
+        past: [...state.past, state.present].slice(-80),
+        present: next,
         future: [],
       }
+    }
+    case 'rollback-transaction': {
+      if (state.transaction?.id !== action.id) {
+        return state
+      }
+      const { transaction: _transaction, ...committedState } = state
+      return committedState
+    }
     case 'replace':
+      if (state.transaction) {
+        return state
+      }
       return {
         past: [],
         present: sortAndRenumber(action.entries),
         future: [],
       }
     case 'clear':
+      if (state.transaction) {
+        return state
+      }
       return initialState
     case 'undo': {
+      if (state.transaction) {
+        return state
+      }
       const previous = state.past.at(-1)
       if (!previous) {
         return state
@@ -102,6 +183,9 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
       }
     }
     case 'redo': {
+      if (state.transaction) {
+        return state
+      }
       const next = state.future[0]
       if (!next) {
         return state

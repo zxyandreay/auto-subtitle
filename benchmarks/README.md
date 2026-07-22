@@ -2,12 +2,13 @@
 
 This directory contains a deterministic scorer for local Auto Subtitle runs. It does not include media, reference transcripts, model files, or measured accuracy/performance results. Put only material you are legally allowed to use under `fixtures.local/`; that directory and generated `results/` are gitignored except for their `.gitkeep` files.
 
-The harness has two separate jobs:
+The benchmark tooling has three separate jobs:
 
-1. Score a captured transcription against local references.
-2. Compare two reports made from the same references without calling either one an improvement.
+1. Optionally capture one unedited run through the real browser app.
+2. Score a captured transcription against local references.
+3. Compare two reports made from the same references without calling either one an improvement.
 
-It does not run Whisper itself. That separation keeps copyrighted or large media out of git and lets cold/warm model runs be captured in a real browser. The app remains local: the harness reads local files and writes local JSON only.
+The deterministic scorer does not run Whisper itself. The optional Playwright capture command drives the actual local app in an installed Chrome or Edge browser, while the scorer remains a separate reproducible step. Neither tool copies media or references into the repository, and no paid or cloud transcription service is used.
 
 ## Directory layout
 
@@ -95,6 +96,45 @@ Reference timing must satisfy `0 <= startTime < endTime`. Candidate cue interval
 ## Capture a browser run
 
 Use the same media, browser version, hardware, model, language, provider, precision, timestamp mode, VAD settings, window settings, and formatting settings for a controlled before/after comparison.
+
+### Automated local capture
+
+Start the app with `local-launch.bat`, then run the optional Playwright capture command. It requires an installed Chrome or Edge browser and uses a headed browser because WebGPU availability and performance can differ in headless mode.
+
+```bash
+npm run benchmark:capture -- \
+  --video benchmarks/fixtures.local/example.mp4 \
+  --out-dir benchmarks/fixtures.local/captures/baseline \
+  --case-id example-english \
+  --language english \
+  --model onnx-community/whisper-base \
+  --provider wasm \
+  --dtype q8 \
+  --word-timestamps
+```
+
+PowerShell:
+
+```powershell
+npm.cmd run benchmark:capture -- --video benchmarks/fixtures.local/example.mp4 --out-dir benchmarks/fixtures.local/captures/baseline --case-id example-english --language english --model onnx-community/whisper-base --provider wasm --dtype q8 --word-timestamps
+```
+
+Run `npm run benchmark:capture -- --help` for the complete setting list, including formatting, timeout, browser channel, and profile options. Run `npm run benchmark:capture -- --self-test` to validate the diagnostic-to-telemetry mapping without opening a browser.
+
+The command:
+
+- accepts only a loopback app URL, selects the local video through the app, and never modifies or copies the video or any reference file;
+- uses a dedicated persistent profile under `.cache/` by default, or `--profile <path>`, so browser model caches survive between captures;
+- clears only `auto-subtitle-diagnostics-v1` before the measured run; it does not clear Cache Storage, IndexedDB, or the browser profile;
+- runs the app's full local pipeline, downloads the project and diagnostic exports, and validates that both describe the same frozen settings;
+- maps one complete diagnostic job into validated telemetry and writes a one-case local run descriptor; and
+- refuses to start when any planned artifact exists unless `--overwrite` is explicit.
+
+The output directory receives `<case-id>.auto-subtitle.json`, `<case-id>.diagnostics.json`, `<case-id>.telemetry.json`, and `<case-id>.run.local.json`. Keep the output under `benchmarks/fixtures.local/` so it stays ignored. The generated run descriptor points only to the project and telemetry beside it; it does not contain or alter reference paths.
+
+The profile preserves downloaded browser data, but `modelLoadState` is copied only from the worker's measured `cold`/`warm` diagnostic. Do not relabel a run based merely on whether network downloads appeared. Use a fresh dedicated profile when you intentionally need an empty browser cache, and record that protocol alongside results.
+
+### Manual capture
 
 1. Start the app with `local-launch.bat`.
 2. Decide whether the run is cold or warm. For a cold run, clear the selected model from browser storage/cache first. For a warm run, load it once before starting the measured run. Record the choice as telemetry rather than guessing it later.
@@ -218,7 +258,7 @@ Worker-message bytes should be measured where messages cross the worker/provider
 
 ### Map current diagnostics into telemetry
 
-There is intentionally no automatic debug-log-to-benchmark converter yet. Copy measurements manually from one unedited job's exported diagnostics and preserve the mapping below; do not paste a diagnostic `data` object unchanged because its field names are not the benchmark schema.
+The automated capture command enforces the mapping below for one complete, unedited job and rejects missing, duplicate, truncated, or invalid diagnostic evidence. For a manual capture, copy only the mapped measurements; do not paste a diagnostic `data` object unchanged because its field names are not the benchmark schema.
 
 | Diagnostic event | Diagnostic field | Telemetry field | Notes |
 | --- | --- | --- | --- |
@@ -265,17 +305,18 @@ All text normalization is explicit in the manifest and deterministic. Defaults a
 
 | Metric | Definition |
 | --- | --- |
-| WER | Word-token Levenshtein substitutions + deletions + insertions divided by reference word count. Operation counts and denominators are included. Empty-reference rate is `null`. |
-| CER | Unicode-code-point Levenshtein distance divided by reference character count. It uses code points, not runtime-dependent grapheme segmentation. Empty-reference rate is `null`. |
+| WER | Word-token Levenshtein substitutions + deletions + insertions divided by reference word count. Operation counts, denominators, and a bounded readable difference list are included. Empty-reference rate is `null`. |
+| CER | Unicode-code-point Levenshtein distance divided by reference character count. It uses code points, not runtime-dependent grapheme segmentation, and is used for readable differences when CER is the case's primary metric. Empty-reference rate is `null`. |
 | Normalized similarity | `1 - character edit distance / max(reference length, candidate length)` after configured normalization. |
-| Word start/end error | Exact normalized words are matched through deterministic monotonic edit alignment. Per-case output reports mean absolute, median absolute, and mean signed error in seconds plus match coverage. |
-| Cue onset/offset error | Reference and candidate cues are matched monotonically using normalized multiset Dice text similarity. Matches below 0.25 are omitted. Per-case output reports mean/median absolute and signed errors. Dense alignment is capped at 1,000,000 matrix cells; larger cases report `available: false` with counts and a reason instead of risking an out-of-memory failure. |
+| Word start/end error | Exact normalized words are matched through deterministic monotonic edit alignment. Per-case output reports mean, median, and maximum absolute error, mean signed error, match coverage, and counts within 250 ms, 500 ms, and 1 second. |
+| Cue onset/offset error | Reference and candidate cues are matched monotonically using normalized multiset Dice text similarity. Matches below 0.25 are omitted. Per-case output reports mean, median, and maximum absolute error, signed error, tolerance counts, and a bounded cue-difference list. Dense alignment is capped at 1,000,000 matrix cells; larger cases report `available: false` with counts and a reason instead of risking an out-of-memory failure. |
 | Missed speech | Duration of unioned reference speech intervals not covered by valid candidate cue intervals. |
 | Silence placement | Duration of unioned candidate cues outside reference speech, plus cue count below the configured speech-overlap ratio. Lead/tail display padding therefore remains visible in this metric. |
 | Duplicate unit rate | Adjacent duplicate words for WER cases or characters for CER cases. `excess` variants subtract the same aggregate duplicate count found in the reference to reduce penalties for legitimate repetition. Suite summaries keep word and character units separate. |
 | Duplicate phrase rate | Tokens in the second copy of an immediately repeated 2-5 word phrase, or 2-8 character phrase for CER. Raw and reference-discounted counts/rates are reported. |
 | Subtitle overlap | Count and summed duration of every overlapping valid cue pair after chronological sorting. |
 | Invalid timestamps | Cue and word counts with negative, zero/reversed duration. Non-numeric values fail schema validation. |
+| Cue duration/gaps | Minimum, maximum, mean, and median valid cue duration; inter-cue gap distribution; and optional minimum/maximum duration violations from manifest constraints. |
 | CPS violations | Valid cues whose non-whitespace Unicode code-point count divided by duration exceeds `maxCps`. |
 | Line violations | Lines longer than `maxLineLength`, affected caption count, and captions exceeding `maximumLines`. |
 | Stage/total time | Supplied measured milliseconds; per-case stage keys are preserved. Suite stage summaries report measured and missing case counts, a measured subtotal, and a complete `totalMs` only when every suite case supplied that stage. |

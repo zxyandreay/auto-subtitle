@@ -27,7 +27,7 @@ The quick-start path is documented in the [README](../README.md), and detailed o
 | Export formats | SRT, WebVTT, TXT transcript, Auto Subtitle project JSON |
 | Launcher | `local-launch.bat` plus `scripts/local-launch.ps1` |
 | Dev terminal telemetry | Vite middleware endpoint at `/__auto_subtitle_terminal` |
-| Tests | Vitest tests for timestamp, subtitle, import, export, project, and editing utilities |
+| Tests | Deterministic Vitest coverage for transcription planning, model compatibility, timing, formatting, transactional editing, import/export, and project utilities, plus benchmark self-tests |
 
 ## Product Goals
 
@@ -101,15 +101,15 @@ The core design is a single-page app with a worker-backed transcription provider
 | Browser app | `src/main.tsx`, `src/App.tsx`, `src/components/*` | Renders the workspace, owns top-level state, connects user actions to subtitle operations. |
 | Subtitle domain logic | `src/subtitles/*`, `src/types/subtitles.ts`, `src/utils/time.ts` | Parses, formats, validates, imports, exports, splits, merges, shifts, normalizes, and renumbers subtitles. |
 | Transcription provider | `src/transcription/browserWhisperProvider.ts`, `src/transcription/types.ts`, `src/transcription/models.ts`, `src/transcription/capabilities.ts` | Registers model metadata and compatibility, normalizes settings, starts and cancels full transcription or range-regeneration workers, routes their discriminated results, and detects browser capability warnings. |
-| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that preserve delayed audio-track timing while producing mono 16 kHz PCM WAV output. |
+| Audio extraction arguments | `src/transcription/audioExtraction.ts` | Builds full or time-bounded FFmpeg commands that select the first audio stream, preserve delayed audio-track timing, and produce mono 16 kHz PCM WAV output. |
 | Range regeneration | `src/transcription/regeneration.ts`, `src/transcription/regenerationLimits.ts`, `src/subtitles/regeneration.ts` | Validates ranges, normalizes the requested one-to-five alternative count, budgets recognition context, defines decoding profiles, deduplicates alternatives, constrains timing, and atomically replaces overlapping cues. |
-| Speech activity and windowing | `src/transcription/speechActivity.ts`, `src/transcription/windowing.ts` | Detects padded speech regions locally and plans silence-preferred ownership windows within a 29-second model budget. |
-| Coverage and timing recovery | `src/transcription/coverage.ts`, `src/transcription/repair.ts`, `src/transcription/reconciliation.ts`, `src/transcription/timingRefinement.ts` | Finds likely missed speech, plans one bounded repair pass, reconciles overlap words, and snaps generated cues to safe speech boundaries. |
+| Speech activity and windowing | `src/transcription/speechActivity.ts`, `src/transcription/windowing.ts` | Detects padded speech regions locally and adaptively packs silence-preferred ownership windows while their combined span remains within the 29-second model budget. |
+| Coverage and timing recovery | `src/transcription/coverage.ts`, `src/transcription/repair.ts`, `src/transcription/reconciliation.ts`, `src/transcription/timingRefinement.ts` | Finds likely missed speech, plans one bounded repair pass, conservatively reconciles overlap context, and snaps generated cues to safe speech boundaries. |
 | Local diagnostics | `src/diagnostics/*`, worker diagnostic events, provider bridge, toolbar export | Persists bounded structured evidence for model output, timing decisions, recovery, formatting, environment, and errors without storing media bytes. |
 | Timestamp normalization | `src/transcription/timestampNormalization.ts` | Validates ASR chunks, maps window-relative timestamps onto the video timeline, assigns boundary chunks to one core, and prevents overlap-only fallback captions. |
 | Worker implementation | `src/workers/transcription.worker.ts` | Runs FFmpeg.wasm, decodes full or bounded audio, loads the ASR model, transcribes windows or sequential regeneration profiles, and posts typed results. |
-| Live preview merging | `src/subtitles/livePreview.ts` | Merges streamed generated subtitles into the editor while preserving user edits and deletions during an active transcription. |
-| Project storage | `src/project/storage.ts` | Stores and restores project autosave records in IndexedDB. |
+| Live preview and transaction state | `src/subtitles/livePreview.ts`, `src/hooks/useUndoableSubtitles.ts` | Merges streamed captions while preserving user changes and stages them separately from committed history until completion or rollback. |
+| Project storage | `src/project/storage.ts` | Stores and restores committed project autosave records in IndexedDB; active transcription drafts are excluded. |
 | Vite dev server | `vite.config.ts` | Serves the app, applies cross-origin isolation headers, excludes heavy WASM dependencies from optimization, exposes terminal progress middleware in dev. |
 | Windows launcher | `local-launch.bat`, `scripts/local-launch.ps1` | Installs dependencies if needed, starts Vite, opens the browser, and stops the Vite process tree when the user presses Enter or closes the launcher session. |
 
@@ -131,6 +131,8 @@ The core design is a single-page app with a worker-backed transcription provider
 |-- local-launch.bat
 |-- scripts/
 |   |-- benchmark.mjs
+|   |-- capture-benchmark.mjs
+|   |-- benchmark/
 |   `-- local-launch.ps1
 |-- src/
 |   |-- App.tsx
@@ -185,13 +187,14 @@ The core design is a single-page app with a worker-backed transcription provider
 | `playToggleRequest` | Imperative keyboard play/pause toggle sent to the video player. |
 | `videoElementRef` | Direct reference used to capture the media element's exact playhead and pause it for manual subtitle insertion. |
 | `jobRef` | Current `TranscriptionJob` for cancellation. |
-| `useUndoableSubtitles()` | Subtitle history state: `past`, `present`, and `future`. |
+| `activeTranscriptionRef` | Current transaction id and the committed subtitle base restored on cancellation or failure. |
+| `useUndoableSubtitles()` | Subtitle history state: `past`, committed `present`, `future`, and an optional visible transaction draft. |
 
 The top-level app wires browser events and side effects:
 
 1. Applies and saves theme changes.
 2. Loads IndexedDB autosave on mount.
-3. Debounces autosave writes by 700 milliseconds after subtitle, settings, or video metadata changes.
+3. Debounces autosave writes by 700 milliseconds after committed subtitle, settings, or video metadata changes; active transcription drafts do not enter autosave.
 4. Revokes temporary video object URLs when replacing or unmounting a video.
 5. Cancels active transcription jobs when the app unmounts.
 6. Registers keyboard shortcuts for playback, seeking, exact playhead splitting, undo, and redo.
@@ -274,8 +277,11 @@ flowchart TD
     LoadModel --> Transcribe["Transcribe audio windows"]
     Transcribe --> Normalize["Normalize timestamps and text"]
     Normalize --> Format["Format generated segments into SubtitleEntry list"]
-    Format --> Replace["Replace editor contents"]
-    Replace --> Review["User reviews and edits subtitles"]
+    Format --> Transaction["Stage live subtitle transaction"]
+    Transaction -->|Success| Commit["Commit one undoable final result"]
+    Transaction -->|Cancel or failure| Rollback["Restore prior subtitles and history"]
+    Commit --> Review["User reviews and edits subtitles"]
+    Rollback --> Review
     Review --> Export{"Export desired format?"}
     Export -->|SRT| Srt["Download .srt"]
     Export -->|VTT| Vtt["Download .vtt"]
@@ -290,15 +296,14 @@ The selected video remains a browser `File`. The app creates a temporary object 
 ```mermaid
 flowchart LR
     Import["Import SRT, VTT, or JSON"] --> Parse["Parse and validate"]
-    Parse --> Entries["SubtitleEntry[]"]
-    Manual["Manual add or edit"] --> Entries
-    Transcription["Local transcription"] --> Entries
-
-    Entries --> History["Undoable subtitle history"]
+    Parse --> History["Undoable committed history plus optional visible draft"]
+    Manual["Manual add or edit"] --> History
+    Transcription["Local transcription"] --> Draft["Transactional live SubtitleEntry draft"]
+    Draft --> History
     History --> Validation["Validation issues"]
     History --> Preview["Video overlay and active row"]
-    History --> Autosave["Debounced IndexedDB autosave"]
-    History --> Export["SRT, VTT, TXT, JSON export"]
+    History --> Autosave["Committed entries: debounced IndexedDB autosave"]
+    History --> Export["Committed entries: SRT, VTT, TXT, JSON export"]
 
     Validation --> Editor["Subtitle editor issue UI"]
     Preview --> Editor
@@ -306,10 +311,10 @@ flowchart LR
 
 Once entries exist, all paths converge:
 
-1. `useUndoableSubtitles` stores the current list and up to 80 past states for undo.
+1. `useUndoableSubtitles` stores the committed list and up to 80 past states for undo, plus an optional visible live-transcription draft.
 2. `validateSubtitles` marks malformed times, negative times, invalid ranges, duration overflow, empty text, and overlaps.
 3. The video player finds the active subtitle by comparing `currentTime` to entry `startTime` and `endTime`.
-4. Autosave serializes project JSON into IndexedDB.
+4. Autosave serializes only the committed project JSON into IndexedDB.
 5. Exporters filter out entries with validation errors and empty text before producing SRT, VTT, or TXT.
 
 ## Transcription Pipeline Overview
@@ -321,7 +326,7 @@ flowchart TD
     DynamicImport --> Env["Configure Transformers env\nremote models allowed\nbrowser cache enabled"]
     Env --> FfmpegLoad["Load FFmpeg core and wasm URLs"]
     FfmpegLoad --> WriteInput["Write video into FFmpeg in-memory filesystem"]
-    WriteInput --> FfmpegExec["Run FFmpeg\npad delayed audio start and extract mono 16 kHz PCM WAV"]
+    WriteInput --> FfmpegExec["Run FFmpeg\nselect first audio stream, pad delayed start, extract mono 16 kHz PCM WAV"]
     FfmpegExec --> ReadWav["Read audio.wav"]
     ReadWav --> Decode["Decode RIFF WAV to Float32Array"]
     Decode --> Silence{"RMS >= 0.0008?"}
@@ -329,12 +334,15 @@ flowchart TD
     Silence -->|Yes| LoadPipeline["Create ASR pipeline"]
     LoadPipeline --> Windows["Create overlapping transcription windows"]
     Windows --> Loop{"More windows?"}
-    Loop -->|Yes| Asr["Run Whisper ASR on window"]
-    Asr --> TimestampFallback{"Word timestamps supported?"}
-    TimestampFallback -->|No| SegmentRetry["Retry with segment timestamps"]
-    TimestampFallback -->|Yes| Normalize["Normalize chunks to global timeline\nassign one core from speech onset"]
+    Loop -->|Yes| TimestampRequest{"Choose registered timestamp mode"}
+    TimestampRequest -->|Word capable| Asr["Run bounded Whisper ASR on window"]
+    TimestampRequest -->|Known model limitation| SegmentDirect["Run with segment timestamps directly"]
+    Asr -->|Word succeeds| Normalize["Normalize chunks to global timeline\nassign one core from speech onset"]
+    Asr -->|Recognized runtime capability error| SegmentRetry["Retry once with segment timestamps"]
+    SegmentDirect --> Normalize
     SegmentRetry --> Normalize
-    Normalize --> PartialPreview["Post validated suffix delta to app"]
+    Normalize --> Reconcile["Trim sufficiently evidenced overlap-context prefixes and reconcile boundaries"]
+    Reconcile --> PartialPreview["Post validated suffix delta to app"]
     PartialPreview --> CaptionLog["Post terminal caption events in dev"]
     CaptionLog --> Loop
     Loop -->|No| Complete["Post complete result to app"]
@@ -385,7 +393,7 @@ Cancellation is user-driven from the `Cancel` button or app teardown:
 1. `TranscriptionJob.cancel()` posts a `cancel` request to the worker.
 2. The provider terminates the worker immediately.
 3. The promise rejects with `Transcription cancelled by the user.`
-4. The app marks the progress stage as `cancelled`, keeps the current progress value, clears busy state, and leaves the editor ready for manual work or imports.
+4. The app marks the progress stage as `cancelled`, keeps the current progress value, clears busy state, and rolls the draft back to the pre-job subtitles and undo history.
 
 The worker also checks `assertNotCancelled()` between major steps so cooperative cancellation can stop long flows when the worker has not already been terminated.
 
@@ -398,7 +406,8 @@ The live preview merge keeps user changes stable while the worker continues:
 3. If the user edits a streamed row, later partial updates preserve that edited row.
 4. If the user deletes a streamed row, later partial updates do not re-add that same generated row.
 5. User-added rows created during transcription are kept alongside streamed generated rows.
-6. Final completion applies the full generated-caption optimization again and merges it with any preserved live edits before settling the editor state.
+6. Final completion applies the full generated-caption optimization again, merges it with preserved live edits, and commits the transaction as one undoable history change.
+7. Failure or cancellation removes the transaction without changing committed history. Callbacks and transaction actions carrying an old job id are ignored.
 
 ## Detailed Video Processing
 
@@ -435,8 +444,8 @@ When the user starts transcription, `App`:
 1. Clears the current notice.
 2. Sets `busy` to `true`.
 3. Sets progress to `loading-engine` with progress `0.01`.
-4. Calls `startBrowserWhisperTranscription(video.file, settings, { onProgress: setProgress })`.
-5. Stores the returned job in `jobRef` for cancellation.
+4. Resolves the model, freezes an immutable transcription-settings snapshot, and opens a subtitle transaction with a new id.
+5. Calls `startBrowserWhisperTranscription(video.file, frozenSettings, callbacks)` and stores the returned job in `jobRef` for cancellation.
 
 The provider creates a module worker:
 
@@ -490,6 +499,7 @@ Then it configures the Transformers.js environment:
 
 ```text
 -i input-<timestamp>
+-map 0:a:0
 -vn
 -af aresample=async=1:first_pts=0
 -ac 1
@@ -499,7 +509,9 @@ Then it configures the Transformers.js environment:
 audio.wav
 ```
 
-The output is mono, 16 kHz, signed 16-bit PCM WAV. Before encoding it, `aresample=async=1:first_pts=0` reconciles samples with the input audio timestamps and pads the beginning with silence when the audio stream starts after media time zero. This matters because WAV carries sample order rather than the source container's delayed stream start; without padding, speech beginning halfway through a video can become WAV time zero and shift every generated subtitle early.
+`-map 0:a:0` makes selection deterministic by choosing the first audio stream. The output is mono, 16 kHz, signed 16-bit PCM WAV. Before encoding it, `aresample=async=1:first_pts=0` reconciles samples with the input audio timestamps and pads the beginning with silence when the audio stream starts after media time zero. This matters because WAV carries sample order rather than the source container's delayed stream start; without padding, speech beginning halfway through a video can become WAV time zero and shift every generated subtitle early. Files whose intended language or mix is on another stream must be remuxed first.
+
+The extraction path does not apply loudness normalization, denoising, or a voice-isolation filter. This avoids an unverified destructive transform; the adaptive speech detector and Whisper receive the resampled source mix.
 
 This behavior follows the official [FFmpeg audio resampler documentation](https://www.ffmpeg.org/ffmpeg-resampler.html), where `async` enables timestamp compensation and `first_pts=0` is specifically documented as padding the beginning with silence when audio starts after video. The bundled FFmpeg.wasm core includes the `aresample` filter.
 
@@ -536,12 +548,12 @@ The worker computes a sampled RMS value with `calculateRms`. If RMS is below `0.
 
 `src/transcription/models.ts` is the single registry for model IDs, labels, family, tier, language coverage, supported tasks, full-transcription/regeneration support, recommended engine and dtype, resource level, and warning copy.
 
-| UI label | Model id | Languages | Translation | Resource level |
-| --- | --- | --- | --- | --- |
-| Fast model - Tiny | `onnx-community/whisper-tiny` | Multilingual | Yes | Low |
-| Balanced model - Base | `onnx-community/whisper-base` | Multilingual | Yes | Medium |
-| High accuracy model - Large v3 Turbo | `onnx-community/whisper-large-v3-turbo` | Multilingual | No | High |
-| English high quality model - Distil Large v3 | `distil-whisper/distil-large-v3` | English only | No | High |
+| UI label | Model id | Languages | Translation | Word timestamps | Resource level |
+| --- | --- | --- | --- | --- | --- |
+| Fast model - Tiny | `onnx-community/whisper-tiny` | Multilingual | Yes | Yes | Low |
+| Balanced model - Base | `onnx-community/whisper-base` | Multilingual | Yes | Yes | Medium |
+| High accuracy model - Large v3 Turbo | `onnx-community/whisper-large-v3-turbo` | Multilingual | No | Yes | High |
+| English high quality model - Distil Large v3 | `distil-whisper/distil-large-v3` | English only | No | No; segment timing only | High |
 
 Compatibility is enforced at three boundaries:
 
@@ -600,7 +612,7 @@ The app configures the model through these user-facing settings:
 | Model | `modelId` | Chooses one of the four registered browser-compatible ASR repositories after compatibility resolution. |
 | Engine | `device` | Chooses auto, WebGPU, or WASM. Legacy CPU settings normalize to WASM. |
 | Precision | pipeline `dtype` | Chooses auto, q8, or fp32 model weights. |
-| Use word timestamps | `return_timestamps` | Uses `'word'` when enabled; otherwise uses segment timestamps. |
+| Use word timestamps | `return_timestamps` | Uses `'word'` only when enabled and the resolved model supports it; otherwise uses segment timestamps. |
 
 Accurate-local synchronization defaults:
 
@@ -630,7 +642,9 @@ The worker calls the transcriber with:
 
 `chunk_length_s` and `stride_length_s` are set to `0` because Auto Subtitle performs its own explicit audio windowing before calling the model. This gives the app direct control over progress, caption preview events, overlap, and timeline normalization. Every manually prepared input is capped at 29 seconds, leaving margin below Whisper's fixed feature-input limit.
 
-For Distil Large v3, the resolver overrides the ASR call to explicit English transcription. Turbo and Distil translation requests never reach the pipeline with `task: 'translate'`; they resolve to Base first. Word-timestamp failure continues to retry the same resolved model with segment timestamps.
+The worker deliberately does not force `max_new_tokens`. In the installed Transformers.js Whisper implementation, setting that generic option bypasses the timestamp-mode seek loop used when one pass does not fully transcribe an input. Keeping the library's seek behavior avoids a speed optimization that could silently truncate dense speech; Auto Subtitle bounds work through model-safe audio windows instead.
+
+For Distil Large v3, the resolver overrides the ASR call to explicit English transcription. Turbo and Distil translation requests never reach the pipeline with `task: 'translate'`; they resolve to Base first. The model registry marks Distil as segment-only, so a word-timestamp preference does not cause a known-failing call. If another model unexpectedly reports one of the recognized alignment/cross-attention capability errors, the worker retries that window once with segment timestamps and keeps the successful mode for later calls.
 
 ## Speech Activity, Windowing, And Timestamp Normalization
 
@@ -640,7 +654,7 @@ flowchart TD
     Duration --> VAD["Rolling 30 ms RMS, 10 ms hop, adaptive hysteresis"]
     VAD --> Regions["Retain raw evidence and padded model context separately"]
     Regions --> Choice{"Usable speech regions?"}
-    Choice -->|Yes| Pack["Pack near 26 s; 1.5 s context overlap"]
+    Choice -->|Yes| Pack["Pack near 26 s while the combined ownership span fits; add 1.5 s context"]
     Choice -->|No| Fallback["Contiguous fixed cores; 4 s overlap"]
     Pack --> Slice["Search frame activity for a nearby pause; preserve ownership"]
     Fallback --> Slice
@@ -649,9 +663,9 @@ flowchart TD
     Samples --> Model["Run Whisper on slice"]
     Model --> Chunks["Timestamp chunks relative to slice"]
     Chunks --> Offset["Add sliceStartTime"]
-    Offset --> Owner{"Chunk start belongs to this core?"}
+    Offset --> Owner{"Owned start, or substantial segment-only crossing suffix?"}
     Owner -->|No| Discard["Discard neighboring overlap chunk"]
-    Owner -->|Yes| Preserve["Preserve absolute ASR timestamps"]
+    Owner -->|Yes| Preserve["Preserve timestamps and reconcile marked context"]
     Preserve --> Round["Round to milliseconds"]
     Round --> Segment["RawTranscriptionSegment"]
 ```
@@ -659,20 +673,20 @@ flowchart TD
 Speech and windowing details:
 
 1. `analyzeSpeechActivity` computes overlapping-frame RMS with a rolling sum, then applies an adapting local noise estimate, separate speech-on/off thresholds, hysteresis, isolated-frame smoothing, a 250 ms minimum, and a 350 ms raw merge gap. Each region retains unpadded `rawStartTime`/`rawEndTime`; 200/300 ms padding is only model context. Compact typed frame arrays are retained for planning.
-2. Usable regions are packed into ownership spans near the 26-second target. A long region searches the configured radius around its ideal boundary and selects the earliest deterministic minimum of speech state, normalized activity, distance, and sample time. Interior windows use 1.5 seconds of context and never exceed 29 seconds.
+2. Usable regions are packed into ownership spans while their combined timeline span stays near the 26-second target. This avoids excessive calls for sparse conversational speech; a new span begins when the combined budget would be exceeded. A long region searches the configured radius around its ideal boundary and selects the earliest deterministic minimum of speech state, normalized activity, distance, and sample time. Interior windows separately use 1.5 seconds of context and never exceed 29 seconds.
 3. Long continuous speech is split into contiguous ownership cores with overlap context, so every detected speech instant belongs to at least one core.
 4. If VAD is disabled, fails, or yields no usable regions, the fixed planner covers the complete timeline with a default 4-second overlap and the same 29-second cap.
 5. First and last windows are naturally shorter when context is unavailable at the media boundary; tiny windows are expanded in surrounding silence toward the 5-second hard minimum where possible.
 6. Sample indices use `floor` for slice starts and `ceil` for requested ends, are capped to the exact model sample budget, and derive `sliceStartTime` from the first sample actually passed to Whisper.
-7. ASR timestamps are converted to the full-video timeline by adding that exact sample-derived offset. Chunk starts assign ownership, while crossing chunks keep their full absolute end times.
-8. Adjacent window results use a capped linear suffix/prefix alignment over up to three segments per side. Segment or word timing must overlap; one-word segment duplicates are supported while non-overlapping intentional repeats remain. Incoming evidence replaces a full duplicate only when word timing, materially better confidence, or punctuation support is stronger.
+7. ASR timestamps are converted to the full-video timeline by adding that exact sample-derived offset. Chunk starts normally assign ownership. In segment mode, a chunk beginning in left context can retain a suffix of at least 0.5 seconds inside the owned core; its start is clamped to the core and it receives internal `boundaryContextPrefix` evidence.
+8. Adjacent window results use a capped linear suffix/prefix alignment over up to three segments per side. Timing normally must overlap. The marked context exception can trim a nearby matching prefix within the default two-second boundary search only when it contains at least two units. A single repeated word is retained because coarse segment timing cannot prove it came from overlap context. Incoming evidence replaces a full duplicate only when word timing, materially better confidence, or punctuation support is stronger.
 9. Times are rounded to milliseconds.
 
 This design prefers cuts in silence while keeping a fixed-window fallback for difficult audio. VAD affects planning and generated-cue refinement only; it does not modify imported/manual subtitles.
 
 ### Coverage Recovery And Speech-Boundary Refinement
 
-After the first normalized ASR pass, coverage is compared only with raw detected speech. Word evidence must represent at least 60% of normalized segment text, remain plausible (at most four seconds per word), and intersect both its segment and raw speech. Low-confidence or mostly-silence segment intervals do not hide a gap. Coverage uses 100 ms tolerance, ignores gaps below 250 ms, and also repairs a large absolute gap even when a long region's uncovered ratio is small.
+Coverage is compared only with raw detected speech. Word evidence must represent at least 60% of normalized segment text, remain plausible (at most four seconds per word), and intersect both its segment and raw speech. Low-confidence or mostly-silence segment intervals do not hide a gap. Coverage uses 100 ms tolerance, ignores gaps below 250 ms, and also repairs a large absolute gap even when a long region's uncovered ratio is small. The pipeline does not destructively filter repeated low-information text: without acoustic evidence that distinguishes music from repeated dialogue, deleting those cues can erase legitimate chants, stutters, or emphatic repetition.
 
 When repair is enabled, one pass processes at most 20 uncovered ranges. Each range receives 750 ms of context on both sides, remains below 29 seconds, and reuses the already loaded transcriber. Repair results must have valid text/timing, overlap the uncovered range, and differ from nearby existing cues. Accepted timing is clipped away from neighboring cues using the configured 80 ms gap. There is no recursive coverage loop.
 
@@ -686,10 +700,11 @@ The worker supports two timestamp modes:
 
 | Mode | Trigger | Result |
 | --- | --- | --- |
-| Word timestamps | Accurate-local default | Attempts word-level timing and grouping. |
-| Segment timestamps | Automatic fallback | Used after a known word-timestamp capability failure. |
+| Word timestamps | Preference enabled and resolved model supports word timing | Attempts word-level timing and grouping. |
+| Segment timestamps | Preference disabled or model registered without word support | Used directly without an avoidable failed request. |
+| Segment fallback | Recognized runtime word-timestamp capability error | Retries the current window once and remains in segment mode for the job. |
 
-Some exported Whisper models do not expose cross-attention outputs needed for word-level timestamps. When word timestamps fail with known messages such as `Model outputs must contain cross attentions to extract timestamps`, `token-level timestamps not available`, or `output_attentions=True`, the worker retries the current window with segment timestamps and uses segment timestamps for later windows.
+Some exported Whisper models do not expose cross-attention outputs needed for word-level timestamps. Known registry limitations, currently Distil Large v3, are handled before inference. When another model fails with a recognized message such as `Model outputs must contain cross attentions to extract timestamps`, `token-level timestamps not available`, or `output_attentions=True`, the worker retries the current window with segment timestamps and uses segment timestamps for later windows.
 
 This avoids failing the entire transcription just because word-level timestamps are not supported by the selected model export.
 
@@ -708,7 +723,7 @@ The worker receives an unknown result shape from the pipeline and normalizes def
    - `text` as a string
 5. Invalid chunks are dropped.
 6. Valid chunks are offset onto the full-video timeline.
-7. Boundary-crossing chunks are assigned to the core containing their absolute start time, and their original absolute in/out times are preserved.
+7. Boundary-crossing word chunks follow onset ownership. A segment-only chunk that starts in left context is normally dropped, but a suffix of at least 0.5 seconds can be retained from the core boundary with internal context-prefix evidence so unique post-boundary speech is not lost.
 8. If the model returned text without usable timestamp chunks, VAD evidence in the owned range can provide a bounded low-confidence interval; without speech evidence, no subtitle is created.
 9. If valid chunks begin in an adjacent overlap, no fallback caption is created. This prevents neighboring speech from appearing early or being recreated late.
 
@@ -733,7 +748,9 @@ flowchart TD
     Keep --> ReadingSpeed
     ReadingSpeed --> SmoothCuts["Merge abrupt adjacent captions when still readable"]
     SmoothCuts --> Overlap["Trim overlaps and chain short safe gaps"]
-    Overlap --> Lines["Apply scored two-line wrapping"]
+    Overlap --> FinalSmooth["Merge compatible segment-only micro-cues created by overlap repair"]
+    FinalSmooth --> FinalOverlap["Normalize overlap once more"]
+    FinalOverlap --> Lines["Apply scored two-line wrapping"]
     Lines --> MakeEntries["Create SubtitleEntry records"]
     MakeEntries --> Sort["Sort and renumber"]
     Sort --> Editor["Editor-ready subtitle list"]
@@ -768,11 +785,13 @@ Text formatting behavior:
 3. Removes empty lines.
 4. Removes near-duplicate generated captions from overlapping audio windows when adjacent text and timing are highly similar.
 5. Splits long generated captions first at sentence punctuation, then softer punctuation, then natural phrase boundaries.
-6. Penalizes word-timed cuts that would create a very short phrase flash, even when punctuation exists.
-7. Merges abrupt adjacent generated captions when the combined caption remains within line, duration, and reading-speed limits.
-8. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
-9. Limits final generated caption display to at most two visible lines.
-10. Attempts to balance a short second line by moving a final word when useful.
+6. In word-timed material, treats an internal pause of at least 350 ms as a preferred boundary even when the complete text could otherwise fit one cue; punctuation with about 200 ms of pause receives secondary preference.
+7. Penalizes cuts that create an avoidable one-word side. A long pause of at least 750 ms may outweigh that penalty when the speech itself supports the isolated phrase.
+8. Avoids avoidable one-word segment-only splits when a punctuation boundary would leave a better balanced alternative.
+9. Merges abrupt adjacent generated captions when the combined caption remains within line, duration, reading-speed, and meaningful-pause limits. After overlap normalization, a final segment-only pass can merge a newly squeezed micro-cue under the same guards; word-timed cues are excluded from this second pass.
+10. Wraps text with a scored two-line line-breaker that prefers balanced lines and avoids unsafe phrase breaks.
+11. Limits final generated caption display to at most two visible lines.
+12. Attempts to balance a short second line by moving a final word when useful.
 
 Timing formatting behavior:
 
@@ -787,7 +806,9 @@ Timing formatting behavior:
 9. Entries are sorted by start time and end time.
 10. Indices are recalculated from 1.
 11. Overlaps are resolved by trimming or shifting generated captions while preserving the configured technical gap.
-12. Safe gaps below about 0.5 seconds are chained by extending the previous caption where possible, reducing visible flicker without starting the next word-timed caption early.
+12. Safe gaps below about 0.5 seconds are chained by extending the previous caption where possible, reducing visible flicker without starting the next word-timed caption early. A measured content or ASR-segment gap of at least 350 ms is preserved as a natural pause instead of being closed or merged away.
+
+The 200/350/750 ms pause thresholds are internal deterministic defaults, not additional user-facing controls. Segment-only ASR can expose pauses between returned segments but cannot reveal a pause hidden inside one broad segment; the formatter does not invent internal acoustic evidence.
 
 Generated-caption helper responsibilities:
 
@@ -797,7 +818,7 @@ Generated-caption helper responsibilities:
 | `calculateCharactersPerSecond` | Measures readable text density over caption duration. |
 | `calculateReadableDuration` | Computes a deterministic readable duration target from text length and formatting preferences. |
 | `needsSplitForReadability` | Decides whether a generated caption needs timing extension or segmentation. |
-| `smoothAbruptGeneratedCaptions` | Merges short or too-fast adjacent generated captions when the result stays readable. |
+| `smoothAbruptGeneratedCaptions` | Merges short or too-fast adjacent generated captions when the result stays readable; its final segment-only pass repairs compatible micro-cues created during overlap normalization. |
 | `normalizeForDuplicateComparison` | Canonicalizes generated text for conservative duplicate detection. |
 | `tokenSimilarity` | Compares adjacent generated captions for overlap-window duplicate cleanup. |
 | `dedupeOverlappingSegments` | Removes or safely merges adjacent duplicate generated segments near chunk boundaries. |
@@ -810,12 +831,16 @@ flowchart TD
     Partial --> Provider["Provider calls onPartial"]
     Provider --> Format["App formats generated segments"]
     Format --> Merge["mergeLiveTranscriptionPreview"]
-    Merge --> Editor["Subtitle editor updates immediately"]
+    Merge --> Stage["Stage transaction draft"]
+    Stage --> Editor["Subtitle editor updates immediately"]
     Editor --> UserEdit{"User edits or deletes a live row?"}
     UserEdit -->|Yes| Track["markLiveTranscriptionPreviewEdits"]
     Track --> Merge
     UserEdit -->|No| NextChunk["Wait for next partial result"]
     NextChunk --> Partial
+    Editor --> Settle{"Job settles"}
+    Settle -->|Success| Commit["Commit final merge as one history entry"]
+    Settle -->|Cancel or failure| Rollback["Discard draft and restore committed state"]
 ```
 
 Live preview details:
@@ -823,10 +848,13 @@ Live preview details:
 1. Partial results are local worker messages; they do not add a backend or external transcription service.
 2. The worker sends only the changed suffix plus the replacement index and expected total; the provider validates it before reconstructing the snapshot.
 3. The app formats partial segments with the same generated-caption optimizer used for the final result.
-4. `useUndoableSubtitles.preview` updates the current editor contents without adding automatic worker updates to the undo history.
+4. `beginTransaction` captures the committed base. `stageTransaction` changes the visible draft without changing `present`, `past`, or `future`.
 5. `mergeLiveTranscriptionPreview` removes the pre-transcription base entries once generated captions arrive, matching final transcription replacement behavior.
-6. User edits and deletions to streamed generated rows are tracked and preserved across later partial updates.
-7. Rows the user adds manually during transcription are kept alongside streamed generated rows.
+6. User edits and deletions to streamed generated rows are tracked and preserved across later partial updates; manual additions are retained too. Those edits update the transaction draft rather than committed history.
+7. Final completion calls `commitTransaction` once. Cancellation or failure calls `rollbackTransaction`, restoring the exact prior subtitles and undo/redo stacks.
+8. Autosave reads `committedSubtitles`, so a crash, cancellation, or reload cannot persist an incomplete preview as the project. Project-changing toolbar and settings controls remain locked while a job is active.
+9. Every callback and reducer transaction action carries the job id. Late partial, completion, and rollback events for an older job are ignored.
+10. The model id and nested formatting settings are copied and frozen before the worker starts, so UI state changes cannot mutate the job's settings mid-run.
 
 ## Subtitle Range Regeneration
 
@@ -1104,7 +1132,11 @@ flowchart TD
 {
   past: SubtitleEntry[][],
   present: SubtitleEntry[],
-  future: SubtitleEntry[][]
+  future: SubtitleEntry[][],
+  transaction?: {
+    id: number,
+    draft: SubtitleEntry[]
+  }
 }
 ```
 
@@ -1113,12 +1145,18 @@ Actions:
 | Action | Behavior |
 | --- | --- |
 | `commit` | Sorts and renumbers new entries, pushes previous present into `past`, clears `future`, keeps the latest 80 past states. |
-| `replace` | Sorts and renumbers entries and clears history. Used by transcription and imports. |
+| `replace` | Sorts and renumbers entries and clears history. Used by imports and project restore. |
+| `beginTransaction` | Starts one id-scoped visible draft from committed `present` without changing history. |
+| `stageTransaction` / `editTransaction` | Updates only the matching draft for worker previews or user changes. |
+| `commitTransaction` | Commits the final matching draft as one undoable change and clears `future`. |
+| `rollbackTransaction` | Discards only the matching draft and exposes the untouched committed state. |
 | `undo` | Moves the latest past state into present and pushes current present into future. |
 | `redo` | Moves the first future state into present and pushes current present into past. |
 | `clear` | Resets all history and entries. |
 
-Editor operations call `commit`, while imports and transcription call `replace`. Cue drag/resize previews stay local and call the commit path once on pointer release, so one gesture creates one history entry. Playhead dragging and empty-track clicking only seek media and never mutate subtitle history. Visible Undo and Redo buttons in both Timing tools and the timeline reflect `canUndo`/`canRedo`, include shortcut tooltips, and disable when their action is unavailable. History shortcuts are ignored inside input, textarea, select, and contenteditable fields.
+Editor operations normally call `commit`; while live transcription is active they call `editTransaction` and feed edit/delete evidence back into preview reconciliation. Imports and project restore call `replace`, while full transcription uses the transaction actions. Cue drag/resize previews stay local and call the appropriate edit path once on pointer release, so one gesture creates one edit. Playhead dragging and empty-track clicking only seek media and never mutate subtitle history. Undo and redo are unavailable during a transaction; afterward the completed transcription is one undoable replacement. History shortcuts are ignored inside input, textarea, select, and contenteditable fields.
+
+Before a manual edit settles, `invalidateStaleAsrMetadata` compares it with the prior cue. A semantic text change or incompatible timing change removes stale `words` and `confidence`; harmless whitespace/wrapping or padding that still contains every timed word keeps the evidence, and new-id regenerated cues retain their fresh metadata.
 
 ## Subtitle Editor Behavior
 
@@ -1270,7 +1308,7 @@ Export behavior:
 
 ```mermaid
 flowchart TD
-    Change["Subtitles, settings, or video metadata changes"] --> Debounce["Wait 700 ms"]
+    Change["Committed subtitles, settings, or video metadata changes"] --> Debounce["Wait 700 ms"]
     Debounce --> Project["createProjectExport"]
     Project --> Save["saveAutosave"]
     Save --> IndexedDb["IndexedDB\ndatabase auto-subtitle\nstore projects\nkey autosave"]
@@ -1288,7 +1326,7 @@ Autosave details:
 | Key path | `key` |
 | Autosave key | `autosave` |
 
-Autosave stores project JSON data, not the original video. It includes video filename, size, and duration hints when known. Autosave can be restored or cleared from the toolbar.
+Autosave stores project JSON data, not the original video. It includes video filename, size, and duration hints when known. During a transcription transaction, `subtitles` exposes the visible draft but `committedSubtitles` remains the autosave source until success. Autosave can be restored or cleared from the toolbar.
 
 ## Theme Persistence
 
@@ -1467,8 +1505,17 @@ They cover:
 78. Delta worker protocol validation, stale job-id rejection, reusable-worker cleanup, crash recovery, idle eviction, and message telemetry.
 79. Stable live-preview identity across inserted repair cues, unrelated replacements, user edits/deletions, and bounded snapshot retention.
 80. Benchmark WER/CER/timing/coverage/readability/performance metrics, mixed-language aggregation, missing telemetry, comparison integrity, and alignment memory caps through synthetic self-tests.
+81. Deterministic first-audio-stream FFmpeg mapping for full and range extraction.
+82. Model word-timestamp capability metadata, direct Distil segment mode, and recognized runtime fallback behavior.
+83. Pause- and punctuation-aware caption boundaries, meaningful-gap preservation, Unicode timing, and avoidance of unnecessary one-word cues.
+84. Transaction begin/stage/edit/commit/rollback behavior, single-entry undo semantics, and stale transaction-id rejection.
+85. Deeply frozen transcription settings snapshots and preservation of the worker request when source settings later change.
+86. Stale ASR word/confidence invalidation after semantic text or incompatible timing edits, while safe wrapping and fresh regenerated metadata survive.
+87. Benchmark tolerance bands, maximum timing errors, cue duration/gap distributions, bounded readable cue diffs, and diagnostic-to-telemetry capture validation.
+88. Segment-only crossing-suffix retention, two-unit context-prefix trimming, punctuation preservation, and protection of intentional one-word repeats.
+89. Final segment-only smoothing of micro-cues created by overlap normalization without weakening word-timed or meaningful-pause boundaries.
 
-The tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, dialog behavior, and generated-caption post-processing. They do not run a real model regeneration because that would require FFmpeg.wasm, model downloads, browser worker execution, and substantial runtime.
+The normal tests focus on deterministic audio-extraction arguments, transcription-window and regeneration-range planning, subtitle utilities, timestamp normalization, transaction behavior, dialog behavior, and generated-caption post-processing. They do not download or run a real Whisper model. The optional `npm run benchmark:capture` command can drive the actual app in installed Chrome or Edge for a local, ignored integration capture; it is deliberately outside the normal suite.
 
 ## Keyboard Shortcuts
 
@@ -1495,14 +1542,16 @@ The tests focus on deterministic audio-extraction arguments, transcription-windo
 4. Browser codec support varies by browser and source file.
 5. WebGPU support varies by device and browser.
 6. Model download size can be large on first run.
-7. Word-level timestamps depend on the selected model export; unsupported models fall back to segment timestamps.
-8. Chunk-boundary quality can vary. The worker prefers VAD silence boundaries, keeps overlap inside a 29-second input budget, reconciles nearby overlap tokens, and uses onset-based ownership, but manual review is still expected.
-9. Speech activity analysis can be imperfect on music, sustained noise, overlapping speakers, and very quiet speech. Speech it fails to detect cannot trigger coverage repair.
+7. Word-level timestamps depend on the selected model export. Distil Large v3 uses segment timing directly; recognized unexpected capability errors fall back for the current job.
+8. Chunk-boundary quality can vary. The worker prefers VAD silence boundaries, keeps overlap inside a 29-second input budget, uses strict onset ownership for word-timed windows, and guards segment-only crossing suffixes with bounded text reconciliation, but manual review is still expected.
+9. Speech activity analysis can be imperfect on music, sustained noise, overlapping speakers, and very quiet speech. RMS VAD cannot reliably distinguish music from speech, so the pipeline retains uncertain repeated text rather than risk deleting legitimate dialogue; the private Matrix benchmark contained music-related insertions. Speech that VAD fails to detect cannot trigger coverage repair.
 10. Coverage recovery is deliberately bounded to one pass and at most 20 ranges; it reduces likely omissions but cannot guarantee complete transcripts.
-11. Generated subtitle timing is improved with word timestamp padding, speech-boundary snapping, reading-speed checks, and overlap cleanup, but it is not guaranteed perfect.
+11. Generated timing uses word-timestamp padding when available, speech-boundary snapping, reading-speed checks, and overlap cleanup. The private Matrix benchmark produced mixed onset/offset results, so timing is not uniformly improved or guaranteed.
 12. Project JSON does not embed the original video, so users must reselect the video after restoring a project.
-13. Current automated tests do not execute the full FFmpeg plus Whisper pipeline.
-14. Compatible low-resource pipelines can stay warm for bounded regeneration, but FFmpeg is still initialized per extraction and the complete compressed file is written to MEMFS. Incompatible/high-resource pipelines, cancellation, crashes, explicit cleanup, and idle timeout release worker/model state. Higher alternative counts can require more decoding passes.
+13. Current automated tests do not execute the full FFmpeg plus Whisper pipeline. Optional browser capture exercises that path locally but is not a committed media fixture or CI dependency.
+14. Files with multiple audio streams use the first stream; the app does not yet expose a track selector.
+15. Segment-only timing cannot expose pauses hidden inside one broad ASR segment, so punctuation-based proportional splitting and manual review remain necessary.
+16. Compatible low-resource pipelines can stay warm for bounded regeneration, but FFmpeg is still initialized per extraction and the complete compressed file is written to MEMFS. Incompatible/high-resource pipelines, cancellation, crashes, explicit cleanup, and idle timeout release worker/model state. Higher alternative counts can require more decoding passes.
 
 ## Extension Points
 
@@ -1529,16 +1578,16 @@ Other natural extension points:
 flowchart TD
     A["User selects video"] --> B["Browser validates file and creates object URL"]
     B --> C["User starts local transcription"]
-    C --> D["Worker preserves audio timeline and extracts mono 16 kHz PCM WAV with FFmpeg.wasm"]
+    C --> D["Worker selects the first audio stream, preserves its timeline, and extracts mono 16 kHz PCM WAV"]
     D --> R["Registry resolves a compatible model, language, and task"]
     R --> E["Worker loads the resolved ASR model through Transformers.js"]
-    E --> F["Worker detects speech and plans silence-preferred windows inside a 29-second budget"]
+    E --> F["Worker detects speech and plans model-safe silence-preferred windows"]
     F --> G["Whisper returns text and timestamps"]
-    G --> H["Worker maps chunks to the full video timeline"]
+    G --> H["Worker maps chunks to the full video timeline and reconciles marked overlap context"]
     H --> COV["Worker checks coverage, repairs bounded gaps, and refines speech boundaries"]
-    COV --> P["App streams partial captions into the subtitle editor"]
+    COV --> P["App stages partial captions in a rollback-safe editor transaction"]
     P --> I["App optimizes generated captions for timing, duplicates, and readability"]
-    I --> L["App formats optimized captions into settled SubtitleEntry records"]
+    I --> L["App commits optimized captions into settled SubtitleEntry records"]
     L --> J["Editor validates, previews, autosaves, and lets user revise"]
     J --> K["User exports SRT, VTT, TXT, or project JSON"]
 ```

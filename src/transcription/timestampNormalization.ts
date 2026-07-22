@@ -1,6 +1,8 @@
 import type { RawTranscriptionSegment } from '../subtitles/formatting'
 import type { SpeechRegion } from './speechActivity'
 
+const MINIMUM_SEGMENT_SUFFIX_ACROSS_CORE_SECONDS = 0.5
+
 /** Transformers.js uses `true` for segment timestamps and `'word'` for words. */
 export type AsrTimestampMode = 'word' | 'segment' | true
 
@@ -10,6 +12,8 @@ export type AsrTimelineOptions = {
   offsetSeconds?: number
   coreStartTime?: number
   coreEndTime?: number
+  /** Full transcription only: keep a substantial segment suffix for boundary reconciliation. */
+  retainCrossingSegmentSuffix?: boolean
   fallbackStartTime?: number
   fallbackEndTime?: number
   speechRegions?: SpeechRegion[]
@@ -95,14 +99,27 @@ export function placeChunkOnTimeline(
     return null
   }
 
+  let ownedStart = absoluteStart
   if (options?.coreStartTime !== undefined && absoluteStart < options.coreStartTime) {
-    return null
+    const suffixDuration = absoluteEnd - options.coreStartTime
+    if (
+      options.timestampMode === 'word' ||
+      !options.retainCrossingSegmentSuffix ||
+      suffixDuration + 0.001 < MINIMUM_SEGMENT_SUFFIX_ACROSS_CORE_SECONDS
+    ) {
+      return null
+    }
+    // Segment-only Whisper output can group context from before the ownership
+    // boundary with several unique sentences after it. Retain a substantial
+    // crossing suffix and let bounded text reconciliation remove any repeated
+    // prefix; onset-only ownership would silently discard the unique speech.
+    ownedStart = options.coreStartTime
   }
   if (options?.coreEndTime !== undefined && absoluteStart >= options.coreEndTime) {
     return null
   }
 
-  const startTime = roundSeconds(Math.max(0, absoluteStart))
+  const startTime = roundSeconds(Math.max(0, ownedStart))
   const endTime = roundSeconds(Math.max(0, absoluteEnd))
   if (endTime <= startTime) {
     return null
@@ -112,6 +129,7 @@ export function placeChunkOnTimeline(
     ...chunk,
     startTime,
     endTime,
+    boundaryContextPrefix: ownedStart > absoluteStart ? true : chunk.boundaryContextPrefix,
     words: chunk.words?.map((word) => ({
       ...word,
       startTime: roundSeconds(Math.max(0, word.startTime + offset)),

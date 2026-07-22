@@ -178,6 +178,7 @@ export function RegenerationDialog({
             <input
               ref={startRef}
               aria-label="Regeneration start time"
+              disabled={busy}
               value={startDraft}
               onChange={(event) => {
                 setStartDraft(event.target.value)
@@ -195,6 +196,7 @@ export function RegenerationDialog({
             End
             <input
               aria-label="Regeneration end time"
+              disabled={busy}
               value={endDraft}
               onChange={(event) => {
                 setEndDraft(event.target.value)

@@ -16,14 +16,15 @@ Auto Subtitle is for creators, editors, and developers who want a private subtit
 - Export SRT, WebVTT, TXT transcripts, or `.auto-subtitle.json` project files.
 - Regenerate selected subtitle ranges up to 29 seconds with multiple local alternatives.
 - Autosave subtitles, settings, formatting, and video metadata in browser IndexedDB.
+- Keep live transcription previews transactional so cancellation restores the prior project and autosave never captures a partial run.
 - Export bounded debug logs for local troubleshooting without storing audio or video bytes.
-- Score captured local runs with a deterministic benchmark harness and gitignored fixture data.
+- Capture optional real-browser runs and score them with deterministic, gitignored benchmark tooling.
 
 ## How It Works
 
 1. Select or drop a local video file.
 2. Choose the spoken language, output task, Whisper model, browser engine, and precision.
-3. The worker extracts mono 16 kHz audio with FFmpeg.wasm and runs Whisper through Transformers.js.
+3. The worker selects the first audio stream, extracts mono 16 kHz audio with FFmpeg.wasm, and runs Whisper through Transformers.js.
 4. Review, split, merge, retime, format, or regenerate cues in the editor.
 5. Export subtitles, a transcript, a project JSON file, or a debug report.
 
@@ -73,6 +74,8 @@ Double-click `local-launch.bat`. The launcher installs dependencies when needed,
 
 Generated subtitles are a draft. Review names, punctuation, wording, and timing before publishing. See the [User Guide](./docs/USER_GUIDE.md) for model notes, regeneration steps, keyboard shortcuts, import/export details, and troubleshooting.
 
+During full transcription, partial cues can be reviewed and edited, but they remain a draft transaction. Autosave continues to use the last completed project; cancellation or failure restores that project, while successful completion records the final draft as one undoable change.
+
 ## Available Scripts
 
 | Command | Purpose |
@@ -84,6 +87,7 @@ Generated subtitles are a draft. Review names, punctuation, wording, and timing 
 | `npm run build` | Typecheck and create a production build |
 | `npm run preview` | Preview the production build on `127.0.0.1:4173` |
 | `npm run benchmark:self-test` | Validate benchmark scorer behavior with synthetic data |
+| `npm run benchmark:capture -- --help` | Show options for an optional local Chrome/Edge capture through the real app |
 | `npm run benchmark` | Score a captured local run from a manifest and run descriptor |
 | `npm run benchmark:compare` | Compare two benchmark reports without labeling a winner |
 
@@ -92,7 +96,7 @@ Generated subtitles are a draft. Review names, punctuation, wording, and timing 
 - **Data storage:** Autosave stores project data in IndexedDB under `auto-subtitle`; theme and diagnostic history use localStorage.
 - **Network use:** npm downloads dependencies during setup. Transformers.js can download selected model files from the model host on first use and then use the browser cache when available.
 - **Media handling:** The selected video is kept as a browser `File` plus a temporary object URL. The original video is not copied into the repository, `public/`, IndexedDB, or project JSON exports.
-- **Processing:** FFmpeg.wasm and Transformers.js run in the browser. Extracted audio is held in browser/worker memory during processing.
+- **Processing:** FFmpeg.wasm and Transformers.js run in the browser. The first audio stream is converted to mono 16 kHz PCM and held in browser/worker memory during processing.
 - **Authentication:** There is no account system, backend database service, analytics, tracking, Supabase, Firebase, paid transcription API, or external AI API integration.
 - **Diagnostics:** Debug logs may include file metadata, settings, recognized text, timing decisions, worker-stage measurements, errors, and generated subtitle entries. They do not include audio or video bytes.
 
@@ -124,8 +128,8 @@ auto-subtitle/
 
 - [User Guide](./docs/USER_GUIDE.md) covers day-to-day use, model choices, regeneration, shortcuts, and troubleshooting.
 - [Project State](./docs/project-state.md) documents architecture, state flow, transcription internals, storage, and test coverage.
-- [Transcription Accuracy and Performance Audit](./docs/transcription-accuracy-performance-audit.md) records the July 2026 audit scope, confirmed changes, and remaining real-media validation needs.
-- [Benchmark Guide](./benchmarks/README.md) explains how to score local captured runs with gitignored fixtures and references.
+- [Transcription Accuracy and Performance Audit](./docs/transcription-accuracy-performance-audit.md) records the July 2026 audit, confirmed changes, and measured private reference benchmark with its limitations.
+- [Benchmark Guide](./benchmarks/README.md) explains optional browser capture and deterministic scoring with gitignored fixtures and references.
 
 ## Status and Limitations
 
@@ -137,10 +141,11 @@ auto-subtitle/
 - FFmpeg.wasm writes the selected file into an in-memory filesystem before extraction; this is not true streaming video processing.
 - The complete decoded audio buffer is held in browser memory during transcription.
 - New projects default to the Base model, explicit English, automatic supported-engine selection, and `q8` model weights. Legacy `auto` language settings resolve to English in the current Transformers.js integration, so choose the spoken language explicitly for non-English media.
-- Word-level timestamps depend on model support and may fall back to segment timestamps.
-- Generated timing is improved by speech-aware windowing, coverage repair, and deterministic formatting, but it is not guaranteed perfect.
-- Automated tests and benchmark self-tests do not run a full real-browser FFmpeg plus Whisper model job.
-- The benchmark harness does not include media, references, model files, or measured accuracy/performance results.
+- Word-level timestamps depend on model support. Distil Large v3 is sent directly through segment timing; a recognized runtime capability failure switches the rest of that job to segment timing.
+- Generated timing uses speech-aware windowing, coverage repair, and deterministic formatting. The [current private benchmark](./docs/transcription-accuracy-performance-audit.md#private-matrix-reference-benchmark) produced mixed onset/offset results, so timing is neither uniformly improved nor guaranteed.
+- The normal automated suite does not download or run a Whisper model. The optional benchmark capture command can drive a full local browser job, but it needs a running app, installed Chrome or Edge, local media, and model availability.
+- The repository does not commit private media, references, model files, or raw measured-result artifacts; the audit records only aggregate benchmark findings.
+- Videos with several audio streams currently use the first stream; remux the intended track first when necessary.
 - Project JSON files do not embed the original video, so restoring a project requires selecting the video again.
 
 ## Contributing

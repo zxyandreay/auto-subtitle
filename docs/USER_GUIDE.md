@@ -24,6 +24,8 @@ Supported video inputs are selected by extension or browser MIME type:
 
 Codec support depends on the browser and FFmpeg.wasm. MP4/H.264 and WebM/VP9 are usually easier to handle than arbitrary MOV or MKV files.
 
+For transcription, FFmpeg selects the first audio stream (`0:a:0`) and converts it to mono, 16 kHz, signed 16-bit PCM while preserving a delayed audio start on the media timeline. It does not apply denoising, loudness normalization, or destructive voice filtering. If a file contains commentary, alternate languages, or other audio tracks, remux the intended track as the first audio stream before using the app.
+
 The app warns when a file is larger than 500 MB or longer than 30 minutes because browser transcription can become memory intensive. These warnings do not block use.
 
 ## Transcription Settings
@@ -43,14 +45,16 @@ Large v3 Turbo and Distil Large v3 are transcription-only in this app. If settin
 
 ### Models
 
-| Model | Best for | Languages | Translation | Resource level |
-| --- | --- | --- | --- | --- |
-| Tiny (`onnx-community/whisper-tiny`) | Fast tests and lower-resource devices | Multilingual | Yes | Low |
-| Base (`onnx-community/whisper-base`) | Balanced default use | Multilingual | Yes | Medium |
-| Large v3 Turbo (`onnx-community/whisper-large-v3-turbo`) | Higher-quality multilingual transcription | Multilingual | No | High |
-| Distil Large v3 (`distil-whisper/distil-large-v3`) | English-only transcription | English only | No | High |
+| Model | Best for | Languages | Translation | Word timing | Resource level |
+| --- | --- | --- | --- | --- | --- |
+| Tiny (`onnx-community/whisper-tiny`) | Fast tests and lower-resource devices | Multilingual | Yes | Yes | Low |
+| Base (`onnx-community/whisper-base`) | Balanced default use | Multilingual | Yes | Yes | Medium |
+| Large v3 Turbo (`onnx-community/whisper-large-v3-turbo`) | Higher-quality multilingual transcription | Multilingual | No | Yes | High |
+| Distil Large v3 (`distil-whisper/distil-large-v3`) | English-only transcription | English only | No | Segment only | High |
 
 First use of a model can download model files from the model host. Later runs use the browser cache when available.
+
+When **Use word timestamps** is enabled, the app requests word timing only from models registered as capable. Distil Large v3 goes directly to segment timing instead of first making a call that is known to fail. If another model reports a recognized word-timestamp capability error at runtime, the worker retries that window once with segment timestamps and keeps segment timing for the rest of the job.
 
 ### Engine and Precision
 
@@ -59,9 +63,21 @@ First use of a model can download model files from the model host. Later runs us
 
 WebGPU with `q8` is recommended for high-resource models. WASM CPU execution can be much slower, and `fp32` can use substantially more memory.
 
+### Offline Use
+
+There is no paid API or required application backend. npm needs network access during installation, and each selected model normally needs one first download. After the dependencies are installed and that model remains in the browser cache, transcription can run locally without a cloud speech service. Clearing browser site data, using a new browser profile, or cache eviction can require the model to be downloaded again.
+
 ### Chunking
 
-The app keeps model inputs at or below 29 seconds. It uses speech-aware windowing when possible and falls back to fixed windows with overlap when speech activity analysis does not produce usable regions.
+The app keeps model inputs at or below 29 seconds. Speech-aware planning targets 26-second ownership windows with 1.5 seconds of context and packs detected regions while their combined ownership span stays within that budget. This avoids one model call per short utterance while still forcing a new window when the combined timeline span is too long. If speech activity analysis does not produce usable regions, the app falls back to fixed windows with overlap.
+
+Each prepared model slice relies on the installed Transformers.js timestamp seek loop rather than forcing `max_new_tokens`. Auto Subtitle bounds each input to at most 29 seconds, but it does not bypass the model library's continuation behavior; this avoids silently truncating unusually dense or multilingual speech.
+
+### Generated Caption Segmentation
+
+Default generated-caption limits are 42 characters per line, 84 characters per cue, two lines, 1.1–6 seconds per cue, an 80 ms technical gap, a 20 CPS target, and a 21 CPS hard guard. The formatter combines those constraints with word timing, sentence and clause punctuation, natural phrase penalties, and measured pauses.
+
+A pause of about 350 ms is treated as a meaningful boundary and is protected from later gap closing or fragment merging. A pause of about 750 ms can justify an otherwise undesirable one-word side; shorter cuts are scored to avoid unnecessary one-word captions. These are internal defaults rather than extra user controls. With segment-only ASR, the formatter can preserve gaps between ASR segments but cannot infer a pause hidden inside one segment, so manual review remains important.
 
 ## Editing Subtitles
 
@@ -79,6 +95,10 @@ Useful review actions include:
 - Undo and redo subtitle edits.
 
 Overlaps and malformed timestamps remain visible as validation issues rather than being silently discarded.
+
+While a full transcription is running, streamed cues are a transactional draft. You can edit or delete generated rows and add manual rows; matching later previews preserve those changes. Project-changing controls are locked until the job settles. Completion commits the final merged draft as one undoable change, while cancellation or failure restores the subtitles and undo history from before the run.
+
+When a manual text or timing edit makes saved ASR word timing or confidence stale, the app removes that metadata. Harmless wrapping and timing padding that still contain every timed word keep it, and newly regenerated cues keep their fresh evidence.
 
 ## Regenerating a Subtitle Range
 
@@ -115,7 +135,7 @@ Project JSON does not include the original video file.
 
 ## Autosave and Local Data
 
-Autosave stores project data in browser IndexedDB under the `auto-subtitle` database. It includes subtitles, settings, formatting preferences, project metadata, and video metadata. It does not store the original video.
+Autosave stores project data in browser IndexedDB under the `auto-subtitle` database. It includes committed subtitles, settings, formatting preferences, project metadata, and video metadata. It does not store the original video. A live transcription preview is not autosaved or exported as project state; autosave continues to use the last completed project until the transaction commits.
 
 Theme preference and diagnostic history are stored in localStorage. Diagnostic history is bounded to 1,000 events and approximately 2 MB.
 
@@ -136,9 +156,9 @@ Debug logs do not include audio or video bytes, but they can contain recognized 
 
 ## Benchmarking Local Runs
 
-The benchmark harness is a deterministic scorer for captured local artifacts. It does not run Whisper itself and does not commit media, model files, references, or measured benchmark results.
+The benchmark scorer is deterministic and does not run Whisper itself. An optional companion command, `npm run benchmark:capture`, can drive the actual local app through an installed Chrome or Edge browser, export the unedited project and diagnostics, validate their settings, and write local telemetry. Neither tool commits media, model files, references, or measured benchmark results.
 
-Use `npm run benchmark:self-test` to validate the scorer with synthetic data. For real runs, follow [Benchmark Guide](../benchmarks/README.md) and keep local manifests, fixtures, telemetry, and results in the gitignored benchmark paths.
+Use `npm run benchmark:self-test` to validate the scorer with synthetic data and `npm run benchmark:capture -- --self-test` to validate diagnostic-to-telemetry mapping without opening a browser. For real runs, start the app, follow the [Benchmark Guide](../benchmarks/README.md), and keep local manifests, fixtures, telemetry, browser profiles, and results in gitignored paths.
 
 ## Keyboard Shortcuts
 
@@ -169,7 +189,9 @@ Use `npm run benchmark:self-test` to validate the scorer with synthetic data. Fo
 - **FFmpeg initialization fails:** try a Chromium-based browser and restart the dev server.
 - **Video cannot be decoded:** try MP4/H.264 or WebM/VP9. MOV and MKV support depends heavily on codecs.
 - **Empty or silent audio:** confirm the source video has an audio track.
+- **Wrong speaker or language is transcribed:** files with multiple audio streams use the first stream. Remux the intended stream into the first position.
 - **Browser becomes slow:** use a shorter file, a smaller model, `q8` precision, or close other memory-heavy apps.
+- **Word timing is unavailable:** Distil Large v3 is segment-only in this app. Other recognized capability failures automatically fall back for that job; use Base or Tiny when word timing is important.
 - **Regeneration worker fails before loading:** the app retries one startup failure. If it still fails, reload the page after a long development hot-reload session and export a new debug log.
 - **Repeated or silent-area subtitles:** reproduce the issue, export a debug log, and keep the affected video timestamp for investigation.
 

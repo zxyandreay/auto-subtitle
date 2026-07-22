@@ -15,6 +15,7 @@ import { findFirstValidVideoFile, getDurationWarning, validateVideoFile, type Vi
 import { clearAutosave, loadAutosave, saveAutosave, type AutosaveRecord } from './project/storage'
 import {
   deleteSubtitleEntry,
+  invalidateStaleAsrMetadata,
   splitSubtitleEntryAtTime,
   updateSubtitleEntry,
 } from './subtitles/editing'
@@ -48,6 +49,7 @@ import {
   type TranscriptionJob,
 } from './transcription/browserWhisperProvider'
 import { resolveCompatibleModelId } from './transcription/models'
+import { createTranscriptionSettingsSnapshot } from './transcription/settingsSnapshot'
 import type {
   RegenerationPreferences,
   RegenerationRange,
@@ -97,6 +99,11 @@ type RegenerationRequestContext = {
   alternativeCount: number
 }
 
+type ActiveTranscription = {
+  id: number
+  baseEntries: SubtitleEntry[]
+}
+
 function App() {
   const [theme, setTheme] = useState<ThemePreference>(() => loadThemePreference())
   const [video, setVideo] = useState<VideoFileState | null>(null)
@@ -129,8 +136,28 @@ function App() {
   const [focusSubtitleRequest, setFocusSubtitleRequest] = useState(0)
   const videoElementRef = useRef<HTMLVideoElement | null>(null)
   const jobRef = useRef<TranscriptionJob | null>(null)
+  const transcriptionSequenceRef = useRef(0)
+  const activeTranscriptionRef = useRef<ActiveTranscription | null>(null)
+  const regenerationSequenceRef = useRef(0)
   const regenerationJobRef = useRef<RegenerationJob | null>(null)
-  const { subtitles, canRedo, canUndo, clear, commit, preview, redo, replace, undo } = useUndoableSubtitles()
+  const importSequenceRef = useRef(0)
+  const {
+    subtitles,
+    committedSubtitles,
+    transactionActive,
+    canRedo,
+    canUndo,
+    clear,
+    commit,
+    redo,
+    replace,
+    undo,
+    beginTransaction,
+    stageTransaction,
+    editTransaction,
+    commitTransaction,
+    rollbackTransaction,
+  } = useUndoableSubtitles()
   const subtitlesRef = useRef<SubtitleEntry[]>(subtitles)
   const livePreviewStateRef = useRef<LiveTranscriptionPreviewState | null>(null)
 
@@ -138,6 +165,7 @@ function App() {
   const capabilityWarnings = useMemo(() => getCapabilityWarnings(capabilities), [capabilities])
   const activeSubtitle = subtitles.find((entry) => currentTime >= entry.startTime && currentTime <= entry.endTime)
   const selectedSubtitle = subtitles.find((entry) => entry.id === selectedSubtitleId)
+  const projectLocked = busy || regenerationBusy || transactionActive
   const canSplitAtPlayhead = selectedSubtitle
     ? canSplitEntryAtTime(selectedSubtitle, currentTime)
     : false
@@ -150,6 +178,9 @@ function App() {
   }, [activeSubtitle?.id, selectedSubtitleId, subtitles])
 
   const handleSettingsChange = useCallback((nextSettings: TranscriptionSettings) => {
+    if (projectLocked) {
+      return
+    }
     const resolved = resolveCompatibleModelId(nextSettings)
     recordDiagnosticEvent({
       source: 'app',
@@ -161,7 +192,7 @@ function App() {
     if (resolved.changed && resolved.reason) {
       setNotice({ tone: 'warning', message: resolved.reason })
     }
-  }, [])
+  }, [projectLocked])
 
   useEffect(() => {
     subtitlesRef.current = subtitles
@@ -207,13 +238,13 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!subtitles.length && !video) {
+    if (!committedSubtitles.length && !video) {
       return
     }
 
     const timeout = window.setTimeout(() => {
       const project = createProjectExport(
-        subtitles,
+        committedSubtitles,
         settings.formatting,
         {
           videoFileName: video?.file.name,
@@ -235,7 +266,7 @@ function App() {
     }, 700)
 
     return () => window.clearTimeout(timeout)
-  }, [settings, subtitles, video])
+  }, [committedSubtitles, settings, video])
 
   useEffect(() => {
     return () => {
@@ -287,6 +318,10 @@ function App() {
   }, [currentTime, redo, requestSeek, undo, video?.duration])
 
   const handleSelectVideo = (file: File) => {
+    if (projectLocked) {
+      setNotice({ tone: 'warning', message: 'Wait for the active transcription job to finish or cancel it first.' })
+      return
+    }
     const validation = validateVideoFile(file, {
       fileSizeWarningMb: FILE_SIZE_WARNING_MB,
       durationWarningMinutes: DURATION_WARNING_MINUTES,
@@ -325,6 +360,10 @@ function App() {
   }
 
   const handleRemoveVideo = () => {
+    if (projectLocked) {
+      setNotice({ tone: 'warning', message: 'Wait for the active transcription job to finish or cancel it first.' })
+      return
+    }
     if (video?.objectUrl) {
       URL.revokeObjectURL(video.objectUrl)
     }
@@ -334,6 +373,7 @@ function App() {
     setCurrentTime(0)
     setProgress(IDLE_PROGRESS)
     regenerationJobRef.current?.cancel()
+    regenerationSequenceRef.current += 1
     regenerationJobRef.current = null
     setRegenerationBusy(false)
     setRegenerationDialog(null)
@@ -357,16 +397,21 @@ function App() {
 
   const commitSubtitleChanges = useCallback(
     (entries: SubtitleEntry[]) => {
-      const nextEntries = sortAndRenumber(entries)
+      const nextEntries = sortAndRenumber(invalidateStaleAsrMetadata(subtitlesRef.current, entries))
       const livePreviewState = livePreviewStateRef.current
       if (livePreviewState) {
         markLiveTranscriptionPreviewEdits(subtitlesRef.current, nextEntries, livePreviewState)
       }
 
       subtitlesRef.current = nextEntries
-      commit(nextEntries)
+      const activeTranscription = activeTranscriptionRef.current
+      if (activeTranscription && livePreviewState) {
+        editTransaction(activeTranscription.id, nextEntries)
+      } else {
+        commit(nextEntries)
+      }
     },
-    [commit],
+    [commit, editTransaction],
   )
 
   const updateSubtitleFromPlayer = useCallback(
@@ -447,7 +492,11 @@ function App() {
       transcriptionSettings: TranscriptionSettings,
       videoDuration: number | undefined,
       final: boolean,
+      transactionId: number,
     ) => {
+      if (activeTranscriptionRef.current?.id !== transactionId) {
+        return subtitlesRef.current
+      }
       const formattingStartedAt = performance.now()
       const generatedEntries = formatTranscriptionSegments(
         result.segments,
@@ -481,7 +530,7 @@ function App() {
             approximateJsHeapBytes: readApproximateJsHeapBytes(),
           },
         })
-        replace(nextEntries)
+        commitTransaction(transactionId, nextEntries)
       } else {
         recordDiagnosticEvent({
           source: 'app',
@@ -495,26 +544,30 @@ function App() {
             approximateJsHeapBytes: readApproximateJsHeapBytes(),
           },
         })
-        preview(nextEntries)
+        stageTransaction(transactionId, nextEntries)
       }
 
       return nextEntries
     },
-    [preview, replace],
+    [commitTransaction, stageTransaction],
   )
 
   const handleStartTranscription = async () => {
-    if (!video || regenerationBusy) {
+    if (!video || busy || regenerationBusy || regenerationDialog || activeTranscriptionRef.current) {
       return
     }
 
     const transcriptionStartedAt = performance.now()
     const resolvedModel = resolveCompatibleModelId(settings)
-    const transcriptionSettings = { ...settings, modelId: resolvedModel.modelId }
+    const transcriptionSettings = createTranscriptionSettingsSnapshot(settings, resolvedModel.modelId)
     if (resolvedModel.changed) {
       setSettings(transcriptionSettings)
     }
     const videoDuration = video.duration || undefined
+    const transactionId = ++transcriptionSequenceRef.current
+    const baseEntries = subtitlesRef.current
+    activeTranscriptionRef.current = { id: transactionId, baseEntries }
+    beginTransaction(transactionId)
     recordDiagnosticEvent({
       source: 'app',
       category: 'transcription-started',
@@ -526,7 +579,7 @@ function App() {
         existingSubtitleCount: subtitlesRef.current.length,
       },
     })
-    livePreviewStateRef.current = createLiveTranscriptionPreviewState(subtitlesRef.current)
+    livePreviewStateRef.current = createLiveTranscriptionPreviewState(baseEntries)
     setNotice(resolvedModel.reason ? { tone: 'warning', message: resolvedModel.reason } : null)
     setBusy(true)
     setProgress({
@@ -535,17 +588,29 @@ function App() {
       progress: 0.01,
     })
 
-    const job = startBrowserWhisperTranscription(video.file, transcriptionSettings, {
-      onProgress: setProgress,
-      onPartial: (partial) =>
-        applyLiveTranscriptionPreview(partial, transcriptionSettings, videoDuration, false),
-      onDiagnostic: recordDiagnosticEvent,
-    })
-    jobRef.current = job
-
     try {
+      const job = startBrowserWhisperTranscription(video.file, transcriptionSettings, {
+        onProgress: (nextProgress) => {
+          if (activeTranscriptionRef.current?.id === transactionId) {
+            setProgress(nextProgress)
+          }
+        },
+        onPartial: (partial) =>
+          applyLiveTranscriptionPreview(partial, transcriptionSettings, videoDuration, false, transactionId),
+        onDiagnostic: recordDiagnosticEvent,
+      })
+      jobRef.current = job
       const result = await job.done
-      const nextEntries = applyLiveTranscriptionPreview(result, transcriptionSettings, videoDuration, true)
+      if (activeTranscriptionRef.current?.id !== transactionId) {
+        return
+      }
+      const nextEntries = applyLiveTranscriptionPreview(
+        result,
+        transcriptionSettings,
+        videoDuration,
+        true,
+        transactionId,
+      )
       setProgress({
         stage: 'complete',
         message: `Created ${nextEntries.length} editable subtitle entries with ${result.modelId}.`,
@@ -571,6 +636,11 @@ function App() {
         },
       })
     } catch (error) {
+      if (activeTranscriptionRef.current?.id !== transactionId) {
+        return
+      }
+      subtitlesRef.current = baseEntries
+      rollbackTransaction(transactionId)
       const message = error instanceof Error ? error.message : String(error)
       const cancelled = message.toLowerCase().includes('cancelled')
       setProgress((current) => ({
@@ -582,8 +652,8 @@ function App() {
       setNotice({
         tone: cancelled ? 'warning' : 'error',
         message: cancelled
-          ? 'Transcription cancelled. The editor is ready for manual subtitles or imports.'
-          : 'Transcription failed. The subtitle editor remains available.',
+          ? 'Transcription cancelled. The previous subtitles and edit history were restored.'
+          : 'Transcription failed. The previous subtitles and edit history were restored.',
         details: message,
       })
       recordDiagnosticEvent({
@@ -598,13 +668,20 @@ function App() {
         },
       })
     } finally {
-      setBusy(false)
-      jobRef.current = null
-      livePreviewStateRef.current = null
+      if (activeTranscriptionRef.current?.id === transactionId) {
+        setBusy(false)
+        jobRef.current = null
+        livePreviewStateRef.current = null
+        activeTranscriptionRef.current = null
+      }
     }
   }
 
   const handleCancelTranscription = () => {
+    const activeTranscription = activeTranscriptionRef.current
+    if (!activeTranscription) {
+      return
+    }
     recordDiagnosticEvent({
       source: 'app',
       category: 'transcription-cancel-requested',
@@ -613,17 +690,31 @@ function App() {
     })
     jobRef.current?.cancel()
     jobRef.current = null
+    activeTranscriptionRef.current = null
     livePreviewStateRef.current = null
+    subtitlesRef.current = activeTranscription.baseEntries
+    rollbackTransaction(activeTranscription.id)
     setBusy(false)
     setProgress((current) => ({
       stage: 'cancelled',
-      message: 'Transcription cancelled. Worker resources were released.',
+      message: 'Transcription cancelled. Previous subtitles and edit history were restored.',
       progress: current.progress,
     }))
+    setNotice({
+      tone: 'warning',
+      message: 'Transcription cancelled. The previous subtitles and edit history were restored.',
+    })
+    recordDiagnosticEvent({
+      source: 'app',
+      category: 'transcription-cancelled',
+      message: 'Full transcription was cancelled and its draft was discarded.',
+      level: 'warning',
+    })
   }
 
   const closeRegenerationDialog = (clearTimelineRange = false) => {
     regenerationJobRef.current?.cancel()
+    regenerationSequenceRef.current += 1
     regenerationJobRef.current = null
     setRegenerationBusy(false)
     setRegenerationDialog(null)
@@ -718,6 +809,9 @@ function App() {
   }
 
   const changeRegenerationPreferences = (nextPreferences: RegenerationPreferences) => {
+    if (projectLocked) {
+      return
+    }
     setRegenerationPreferences(nextPreferences)
     setRegenerationCandidates([])
     setRegenerationProgress(IDLE_REGENERATION_PROGRESS)
@@ -727,6 +821,9 @@ function App() {
   }
 
   const changeDialogRegenerationRange = (range: RegenerationRange) => {
+    if (projectLocked) {
+      return
+    }
     const origin = regenerationDialog?.origin ?? 'editor'
     setRegenerationDialog({ range, originalEntries: collectOriginalEntries(range), origin })
     if (origin === 'timeline') {
@@ -743,9 +840,11 @@ function App() {
     range: RegenerationRange,
     preferences: RegenerationPreferences,
   ) => {
-    if (!video || busy || regenerationBusy) {
+    if (!video || busy || regenerationBusy || regenerationJobRef.current) {
       return
     }
+
+    const regenerationId = ++regenerationSequenceRef.current
 
     const requestedSettings = buildRegenerationSettings(settings, preferences)
     const resolvedModel = resolveCompatibleModelId(requestedSettings)
@@ -787,18 +886,28 @@ function App() {
       progress: 0.01,
     })
 
-    const job = startBrowserWhisperRegeneration(
-      video.file,
-      transcriptionSettings,
-      range,
-      videoDuration,
-      preferences.alternativeCount,
-      { onProgress: setRegenerationProgress, onDiagnostic: recordDiagnosticEvent },
-    )
-    regenerationJobRef.current = job
-
+    let job: RegenerationJob | null = null
     try {
+      job = startBrowserWhisperRegeneration(
+        video.file,
+        transcriptionSettings,
+        range,
+        videoDuration,
+        preferences.alternativeCount,
+        {
+          onProgress: (nextProgress) => {
+            if (regenerationSequenceRef.current === regenerationId) {
+              setRegenerationProgress(nextProgress)
+            }
+          },
+          onDiagnostic: recordDiagnosticEvent,
+        },
+      )
+      regenerationJobRef.current = job
       const result = await job.done
+      if (regenerationSequenceRef.current !== regenerationId || regenerationJobRef.current !== job) {
+        return
+      }
       const candidates = result.candidates.flatMap((candidate): FormattedRegenerationCandidate[] => {
         const formattedEntries = formatTranscriptionSegments(
           candidate.segments,
@@ -839,6 +948,9 @@ function App() {
         },
       })
     } catch (error) {
+      if (regenerationSequenceRef.current !== regenerationId) {
+        return
+      }
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('cancelled')) {
         setRegenerationError(message)
@@ -856,12 +968,17 @@ function App() {
         data: { range, error: serializeAppError(error) },
       })
     } finally {
-      setRegenerationBusy(false)
-      regenerationJobRef.current = null
+      if (regenerationSequenceRef.current === regenerationId && regenerationJobRef.current === job) {
+        setRegenerationBusy(false)
+        regenerationJobRef.current = null
+      }
     }
   }
 
   const previewRegenerationCandidate = (entries: SubtitleEntry[], range: RegenerationRange) => {
+    if (projectLocked) {
+      return
+    }
     const formatting = regenerationRequestContext?.settings.formatting ?? settings.formatting
     const previewEntries = replaceEntriesInRange(
       subtitlesRef.current,
@@ -876,6 +993,9 @@ function App() {
   }
 
   const applyRegenerationCandidate = (entries: SubtitleEntry[] | null, range: RegenerationRange) => {
+    if (projectLocked) {
+      return
+    }
     const formatting = regenerationRequestContext?.settings.formatting ?? settings.formatting
     recordDiagnosticEvent({
       source: 'app',
@@ -899,8 +1019,25 @@ function App() {
   }
 
   const handleImportFile = async (file: File) => {
+    if (projectLocked) {
+      setNotice({ tone: 'warning', message: 'Wait for the active transcription job to finish or cancel it first.' })
+      return
+    }
+    const importSequence = ++importSequenceRef.current
+    const transcriptionSequence = transcriptionSequenceRef.current
+    const regenerationSequence = regenerationSequenceRef.current
     try {
       const content = await file.text()
+      if (
+        activeTranscriptionRef.current ||
+        regenerationJobRef.current ||
+        importSequenceRef.current !== importSequence ||
+        transcriptionSequenceRef.current !== transcriptionSequence ||
+        regenerationSequenceRef.current !== regenerationSequence
+      ) {
+        setNotice({ tone: 'warning', message: 'Import was not applied because subtitle processing changed while the file was loading.' })
+        return
+      }
 
       if (file.name.toLowerCase().endsWith('.json')) {
         const parsed = parseProjectJson(content)
@@ -953,6 +1090,10 @@ function App() {
   }
 
   const handleExport = (kind: 'srt' | 'vtt' | 'txt' | 'json') => {
+    if (projectLocked) {
+      setNotice({ tone: 'warning', message: 'Wait for the active transcription job to finish before exporting.' })
+      return
+    }
     const name = baseName(video?.file.name ?? 'auto-subtitle')
 
     try {
@@ -993,6 +1134,10 @@ function App() {
   }
 
   const handleGlobalVideoDrop = (files: File[]) => {
+    if (projectLocked) {
+      setNotice({ tone: 'warning', message: 'Wait for the active transcription job to finish or cancel it first.' })
+      return
+    }
     const result = findFirstValidVideoFile(files, {
       fileSizeWarningMb: FILE_SIZE_WARNING_MB,
       durationWarningMinutes: DURATION_WARNING_MINUTES,
@@ -1060,6 +1205,9 @@ function App() {
   }
 
   const reformatExisting = () => {
+    if (projectLocked) {
+      return
+    }
     commitSubtitleChanges(
       subtitles.map((entry) => ({
         ...entry,
@@ -1069,7 +1217,7 @@ function App() {
   }
 
   const restoreAutosave = () => {
-    if (!autosave) {
+    if (!autosave || projectLocked) {
       return
     }
 
@@ -1092,8 +1240,12 @@ function App() {
       <ProjectToolbar
         entryCount={subtitles.length}
         hasAutosave={Boolean(autosave)}
+        locked={projectLocked}
         theme={theme}
         onClearAutosave={() => {
+          if (projectLocked) {
+            return
+          }
           clearAutosave()
             .then(() => {
               setAutosave(null)
@@ -1108,6 +1260,9 @@ function App() {
             )
         }}
         onClearSubtitles={() => {
+          if (projectLocked) {
+            return
+          }
           if (window.confirm('Clear all subtitle entries? This can be undone only if you have not refreshed the app.')) {
             const livePreviewState = livePreviewStateRef.current
             if (livePreviewState) {
@@ -1183,15 +1338,20 @@ function App() {
               hasVideo={Boolean(video)}
               progress={progress}
               settings={settings}
-              locked={regenerationBusy}
+              locked={regenerationBusy || transactionActive || Boolean(regenerationDialog)}
               onCancel={handleCancelTranscription}
               onSettingsChange={handleSettingsChange}
               onStart={() => void handleStartTranscription()}
             />
 
             <FormattingPanel
+              disabled={projectLocked}
               preferences={settings.formatting}
-              onChange={(formatting) => setSettings((current) => ({ ...current, formatting }))}
+              onChange={(formatting) => {
+                if (!projectLocked) {
+                  setSettings((current) => ({ ...current, formatting }))
+                }
+              }}
               onReformat={reformatExisting}
             />
           </div>

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BASE_MODEL_ID,
   DISTIL_LARGE_V3_MODEL_ID,
+  getSpeechModelOption,
   getSpeechModelWarnings,
   isKnownSpeechModelId,
   isModelCompatibleWithSettings,
@@ -24,6 +25,8 @@ describe('speech model registry', () => {
   it('accepts every registered model id', () => {
     expect(SPEECH_MODELS).toHaveLength(4)
     expect(SPEECH_MODELS.every((model) => isKnownSpeechModelId(model.id))).toBe(true)
+    expect(getSpeechModelOption(DISTIL_LARGE_V3_MODEL_ID).supportsWordTimestamps).toBe(false)
+    expect(getSpeechModelOption(BASE_MODEL_ID).supportsWordTimestamps).toBe(true)
   })
 
   it('falls back to Base for an unknown model id', () => {

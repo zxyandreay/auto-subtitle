@@ -40,7 +40,7 @@ describe('transcription window timestamp normalization', () => {
     expect(segment?.endTime).toBe(30.4)
   })
 
-  it('assigns a boundary-crossing chunk to exactly one adjacent core', () => {
+  it('keeps a tiny boundary crossing owned by the earlier core', () => {
     const chunk = {
       startTime: 29.6,
       endTime: 30.4,
@@ -61,7 +61,7 @@ describe('transcription window timestamp normalization', () => {
     ).toBeNull()
   })
 
-  it('does not place a long left-overlap chunk into earlier silence', () => {
+  it('retains a substantial segment-only suffix that crosses into the current core', () => {
     const segment = placeChunkOnTimeline(
       {
         startTime: 1,
@@ -69,6 +69,46 @@ describe('transcription window timestamp normalization', () => {
         text: 'Speech recognized with long overlap context.',
       },
       {
+        offsetSeconds: 25,
+        coreStartTime: 30,
+        coreEndTime: 60,
+        retainCrossingSegmentSuffix: true,
+      },
+    )
+
+    expect(segment).toMatchObject({
+      startTime: 30,
+      endTime: 37,
+      text: 'Speech recognized with long overlap context.',
+    })
+  })
+
+  it('keeps substantial pre-range context out of bounded regeneration results', () => {
+    const segment = placeChunkOnTimeline(
+      {
+        startTime: 1,
+        endTime: 12,
+        text: 'Context before the selected range must not leak.',
+      },
+      {
+        offsetSeconds: 25,
+        coreStartTime: 30,
+        coreEndTime: 60,
+      },
+    )
+
+    expect(segment).toBeNull()
+  })
+
+  it('keeps word-timestamp ownership strict at the core boundary', () => {
+    const segment = placeChunkOnTimeline(
+      {
+        startTime: 1,
+        endTime: 12,
+        text: 'One imprecisely grouped word.',
+      },
+      {
+        timestampMode: 'word',
         offsetSeconds: 25,
         coreStartTime: 30,
         coreEndTime: 60,

@@ -8,10 +8,14 @@ export type RawTranscriptionSegment = {
   text: string
   confidence?: number
   words?: SubtitleWord[]
+  /** Internal evidence that a segment began in an overlap context before its owned window. */
+  boundaryContextPrefix?: boolean
 }
 
 const PROFESSIONAL_MIN_SUBTITLE_DURATION_SECONDS = 5 / 6
 const PAUSE_SPLIT_SECONDS = 0.35
+const CLAUSE_BOUNDARY_PAUSE_SECONDS = 0.2
+const LONG_PAUSE_SPLIT_SECONDS = 0.75
 const DUPLICATE_GAP_SECONDS = 0.75
 const TINY_GAP_SECONDS = 0.12
 const MAX_EXTENSION_PAST_AUDIO_SECONDS = 0.5
@@ -126,11 +130,22 @@ export function shiftEntries(entries: SubtitleEntry[], shiftMilliseconds: number
       const shiftedStart = clampTime(entry.startTime + shiftSeconds, duration)
       const shiftedEnd = clampTime(entry.endTime + shiftSeconds, duration)
       const minimumEnd = duration === undefined ? shiftedStart + 0.1 : Math.min(duration, shiftedStart + 0.1)
+      const finalEnd = Math.max(shiftedEnd, minimumEnd)
+      const shiftedWordCandidates = entry.words?.map((word) => {
+        const startTime = roundTime(Math.max(shiftedStart, clampTime(word.startTime + shiftSeconds, duration)))
+        const endTime = roundTime(Math.min(finalEnd, clampTime(word.endTime + shiftSeconds, duration)))
+
+        return endTime > startTime ? { ...word, startTime, endTime } : undefined
+      })
+      const shiftedWords = shiftedWordCandidates?.filter((word): word is SubtitleWord => Boolean(word))
+      const wordsRemainValid = shiftedWords?.length === shiftedWordCandidates?.length
 
       return {
         ...entry,
         startTime: shiftedStart,
-        endTime: Math.max(shiftedEnd, minimumEnd),
+        endTime: finalEnd,
+        confidence: wordsRemainValid ? entry.confidence : undefined,
+        words: wordsRemainValid ? shiftedWords : undefined,
       }
     }),
   )
@@ -310,7 +325,12 @@ export function optimizeGeneratedCaptions(
   const readable = improveGeneratedCaptionDurations(split, preferences, duration)
   const smoothed = smoothAbruptGeneratedCaptions(readable, preferences, duration)
   const rebalanced = improveGeneratedCaptionDurations(smoothed, preferences, duration)
-  return normalizeGeneratedCaptionOverlaps(rebalanced, preferences, duration)
+  const overlapNormalized = normalizeGeneratedCaptionOverlaps(rebalanced, preferences, duration)
+  // Resolving an overlap can squeeze a middle cue below the readable minimum.
+  // Give that newly abrupt fragment one final chance to merge with a compatible
+  // neighbor, then normalize once more to preserve monotonic, non-overlapping time.
+  const finallySmoothed = smoothAbruptGeneratedCaptions(overlapNormalized, preferences, duration, true)
+  return normalizeGeneratedCaptionOverlaps(finallySmoothed, preferences, duration)
 }
 
 export function calculateCharactersPerSecond(text: string, startTime: number, endTime: number): number {
@@ -452,10 +472,11 @@ function extendSegmentDurationsBeforeSplitting(
       return segment
     }
 
-    const nextStart = sorted[index + 1]?.startTime
+    const next = sorted[index + 1]
+    const minimumGap = next ? getMinimumPreservedGap(segment, next, preferences) : 0
     const maxEnd = Math.min(
       duration ?? Number.POSITIVE_INFINITY,
-      nextStart === undefined ? Number.POSITIVE_INFINITY : nextStart - preferences.gapBetweenSubtitles,
+      next === undefined ? Number.POSITIVE_INFINITY : next.startTime - minimumGap,
     )
     const desiredEnd = segment.startTime + calculateTotalReadableDuration(segment.text, preferences)
     const endTime = Math.min(maxEnd, Math.max(segment.endTime, desiredEnd))
@@ -585,10 +606,11 @@ function improveGeneratedCaptionDurations(
   const sorted = sortRawSegments(segments)
 
   return sorted.map((segment, index) => {
-    const nextStart = sorted[index + 1]?.startTime
+    const next = sorted[index + 1]
+    const minimumGap = next ? getMinimumPreservedGap(segment, next, preferences) : 0
     const maxEnd = Math.min(
       duration ?? Number.POSITIVE_INFINITY,
-      nextStart === undefined ? segment.startTime + preferences.maxDuration : nextStart - preferences.gapBetweenSubtitles,
+      next === undefined ? segment.startTime + preferences.maxDuration : next.startTime - minimumGap,
       segment.startTime + preferences.maxDuration,
     )
 
@@ -627,12 +649,17 @@ function smoothAbruptGeneratedCaptions(
   segments: RawTranscriptionSegment[],
   preferences: FormattingPreferences,
   duration?: number,
+  segmentOnly = false,
 ): RawTranscriptionSegment[] {
   const smoothed: RawTranscriptionSegment[] = []
 
   for (const segment of sortRawSegments(segments)) {
     const previous = smoothed.at(-1)
-    if (previous && shouldMergeAbruptCaptions(previous, segment, preferences, duration)) {
+    if (
+      previous &&
+      (!segmentOnly || (!previous.words?.length && !segment.words?.length)) &&
+      shouldMergeAbruptCaptions(previous, segment, preferences, duration)
+    ) {
       smoothed[smoothed.length - 1] = mergeRawSegments(previous, segment, duration)
       continue
     }
@@ -651,6 +678,10 @@ function shouldMergeAbruptCaptions(
 ): boolean {
   const gap = second.startTime - first.endTime
   if (gap < -preferences.gapBetweenSubtitles || gap > preferences.closeGapsBelow) {
+    return false
+  }
+
+  if (isMeaningfulGeneratedBoundary(first, second)) {
     return false
   }
 
@@ -737,7 +768,11 @@ function normalizeGeneratedCaptionOverlaps(
             next.startTime = shiftedStart
           }
         }
-      } else if (actualGap > preferences.gapBetweenSubtitles && actualGap < preferences.closeGapsBelow) {
+      } else if (
+        actualGap > preferences.gapBetweenSubtitles &&
+        actualGap < preferences.closeGapsBelow &&
+        !isMeaningfulGeneratedBoundary(previous, next)
+      ) {
         const chainedPreviousEnd = roundTime(next.startTime - preferences.gapBetweenSubtitles)
         if (canExtendCaptionEnd(previous, chainedPreviousEnd, preferences, duration)) {
           previous.endTime = chainedPreviousEnd
@@ -854,6 +889,9 @@ function findBestCaptionTextSplit(text: string, preferences: FormattingPreferenc
     ) {
       continue
     }
+    if (isAvoidableOneUnitCaption(first, second, capacity)) {
+      continue
+    }
 
     const score =
       Math.abs(first.length - target) +
@@ -885,6 +923,9 @@ function findPunctuationSplit(
       !isViableRecursivePart(first, text.length) ||
       !isViableRecursivePart(second, text.length)
     ) {
+      continue
+    }
+    if (isAvoidableOneUnitCaption(first, second, capacity)) {
       continue
     }
 
@@ -937,9 +978,10 @@ function findBestWordGroupEnd(
   const lastIndex = words.length - 1
   const remainingText = joinSubtitleWords(words.slice(startIndex).map((word) => word.text))
   const remainingDuration = words[lastIndex].endTime - words[startIndex].startTime
+  const preferredNaturalBoundary = findPreferredNaturalWordBoundary(words, startIndex)
 
   if (!needsSplitForReadability(remainingText, 0, remainingDuration, preferences)) {
-    return lastIndex
+    return preferredNaturalBoundary ?? lastIndex
   }
 
   let best: { index: number; score: number } | null = null
@@ -970,17 +1012,20 @@ function findBestWordGroupEnd(
       : 0
     const maxCaptionCharacters = getMaxGeneratedCaptionCharacters(preferences)
     const overLimitPenalty =
-      text.length > maxCaptionCharacters || groupDuration > preferences.maxDuration ? 400 : 0
+      text.length > maxCaptionCharacters || groupDuration > preferences.maxDuration ? 800 : 0
+    const oneWordFragmentPenalty =
+      (group.length <= 1 || remainingCount <= 1) && pauseAfter < LONG_PAUSE_SPLIT_SECONDS
+        ? 140
+        : 0
     const score =
       overLimitPenalty +
       readableShortfall * 90 +
       remainingShortfall * 45 +
       Math.abs(text.length - maxCaptionCharacters * 0.75) +
       phraseBreakPenalty(words[index].text, nextWord.text) +
-      (hasStrongPunctuation(words[index].text) ? -80 : 0) +
-      (hasSoftPunctuation(words[index].text) ? -45 : 0) +
-      (pauseAfter >= PAUSE_SPLIT_SECONDS ? -35 : 0) +
-      (group.length <= 1 || remainingCount <= 1 ? 70 : 0) +
+      wordBoundaryBonus(words[index].text, pauseAfter) +
+      (preferredNaturalBoundary === index ? -70 : 0) +
+      oneWordFragmentPenalty +
       (possibleDisplayDuration < getMinimumGeneratedCaptionDuration(preferences) && group.length > 1 ? 55 : 0)
 
     if (!best || score < best.score) {
@@ -989,6 +1034,56 @@ function findBestWordGroupEnd(
   }
 
   return best?.index ?? Math.min(lastIndex, startIndex + 1)
+}
+
+function findPreferredNaturalWordBoundary(words: SubtitleWord[], startIndex: number): number | null {
+  const lastIndex = words.length - 1
+  const totalText = joinSubtitleWords(words.slice(startIndex).map((word) => word.text))
+  const targetLength = totalText.length / 2
+  let best: { index: number; score: number } | null = null
+
+  for (let index = startIndex; index < lastIndex; index += 1) {
+    const pauseAfter = Math.max(0, words[index + 1].startTime - words[index].endTime)
+    const firstCount = index - startIndex + 1
+    const secondCount = lastIndex - index
+    const hasBalancedSides = firstCount >= 2 && secondCount >= 2
+    const isLongPause = pauseAfter + 0.001 >= LONG_PAUSE_SPLIT_SECONDS
+    const isNaturalBoundary =
+      isLongPause ||
+      (hasBalancedSides && pauseAfter + 0.001 >= PAUSE_SPLIT_SECONDS) ||
+      (
+        hasBalancedSides &&
+        hasStrongPunctuation(words[index].text) &&
+        pauseAfter + 0.001 >= CLAUSE_BOUNDARY_PAUSE_SECONDS
+      )
+    if (!isNaturalBoundary) {
+      continue
+    }
+
+    const firstText = joinSubtitleWords(words.slice(startIndex, index + 1).map((word) => word.text))
+    const score =
+      Math.abs(firstText.length - targetLength) +
+      phraseBreakPenalty(words[index].text, words[index + 1].text) +
+      wordBoundaryBonus(words[index].text, pauseAfter) +
+      (!isLongPause && (firstCount <= 1 || secondCount <= 1) ? 140 : 0)
+    if (!best || score < best.score) {
+      best = { index, score }
+    }
+  }
+
+  return best?.index ?? null
+}
+
+function wordBoundaryBonus(previousText: string, pauseAfter: number): number {
+  let bonus = hasStrongPunctuation(previousText) ? -85 : hasSoftPunctuation(previousText) ? -40 : 0
+  if (pauseAfter + 0.001 >= LONG_PAUSE_SPLIT_SECONDS) {
+    bonus -= 140
+  } else if (pauseAfter + 0.001 >= PAUSE_SPLIT_SECONDS) {
+    bonus -= 95
+  } else if (pauseAfter + 0.001 >= CLAUSE_BOUNDARY_PAUSE_SECONDS) {
+    bonus -= 30
+  }
+  return bonus
 }
 
 function chooseDuplicateSegment(
@@ -1133,6 +1228,30 @@ function getContentStartTime(segment: RawTranscriptionSegment): number {
 
 function getContentEndTime(segment: RawTranscriptionSegment): number {
   return segment.words?.at(-1)?.endTime ?? segment.endTime
+}
+
+function getMinimumPreservedGap(
+  first: RawTranscriptionSegment,
+  second: RawTranscriptionSegment,
+  preferences: FormattingPreferences,
+): number {
+  const contentGap = Math.max(0, getContentStartTime(second) - getContentEndTime(first))
+  const displayGap = Math.max(0, second.startTime - first.endTime)
+  let preferredGap = preferences.gapBetweenSubtitles
+
+  if (contentGap + 0.001 >= PAUSE_SPLIT_SECONDS || displayGap + 0.001 >= PAUSE_SPLIT_SECONDS) {
+    preferredGap = Math.min(PAUSE_SPLIT_SECONDS, displayGap)
+  }
+
+  return Math.max(preferences.gapBetweenSubtitles, preferredGap)
+}
+
+function isMeaningfulGeneratedBoundary(
+  first: RawTranscriptionSegment,
+  second: RawTranscriptionSegment,
+): boolean {
+  const contentGap = Math.max(0, getContentStartTime(second) - getContentEndTime(first))
+  return contentGap + 0.001 >= PAUSE_SPLIT_SECONDS
 }
 
 function canExtendCaptionEnd(
@@ -1364,6 +1483,16 @@ function orphanCaptionPenalty(first: string, second: string): number {
   const firstWords = first.split(/\s+/).filter(Boolean)
   const secondWords = second.split(/\s+/).filter(Boolean)
   return (firstWords.length <= 1 ? 35 : 0) + (secondWords.length <= 1 ? 55 : 0)
+}
+
+function isAvoidableOneUnitCaption(first: string, second: string, capacity: number): boolean {
+  const firstUnits = first.split(/\s+/u).filter(Boolean)
+  const secondUnits = second.split(/\s+/u).filter(Boolean)
+  const shortLength = Math.max(4, Math.min(18, capacity * 0.45))
+  return (
+    (firstUnits.length <= 1 && first.length <= shortLength && secondUnits.length >= 3) ||
+    (secondUnits.length <= 1 && second.length <= shortLength && firstUnits.length >= 3)
+  )
 }
 
 function sentenceMixingPenalty(first: string, second: string): number {

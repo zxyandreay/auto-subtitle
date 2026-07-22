@@ -9,7 +9,10 @@ import { constrainSegmentsToRange } from '../subtitles/regeneration'
 import { buildAudioExtractionArgs, type AudioExtractionRange } from '../transcription/audioExtraction'
 import { findUncoveredSpeechRanges } from '../transcription/coverage'
 import { reconcileBoundarySegments } from '../transcription/reconciliation'
-import { createRepairWindowPlans, selectRepairSegments } from '../transcription/repair'
+import {
+  createRepairWindowPlans,
+  selectRepairSegments,
+} from '../transcription/repair'
 import {
   getSpeechModelOption,
   resolveSpeechModelRuntimeSettings,
@@ -409,7 +412,7 @@ async function regenerate(
   const transcriber = await loadTranscriber(effectiveSettings)
 
   const candidates: RegenerationCandidate[] = []
-  let timestampMode: TimestampMode = effectiveSettings.formatting.useWordTimestamps ? 'word' : true
+  let timestampMode = getInitialTimestampMode(effectiveSettings)
 
   for (const [profileIndex, profile] of REGENERATION_DECODING_PROFILES.entries()) {
       assertNotCancelled()
@@ -619,7 +622,7 @@ async function transcribeInWindows(
 ): Promise<NormalizedAsrResult> {
   let allSegments: RawTranscriptionSegment[] = []
   let lastPostedSegments: RawTranscriptionSegment[] = []
-  let timestampMode: TimestampMode = settings.formatting.useWordTimestamps ? 'word' : true
+  let timestampMode = getInitialTimestampMode(settings)
 
   for (const window of windows) {
     assertNotCancelled()
@@ -639,9 +642,9 @@ async function transcribeInWindows(
       offsetSeconds: window.sliceStartTime,
       coreStartTime: window.coreStartTime,
       coreEndTime: window.coreEndTime,
+      retainCrossingSegmentSuffix: true,
       speechRegions,
     })
-
     const beforeReconciliation = allSegments.length
     allSegments = reconcileBoundarySegments(
       allSegments,
@@ -735,9 +738,10 @@ async function transcribeInWindows(
         speechRegions,
       })
       const gap = { startTime: repairWindow.gapStartTime, endTime: repairWindow.gapEndTime }
-      const recovered = selectRepairSegments(allSegments, normalized.segments, gap, {
+      const repairCandidates = selectRepairSegments(allSegments, normalized.segments, gap, {
         minimumSubtitleGapSeconds: settings.formatting.gapBetweenSubtitles,
       })
+      const recovered = repairCandidates
       postDiagnostic('repair-result', 'Captured a missed-speech repair result.', {
         repairIndex,
         repairWindow,
@@ -791,7 +795,11 @@ async function transcribeWindowWithTimestampFallback(
   timestampMode: TimestampMode,
   decodingProfile?: RegenerationDecodingProfile,
 ): Promise<TimestampAttempt> {
-  const options = createAsrCallOptions(settings, timestampMode, decodingProfile)
+  const options = createAsrCallOptions(
+    settings,
+    timestampMode,
+    decodingProfile,
+  )
 
   try {
     return {
@@ -824,6 +832,25 @@ async function transcribeWindowWithTimestampFallback(
       timestampMode: true,
     }
   }
+}
+
+function getInitialTimestampMode(settings: TranscriptionSettings): TimestampMode {
+  if (!settings.formatting.useWordTimestamps) {
+    return true
+  }
+
+  const model = getSpeechModelOption(settings.modelId)
+  if (model.supportsWordTimestamps) {
+    return 'word'
+  }
+
+  postDiagnostic(
+    'word-timestamp-model-limit',
+    `${model.shortLabel} does not expose the alignment data required for word timestamps; using segment timestamps without a failed retry.`,
+    { modelId: model.id, requestedTimestampMode: 'word', actualTimestampMode: true },
+    'warning',
+  )
+  return true
 }
 
 function createAsrCallOptions(
